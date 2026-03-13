@@ -5,7 +5,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR/.."
 
 echo "================================================"
-echo "  claude-pii-wrapper test suite"
+echo "  erebus test suite"
 echo "================================================"
 
 python tests/test_pii_filter.py
