@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "erebus"
+version = "0.2.0"
+description = "Privacy-first PII filter for AI code editors — tokenizes sensitive data before it reaches the AI, de-tokenizes responses"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "ETHUX" },
+]
+keywords = ["pii", "privacy", "claude", "ai", "security", "gdpr", "secrets"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "gliner>=0.2.0",
+    "ollama>=0.3.0",
+    "aiohttp>=3.9.0",
+    "httpx>=0.27.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ethux/erebus"
+Issues = "https://github.com/ethux/erebus/issues"
+
+[project.scripts]
+erebus = "erebus.shim:main"
+erebus-setup = "erebus.setup:main_install"
+erebus-uninstall = "erebus.setup:main_uninstall"
+erebus-log = "erebus.logger:main_log"
+erebus-daemon = "erebus.daemon:run_daemon"
+erebus-proxy = "erebus.proxy:main"
+erebus-reveal = "erebus.reveal:main"
+erebus-mcp = "erebus.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["erebus*"]
