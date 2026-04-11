@@ -14,11 +14,14 @@ Kill switch:
   EREBUS_BYPASS=1  — disable ALL filtering, pass through directly
 """
 
-import sys
-import os
+import atexit
 import json
+import os
+import signal
 import subprocess
+import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -185,8 +188,13 @@ def process_incoming(line: str) -> str:
     return restored + "\n"
 
 
-def pipe_stream(source, dest, processor):
-    """Read lines from source, process, write to dest."""
+def pipe_stream(source, dest, processor, close_dest_on_eof=False):
+    """Read lines from source, process, write to dest.
+
+    When close_dest_on_eof is set, dest is closed once source reaches EOF —
+    this is how we propagate VSCode closing our stdin to the claude child,
+    so it can shut down cleanly instead of hanging on a read.
+    """
     try:
         for line in source:
             if isinstance(line, bytes):
@@ -202,10 +210,20 @@ def pipe_stream(source, dest, processor):
             else:
                 dest.write(processed)
                 dest.flush()
+    except (BrokenPipeError, OSError):
+        pass  # destination closed — nothing we can do, just stop piping
     except Exception as e:
-        log_event(SESSION_ID, event_type="pipe_error",
-                  metadata={"error": str(e)})
-        raise
+        try:
+            log_event(SESSION_ID, event_type="pipe_error",
+                      metadata={"error": str(e)})
+        except Exception:
+            pass
+    finally:
+        if close_dest_on_eof:
+            try:
+                dest.close()
+            except Exception:
+                pass
 
 
 def main():
@@ -260,6 +278,41 @@ def _run_interactive(claude_args):
         os.execv(claude_args[0], claude_args)
 
 
+def _kill_child(proc: subprocess.Popen):
+    """Terminate the claude child if still running. Idempotent."""
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+    except Exception:
+        pass
+
+
+def _watch_parent(proc: subprocess.Popen, original_ppid: int):
+    """Detect parent death on macOS (no PR_SET_PDEATHSIG) by polling getppid().
+
+    If our parent (VSCode extension host) dies without closing stdin cleanly,
+    we get reparented to launchd (ppid=1). Kill the child and exit.
+    """
+    while True:
+        time.sleep(2)
+        try:
+            current_ppid = os.getppid()
+        except Exception:
+            return
+        if current_ppid != original_ppid or current_ppid == 1:
+            _kill_child(proc)
+            os._exit(0)
+
+
 def _run_piped(claude_args):
     """VSCode mode: pipe JSON, tokenize outgoing, detokenize incoming."""
     proc = subprocess.Popen(
@@ -269,9 +322,31 @@ def _run_piped(claude_args):
         stderr=sys.stderr,
     )
 
+    # Ensure the child dies with us, no matter how we exit.
+    atexit.register(_kill_child, proc)
+
+    def _on_signal(signum, _frame):
+        _kill_child(proc)
+        os._exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        try:
+            signal.signal(sig, _on_signal)
+        except (ValueError, OSError):
+            pass
+
+    # Watchdog: exit if parent (VSCode) dies without closing stdin cleanly.
+    threading.Thread(
+        target=_watch_parent,
+        args=(proc, os.getppid()),
+        daemon=True,
+    ).start()
+
+    # Input thread closes proc.stdin on EOF so claude can shut down.
     t_in = threading.Thread(
         target=pipe_stream,
         args=(sys.stdin, proc.stdin, process_outgoing),
+        kwargs={"close_dest_on_eof": True},
         daemon=True,
     )
 
@@ -284,7 +359,11 @@ def _run_piped(claude_args):
     t_in.start()
     t_out.start()
 
-    proc.wait()
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        _kill_child(proc)
+        sys.exit(130)
     sys.exit(proc.returncode)
 
 

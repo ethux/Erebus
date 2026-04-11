@@ -8,3 +8,4 @@ dist/
 .venv/
 .claude/
 .erebus/
+.pytest_cache/
