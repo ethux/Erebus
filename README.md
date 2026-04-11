@@ -115,6 +115,35 @@ erebus-setup --editor vibe
 
 GLiNER runs as a persistent daemon (Unix socket) — loaded once, shared across all sessions. Ministral 3B is optional and only invoked for contextual file access checks and screenshot scanning.
 
+## Filter modes
+
+Erebus supports three filter modes that control how aggressively PII is tokenized:
+
+| Mode | Names | Organizations | Secrets & structured PII |
+|------|-------|---------------|--------------------------|
+| **strict** | Full name tokenized | All orgs tokenized | Always tokenized |
+| **balanced** (default) | First name kept, last name tokenized | Single-word orgs kept, multi-word tokenized | Always tokenized |
+| **relaxed** | Names kept | Orgs kept | Always tokenized |
+
+Set the mode in `.erebus/pii-filter.json`:
+
+```json
+{
+  "mode": "balanced"
+}
+```
+
+**Examples** (balanced mode):
+
+| Input | Output |
+|-------|--------|
+| `Ask John Smith about it` | `Ask John [PERSON_1_a3f2c1] about it` |
+| `Send to Google` | `Send to Google` (single-word org — kept) |
+| `Contract with Acme Corp` | `Contract with [ORGANIZATION_1_b4d2e1]` (multi-word org — tokenized) |
+| `password: Secret123!` | `[PASSWORD_1_c5e3f1]` (always tokenized) |
+
+Secrets (API keys, tokens, passwords, IBANs, emails, etc.) are **always tokenized** regardless of mode.
+
 ## Per-repo config
 
 Add `.erebus/pii-filter.json` to any repo:
@@ -129,6 +158,7 @@ Add `.erebus/pii-filter.json` to any repo:
     "**/contracts/**",
     "**/partner-data/**"
   ],
+  "mode": "balanced",
   "log_enabled": true
 }
 ```
@@ -137,6 +167,7 @@ Add `.erebus/pii-filter.json` to any repo:
 - `allowed_names` — values to never tokenize (public names, tools, services)
 - `block_file_patterns` — files the editor is never allowed to read
 - `context` — description of the project for the file guard LLM
+- `mode` — filter aggressiveness: `strict`, `balanced` (default), or `relaxed`
 
 ## Inline escape
 
@@ -146,7 +177,15 @@ Append `~` to a word to prevent it from being tokenized in that message:
 Send this to Mistral~ — they need it for the Vibe~ release
 ```
 
-For multi-word names, the `~` escapes both words: `John Smith~` escapes "John", "Smith", and "John Smith".
+Works with punctuation: `Smith~.` `Smith~,` `Smith~)` — the `~` is stripped and the word passes through.
+
+For multi-word names, the `~` escapes up to 4 preceding words:
+
+```
+Ask Jan Willem de Vries~ about the contract
+```
+
+This escapes "Jan", "Willem", "de", "Vries", and all combined phrases like "Jan Willem de Vries".
 
 ## View logs
 
