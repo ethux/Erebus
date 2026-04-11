@@ -43,7 +43,7 @@ def _persist_token_map():
 
 def _tokenize_text(text: str, source: str = "user") -> str:
     """Tokenize a string, update TOKEN_MAP, log if needed. Returns sanitized text."""
-    sanitized, new_tokens = tokenize(text, REPO_CONFIG.sensitive_entities)
+    sanitized, new_tokens = tokenize(text, REPO_CONFIG.sensitive_entities, mode=REPO_CONFIG.mode)
     if new_tokens:
         TOKEN_MAP.update(new_tokens)
         _persist_token_map()
@@ -54,7 +54,7 @@ def _tokenize_text(text: str, source: str = "user") -> str:
                 raw=text,
                 sanitized=sanitized,
                 tokens_map=new_tokens,
-                metadata={"cwd": CWD, "source": source, "token_count": len(new_tokens)},
+                metadata={"cwd": CWD, "source": source, "mode": REPO_CONFIG.mode, "token_count": len(new_tokens)},
             )
     return sanitized if new_tokens else text
 
@@ -82,7 +82,7 @@ def process_outgoing(line: str) -> str:
         # User-typed text
         if block.get("type") == "text":
             original = block["text"]
-            sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names)
+            sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode)
             if new_tokens:
                 any_pii = True
                 TOKEN_MAP.update(new_tokens)
@@ -103,7 +103,7 @@ def process_outgoing(line: str) -> str:
         elif block.get("type") == "tool_result":
             content = block.get("content", "")
             if isinstance(content, str) and content:
-                sanitized, new_tokens = tokenize(content, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names)
+                sanitized, new_tokens = tokenize(content, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode)
                 if new_tokens:
                     any_pii = True
                     TOKEN_MAP.update(new_tokens)
@@ -117,13 +117,13 @@ def process_outgoing(line: str) -> str:
                             raw=content[:500],
                             sanitized=sanitized[:500],
                             tokens_map=new_tokens,
-                            metadata={"cwd": CWD, "source": "tool_result", "token_count": len(new_tokens)},
+                            metadata={"cwd": CWD, "source": "tool_result", "mode": REPO_CONFIG.mode, "token_count": len(new_tokens)},
                         )
             elif isinstance(content, list):
                 for sub in content:
                     if isinstance(sub, dict) and sub.get("type") == "text":
                         original = sub["text"]
-                        sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names)
+                        sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode)
                         if new_tokens:
                             any_pii = True
                             TOKEN_MAP.update(new_tokens)
@@ -230,6 +230,7 @@ def main():
 
     log_event(SESSION_ID, event_type="session_start",
               metadata={"cwd": CWD, "args": sys.argv[1:],
+                        "mode": REPO_CONFIG.mode,
                         "repo_config": REPO_CONFIG.__dict__})
 
     if sys.stdin.isatty():
