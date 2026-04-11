@@ -58,6 +58,8 @@ def tail_log(n: int = 20):
         print(f"{icon}  [{ts}] [{sid}] {etype.upper()}")
         if tokens:
             print(f"   Tokens replaced: {', '.join(tokens.keys())}")
+        if meta.get("mode"):
+            print(f"   mode: {meta['mode']}")
         if meta.get("cwd"):
             print(f"   cwd: {meta['cwd']}")
         if sanitized:
