@@ -9,12 +9,37 @@ Two-layer approach:
 
 Story leak detection (contextual/narrative PII) is handled separately
 by Ministral in guards/files.py — it's slower and only runs when needed.
+
+Filter modes:
+  - strict:   tokenize everything — full names, orgs, all entity types
+  - balanced: keep first names, tokenize last names and orgs with >1 word
+  - relaxed:  only tokenize structured PII (emails, IBANs, keys, etc.) — skip names/orgs
 """
 
 import fnmatch
 import re
 import uuid
 from functools import lru_cache
+
+# ── Filter modes ─────────────────────────────────────────────────────────────
+
+MODES = ("strict", "balanced", "relaxed")
+DEFAULT_MODE = "balanced"
+
+# Entity types that are always tokenized regardless of mode (structured PII / secrets)
+_ALWAYS_TOKENIZE = {
+    "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD_NUMBER",
+    "SOCIAL_SECURITY_NUMBER", "IBAN", "PASSPORT_NUMBER",
+    "BANK_ACCOUNT_NUMBER", "DATE_OF_BIRTH", "IP_ADDRESS",
+    # Regex-detected secrets
+    "API_KEY", "GITHUB_TOKEN", "GITLAB_TOKEN", "SLACK_TOKEN",
+    "AWS_KEY", "PRIVATE_KEY", "PASSWORD", "SECRET", "TOKEN",
+    # Custom entities
+    "SENSITIVE",
+}
+
+# Entity types affected by mode
+_MODE_AFFECTED = {"PERSON", "ORGANIZATION", "USERNAME", "ADDRESS"}
 
 # ── Regex: secrets and credentials ────────────────────────────────────────────
 
@@ -132,34 +157,139 @@ def _filter_entities(entities: list[dict]) -> list[dict]:
     return filtered
 
 
+# ── Escape handling ───────────────────────────────────────────────────────────
+
+_ESCAPE_RE = re.compile(r'(\S+)~([)\]}"\'`.,:;!?]*)(?=\s|$)')
+_PUNCTUATION_LEFT = "\"'`([{"
+_PUNCTUATION_RIGHT = "\"'`)]}.,:;!?"
+_MULTIWORD_ESCAPE_LOOKBACK = 4
+
+
+def _strip_punctuation(word: str) -> str:
+    """Strip surrounding quotes, parens, brackets, and trailing punctuation."""
+    return word.lstrip(_PUNCTUATION_LEFT).rstrip(_PUNCTUATION_RIGHT)
+
+
+def _parse_escapes(text: str) -> tuple[set[str], str]:
+    """
+    Parse ~ escape markers from text.
+
+    Returns (escaped_words, cleaned_text). The cleaned text has all ~ markers
+    stripped while preserving surrounding punctuation.
+
+    Handles:
+      - Trailing punctuation: "Smith~." "Smith~," "Smith~)"
+      - Multi-word names: walks back up to _MULTIWORD_ESCAPE_LOOKBACK words
+        so "Jan Willem de Vries~" escapes each part and all combined phrases
+      - Surrounding quotes: ("Smith~") escapes "smith", not '"smith'
+    """
+    escaped: set[str] = set()
+
+    for m in _ESCAPE_RE.finditer(text):
+        clean = _strip_punctuation(m.group(1)).lower()
+        if clean:
+            escaped.add(clean)
+
+    # Multi-word escape: walk back through preceding words and register both
+    # individual words and the combined phrases (so GLiNER's multi-word span
+    # match is also caught).
+    words = text.split()
+    for i, w in enumerate(words):
+        if '~' not in w:
+            continue
+        clean_current = _strip_punctuation(w.replace('~', '')).lower()
+        if not clean_current:
+            continue
+        phrase = [clean_current]
+        for j in range(1, min(_MULTIWORD_ESCAPE_LOOKBACK + 1, i + 1)):
+            prev = _strip_punctuation(words[i - j].replace('~', '')).lower()
+            if not prev:
+                break
+            phrase.insert(0, prev)
+            escaped.add(prev)
+            escaped.add(' '.join(phrase))
+
+    cleaned = _ESCAPE_RE.sub(r'\1\2', text)
+    return escaped, cleaned
+
+
+# ── Mode-aware entity filtering ──────────────────────────────────────────────
+
+def _should_tokenize_entity(label: str, text: str, mode: str) -> bool:
+    """
+    Decide whether to tokenize an entity based on the filter mode.
+
+    strict:   tokenize everything GLiNER detects
+    balanced: keep single-word person names and single-word orgs
+    relaxed:  skip all names and orgs (secrets still caught by regex)
+
+    Secrets and structured PII (emails, IBANs, etc.) are always tokenized
+    regardless of mode — this is enforced by _ALWAYS_TOKENIZE.
+    """
+    norm_label = label.upper().replace(" ", "_")
+
+    if norm_label in _ALWAYS_TOKENIZE:
+        return True
+    if norm_label not in _MODE_AFFECTED:
+        return mode != "relaxed"
+    if mode == "strict":
+        return True
+    if mode == "relaxed":
+        return False
+
+    # Balanced mode: keep single-word names/orgs, tokenize multi-word ones.
+    # For PERSON specifically, tokenize() swaps in _balanced_name_replacement
+    # which only replaces the last name.
+    word_count = len(text.strip().split())
+    if norm_label in ("PERSON", "ORGANIZATION"):
+        return word_count > 1
+    return True
+
+
+def _balanced_name_replacement(real_value: str, counters: dict) -> tuple[str, str, dict]:
+    """
+    In balanced mode, replace only the last name in a multi-word person name.
+    Returns (replacement_text, token, token_map_entry) or None if no replacement needed.
+    """
+    parts = real_value.strip().split()
+    if len(parts) <= 1:
+        return None  # single name — don't tokenize
+
+    first_parts = ' '.join(parts[:-1])
+    last_name = parts[-1]
+
+    counters["PERSON"] = counters.get("PERSON", 0) + 1
+    uid = uuid.uuid4().hex[:6]
+    token = f"[PERSON_{counters['PERSON']}_{uid}]"
+
+    replacement = f"{first_parts} {token}"
+    return replacement, token, last_name
+
+
+# ── Main tokenize/detokenize ─────────────────────────────────────────────────
+
 def tokenize(text: str, extra_entities: list[str] = None,
-             allowed_names: list[str] = None) -> tuple[str, dict]:
+             allowed_names: list[str] = None,
+             mode: str = DEFAULT_MODE) -> tuple[str, dict]:
     """
     Replace PII and secrets with reversible tokens.
     Returns (tokenized_text, token_map).
     Falls back to regex-only if GLiNER is not installed.
     Values in allowed_names are never tokenized.
+
+    Modes:
+      strict   — tokenize all detected PII
+      balanced — keep first names, tokenize last names; keep single-word orgs
+      relaxed  — only tokenize structured PII (emails, IBANs, keys, etc.)
     """
+    if mode not in MODES:
+        mode = DEFAULT_MODE
+
     token_map = {}
     counters = {}
 
-    # Escape character: append ~ to a word to mark it as allowed
-    # e.g. "Send this to Erebus~" — the ~ is stripped and "Erebus" passes through
-    # For multi-word names: "John Smith~" escapes both "John" and "Smith" individually,
-    # and also the combined phrase so GLiNER's span match is caught too.
-    escaped = set()
-    escape_re = re.findall(r'(\S+)~(?=\s|$)', text)
-    for word in escape_re:
-        escaped.add(word.lower())
-    # Also escape the word before the escaped word (covers "FirstName LastName~")
-    words = text.split()
-    for i, w in enumerate(words):
-        if w.endswith('~') and i > 0:
-            prev = words[i - 1].rstrip('~').lower()
-            combined = prev + ' ' + w.rstrip('~').lower()
-            escaped.add(prev)
-            escaped.add(combined)
-    result = re.sub(r'(\S+)~(?=\s|$)', r'\1', text)  # strip the ~ markers
+    # ── Parse escape markers (~) ──────────────────────────────────────────────
+    escaped, result = _parse_escapes(text)
 
     all_allowed = [a.lower() for a in DEFAULT_ALLOWED] + [a.lower() for a in (allowed_names or [])]
     _exact = {a for a in all_allowed if "*" not in a and "?" not in a}
@@ -179,25 +309,39 @@ def tokenize(text: str, extra_entities: list[str] = None,
         return False
 
     # Step 1: GLiNER NER (fast, multilingual)
+    # Run GLiNER on the cleaned text (~ stripped) so offsets match `result`
     try:
-        entities = _predict_entities(text)
+        entities = _predict_entities(result)
         # Process right-to-left so replacements don't shift offsets
         for ent in sorted(entities, key=lambda e: e["start"], reverse=True):
-            real_value = text[ent["start"]:ent["end"]]
+            real_value = result[ent["start"]:ent["end"]]
             if _is_allowed(real_value):
                 continue
             label = ent["label"].upper().replace(" ", "_")
-            counters[label] = counters.get(label, 0) + 1
-            uid = uuid.uuid4().hex[:6]
-            token = f"[{label}_{counters[label]}_{uid}]"
-            token_map[token] = real_value
-            result = result[:ent["start"]] + token + result[ent["end"]:]
+
+            if not _should_tokenize_entity(label, real_value, mode):
+                continue
+
+            # Balanced mode: for person names, only replace the last name
+            if mode == "balanced" and label == "PERSON":
+                bal = _balanced_name_replacement(real_value, counters)
+                if bal is None:
+                    continue  # single name — skip
+                replacement, token, last_name = bal
+                token_map[token] = last_name
+                result = result[:ent["start"]] + replacement + result[ent["end"]:]
+            else:
+                counters[label] = counters.get(label, 0) + 1
+                uid = uuid.uuid4().hex[:6]
+                token = f"[{label}_{counters[label]}_{uid}]"
+                token_map[token] = real_value
+                result = result[:ent["start"]] + token + result[ent["end"]:]
     except ImportError:
         pass  # gliner not installed — regex-only mode
     except Exception:
         pass  # model error — degrade gracefully
 
-    # Step 2: Regex secrets (always runs, instant)
+    # Step 2: Regex secrets (always runs regardless of mode — secrets are always sensitive)
     for pattern, label in SECRET_PATTERNS:
         def _replace(m, lbl=label):
             counters[lbl] = counters.get(lbl, 0) + 1

@@ -55,6 +55,7 @@ class RepoConfig:
     context: str = ""
     block_file_patterns: list[str] = field(default_factory=list)  # e.g. ["**/contracts/**", "**/.env*"]
     log_enabled: bool = True
+    mode: str = "balanced"  # strict | balanced | relaxed
 
 def load_repo_config(cwd: Optional[str] = None) -> RepoConfig:
     """Load per-repo config from .erebus/pii-filter.json (falls back to .claude/pii-filter.json)."""
