@@ -80,6 +80,38 @@ def _detokenize_text(text: str) -> str:
     return detokenize(text, TOKEN_MAP)
 
 
+def _log_usage_from_response(data: dict):
+    """Extract and log token usage from a non-streaming API response body.
+
+    Normalizes Anthropic (input_tokens/output_tokens/cache_*) and OpenAI
+    (prompt_tokens/completion_tokens) shapes into the same four-field log.
+    Only invoked for final, complete responses — no delta double-counting.
+    """
+    if not isinstance(data, dict):
+        return
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return
+
+    counts = {
+        "input_tokens": int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0),
+        "output_tokens": int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0),
+        "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens", 0) or 0),
+        "cache_read_input_tokens": int(usage.get("cache_read_input_tokens", 0) or 0),
+    }
+    if not any(counts.values()):
+        return
+
+    metadata = {"cwd": os.getcwd(), "source": "proxy", **counts}
+    if data.get("model"):
+        metadata["model"] = data["model"]
+    cc = usage.get("cache_creation")
+    if isinstance(cc, dict):
+        metadata["cache_creation"] = cc
+
+    log_event(SESSION_ID, event_type="token_usage", metadata=metadata)
+
+
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
     """Proxy any request, tokenizing PII in chat completions."""
     target_base = _get_target_url(request)
@@ -133,20 +165,30 @@ async def _handle_regular(client, method, url, headers, body, is_chat, repo_conf
 
     # Detokenize response body if it's a chat completion
     resp_body = resp.content
-    if is_chat and TOKEN_MAP:
+    if is_chat:
         try:
             data = json.loads(resp_body)
-            raw = json.dumps(data)
-            restored = _detokenize_text(raw)
-            if raw != restored:
-                data = json.loads(restored)
-                resp_body = json.dumps(data).encode()
-                if repo_config.log_enabled:
-                    log_event(SESSION_ID, event_type="response",
-                              sanitized=raw[:500], raw=restored[:500],
-                              metadata={"cwd": os.getcwd(), "source": "proxy"})
-        except (json.JSONDecodeError, KeyError):
-            pass
+        except (json.JSONDecodeError, ValueError):
+            data = None
+
+        # Token usage logging — runs for every chat completion regardless of
+        # whether PII was detected. Source of truth for token counts.
+        if data is not None and repo_config.log_enabled:
+            _log_usage_from_response(data)
+
+        if data is not None and TOKEN_MAP:
+            try:
+                raw = json.dumps(data)
+                restored = _detokenize_text(raw)
+                if raw != restored:
+                    data = json.loads(restored)
+                    resp_body = json.dumps(data).encode()
+                    if repo_config.log_enabled:
+                        log_event(SESSION_ID, event_type="response",
+                                  sanitized=raw[:500], raw=restored[:500],
+                                  metadata={"cwd": os.getcwd(), "source": "proxy"})
+            except (json.JSONDecodeError, KeyError):
+                pass
 
     response = web.Response(
         status=resp.status_code,
@@ -176,6 +218,10 @@ async def _handle_streaming(client, method, url, headers, body, repo_config,
     content_buffer = ""     # raw tokenized text accumulated so far
     emitted_len = 0         # how many chars of detokenized output we've already sent
     has_tokens = bool(TOKEN_MAP)
+    # Streaming usage: Anthropic and OpenAI both emit cumulative usage in
+    # the final chunk(s). We capture the latest non-empty one and log once
+    # on stream close.
+    final_usage_data: dict = {}
 
     async with client.stream(method, url, headers=headers, content=body) as resp:
         response.set_status(resp.status_code)
@@ -203,6 +249,9 @@ async def _handle_streaming(client, method, url, headers, body, repo_config,
                     if remaining:
                         done_chunk = {"choices": [{"delta": {"content": remaining}}]}
                         await response.write(f"data: {json.dumps(done_chunk)}\n".encode())
+                if final_usage_data and repo_config.log_enabled:
+                    _log_usage_from_response(final_usage_data)
+                    final_usage_data = {}  # prevent double-log via fallback
                 await response.write(f"{line}\n".encode())
                 continue
 
@@ -211,6 +260,13 @@ async def _handle_streaming(client, method, url, headers, body, repo_config,
             except json.JSONDecodeError:
                 await response.write(f"{line}\n".encode())
                 continue
+
+            # Track cumulative usage from each chunk — the last non-empty
+            # wins (Anthropic's message_delta carries final totals; OpenAI
+            # emits a final chunk with usage when stream_options requests it).
+            chunk_usage = chunk.get("usage") if isinstance(chunk, dict) else None
+            if isinstance(chunk_usage, dict) and any(v for v in chunk_usage.values() if isinstance(v, int)):
+                final_usage_data = {"usage": chunk_usage, "model": chunk.get("model")}
 
             if not has_tokens:
                 await response.write(f"data: {json.dumps(chunk)}\n".encode())
@@ -248,6 +304,10 @@ async def _handle_streaming(client, method, url, headers, body, repo_config,
                 await response.write(f"data: {json.dumps(chunk)}\n".encode())
                 emitted_len = safe_end
             # else: buffering — don't emit this chunk yet
+
+    # Fallback flush for streams that end without an explicit [DONE] marker.
+    if final_usage_data and repo_config.log_enabled:
+        _log_usage_from_response(final_usage_data)
 
     return response
 

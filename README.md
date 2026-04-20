@@ -190,9 +190,34 @@ This escapes "Jan", "Willem", "de", "Vries", and all combined phrases like "Jan 
 ## View logs
 
 ```bash
-erebus-log           # last 20 events
-erebus-log -n 50     # last 50 events
+erebus-log                    # last 20 events
+erebus-log -n 50              # last 50 events
 ```
+
+## Token usage
+
+Every turn through Erebus is logged with its full Anthropic / OpenAI `usage` block — input, output, cache creation, cache read — so you can track spend and cache efficiency across all your sessions.
+
+```bash
+erebus-log --usage                    # all-time totals + top 5 sessions
+erebus-log --usage --days 7           # last 7 days
+erebus-log --usage --session abc12345 # one session
+```
+
+Output:
+
+```
+  turns logged:         42
+  input_tokens                                 1,204
+  output_tokens                                8,931
+  cache_creation_input_tokens                102,450
+  cache_read_input_tokens                  3,881,002
+  ────────────────────────────────────────────────
+  TOTAL                                    3,993,587
+  cache hit ratio                              95.1%
+```
+
+Usage tracking is independent of PII detection — every API turn is counted, even in sessions where nothing was tokenized.
 
 ## Uninstall
 
