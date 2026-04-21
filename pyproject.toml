@@ -41,6 +41,7 @@ erebus-daemon = "erebus.daemon:run_daemon"
 erebus-proxy = "erebus.proxy:main"
 erebus-reveal = "erebus.reveal:main"
 erebus-mcp = "erebus.mcp_server:main"
+erebus-blacklist = "erebus.blacklist:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
