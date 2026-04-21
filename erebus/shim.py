@@ -167,14 +167,22 @@ def process_outgoing(line: str) -> str:
 def process_incoming(line: str) -> str:
     """
     Process a line going FROM Claude TO VSCode.
-    De-tokenizes any tokens back to real values.
+    De-tokenizes any tokens back to real values, and logs API token usage
+    for every response message that carries a `usage` block.
     """
-    if not TOKEN_MAP:
-        return line
-
     try:
         msg = json.loads(line)
     except json.JSONDecodeError:
+        return line
+
+    # Token usage logging — runs for every message that carries a usage block,
+    # regardless of whether PII was detected. This is our source of truth for
+    # input/output/cache token counts; chat transcripts are NOT sufficient
+    # because cache-read tokens aren't visible in the text at all.
+    if REPO_CONFIG.log_enabled:
+        _log_usage_if_present(msg)
+
+    if not TOKEN_MAP:
         return line
 
     raw = json.dumps(msg)
@@ -186,6 +194,63 @@ def process_incoming(line: str) -> str:
                   tokens_map=TOKEN_MAP, metadata={"cwd": CWD})
 
     return restored + "\n"
+
+
+def _log_usage_if_present(msg: dict):
+    """Extract `usage` from an Anthropic stream message and log it — once per turn.
+
+    Anthropic streams cumulative usage across many message_delta events, so we
+    only log when the message is final (has `stop_reason`). That gives exactly
+    one token_usage event per API turn with the complete totals.
+    """
+    if not isinstance(msg, dict):
+        return
+
+    usage = None
+    model = None
+    is_final = False
+
+    # Claude Code wrapper: {"type": "assistant", "message": {...}}
+    # This wrapper format is always a complete turn — not a streaming delta —
+    # so log whenever usage is present regardless of stop_reason.
+    inner = msg.get("message")
+    if isinstance(inner, dict):
+        u = inner.get("usage")
+        if isinstance(u, dict):
+            usage = u
+            model = inner.get("model")
+            is_final = True
+    # Raw Anthropic message_delta: usage + delta.stop_reason at top level
+    if usage is None:
+        u = msg.get("usage")
+        if isinstance(u, dict):
+            usage = u
+            model = msg.get("model")
+            delta = msg.get("delta")
+            if isinstance(delta, dict) and delta.get("stop_reason") is not None:
+                is_final = True
+            elif msg.get("type") == "message_start":
+                # message_start carries initial input/cache counts — log it too,
+                # output_tokens will be 0 but we still want the input side.
+                is_final = True
+
+    if not usage or not is_final:
+        return
+
+    fields = ("input_tokens", "output_tokens",
+              "cache_creation_input_tokens", "cache_read_input_tokens")
+    counts = {f: int(usage.get(f, 0) or 0) for f in fields}
+    if not any(counts.values()):
+        return
+
+    metadata = {"cwd": CWD, **counts}
+    if model:
+        metadata["model"] = model
+    cc = usage.get("cache_creation")
+    if isinstance(cc, dict):
+        metadata["cache_creation"] = cc
+
+    log_event(SESSION_ID, event_type="token_usage", metadata=metadata)
 
 
 def pipe_stream(source, dest, processor, close_dest_on_eof=False):
