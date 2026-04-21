@@ -46,7 +46,7 @@ def _persist_token_map():
 
 def _tokenize_text(text: str, source: str = "user") -> str:
     """Tokenize a string, update TOKEN_MAP, log if needed. Returns sanitized text."""
-    sanitized, new_tokens = tokenize(text, REPO_CONFIG.sensitive_entities, mode=REPO_CONFIG.mode)
+    sanitized, new_tokens = tokenize(text, REPO_CONFIG.sensitive_entities, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist)
     if new_tokens:
         TOKEN_MAP.update(new_tokens)
         _persist_token_map()
@@ -85,7 +85,7 @@ def process_outgoing(line: str) -> str:
         # User-typed text
         if block.get("type") == "text":
             original = block["text"]
-            sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode)
+            sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist)
             if new_tokens:
                 any_pii = True
                 TOKEN_MAP.update(new_tokens)
@@ -106,7 +106,7 @@ def process_outgoing(line: str) -> str:
         elif block.get("type") == "tool_result":
             content = block.get("content", "")
             if isinstance(content, str) and content:
-                sanitized, new_tokens = tokenize(content, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode)
+                sanitized, new_tokens = tokenize(content, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist)
                 if new_tokens:
                     any_pii = True
                     TOKEN_MAP.update(new_tokens)
@@ -126,7 +126,7 @@ def process_outgoing(line: str) -> str:
                 for sub in content:
                     if isinstance(sub, dict) and sub.get("type") == "text":
                         original = sub["text"]
-                        sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode)
+                        sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist)
                         if new_tokens:
                             any_pii = True
                             TOKEN_MAP.update(new_tokens)

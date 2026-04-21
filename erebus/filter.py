@@ -270,7 +270,8 @@ def _balanced_name_replacement(real_value: str, counters: dict) -> tuple[str, st
 
 def tokenize(text: str, extra_entities: list[str] = None,
              allowed_names: list[str] = None,
-             mode: str = DEFAULT_MODE) -> tuple[str, dict]:
+             mode: str = DEFAULT_MODE,
+             blacklist: list[str] = None) -> tuple[str, dict]:
     """
     Replace PII and secrets with reversible tokens.
     Returns (tokenized_text, token_map).
@@ -361,7 +362,70 @@ def tokenize(text: str, extra_entities: list[str] = None,
                 token_map[token] = entity
                 result = result.replace(entity, token)
 
+    # Step 4: Hard blacklist — case-insensitive whole-word/phrase match, always
+    # tokenized regardless of mode. This is the GDPR-safe layer: terms listed
+    # in ~/.erebus/blacklist.txt or .erebus/blacklist.txt never reach the AI.
+    # Token shape is [BLACKLIST_<KIND>_<N>_<uid>] so Claude has a hint about
+    # the semantic type without seeing the value.
+    if blacklist:
+        for term in blacklist:
+            term = term.strip()
+            if not term:
+                continue
+            kind = _classify_blacklist_term(term)
+            counter_key = f"BLACKLIST_{kind}"
+            pattern = re.compile(
+                rf"(?<!\w){re.escape(term)}(?!\w)",
+                flags=re.IGNORECASE,
+            )
+            def _replace(m, k=kind, ck=counter_key):
+                counters[ck] = counters.get(ck, 0) + 1
+                uid = uuid.uuid4().hex[:6]
+                tok = f"[BLACKLIST_{k}_{counters[ck]}_{uid}]"
+                token_map[tok] = m.group(0)  # preserve original casing
+                return tok
+            result = pattern.sub(_replace, result)
+
     return result, token_map
+
+
+# ── Blacklist term classification ─────────────────────────────────────────────
+
+_BLACKLIST_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_BLACKLIST_IBAN_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$")
+_BLACKLIST_CC_RE = re.compile(r"^\d{12,19}$")
+_BLACKLIST_PHONE_RE = re.compile(r"^\+?[\d\s\-().]{7,}$")
+_BLACKLIST_IP_RE = re.compile(
+    r"^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-fA-F:]+$"
+)
+
+
+def _classify_blacklist_term(term: str) -> str:
+    """Infer the semantic kind of a blacklisted term for its token label.
+
+    Heuristic only — we don't hit GLiNER here because blacklist terms are
+    already known-sensitive by definition; the label is purely a hint for
+    the AI about what shape of value to expect in the token's place.
+    """
+    s = term.strip()
+    if not s:
+        return "VALUE"
+    if _BLACKLIST_EMAIL_RE.match(s):
+        return "EMAIL"
+    # IP must come before PHONE — "192.168.1.15" matches the permissive phone
+    # regex otherwise.
+    if _BLACKLIST_IP_RE.match(s):
+        return "IP"
+    compact = s.replace(" ", "").replace("-", "")
+    if _BLACKLIST_IBAN_RE.match(compact.upper()):
+        return "IBAN"
+    digits_only = re.sub(r"\D", "", s)
+    if _BLACKLIST_CC_RE.match(digits_only) and len(digits_only) in (13, 14, 15, 16, 19):
+        return "CREDIT_CARD"
+    if _BLACKLIST_PHONE_RE.match(s) and len(digits_only) >= 7:
+        return "PHONE"
+    # Default: names, company names, project codenames, free-form strings.
+    return "PERSON"
 
 
 def detokenize(text: str, token_map: dict) -> str:

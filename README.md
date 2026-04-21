@@ -169,6 +169,39 @@ Add `.erebus/pii-filter.json` to any repo:
 - `context` — description of the project for the file guard LLM
 - `mode` — filter aggressiveness: `strict`, `balanced` (default), or `relaxed`
 
+## Hard blacklist
+
+For terms that must **never** reach the AI — regardless of filter mode, NER confidence, or whether GLiNER even runs — Erebus supports a plaintext blacklist. It's the GDPR-safe layer: matches are always tokenized, and the blacklist files themselves are auto-added to `block_file_patterns` so the AI can never read them back.
+
+Two scopes:
+
+| File | Scope |
+|------|-------|
+| `~/.erebus/blacklist.txt` | Global — applies to every project |
+| `<repo>/.erebus/blacklist.txt` | Per-repo — scoped to one project |
+
+One term per line, `#` comments and blank lines ignored, matches are case-insensitive and word-bounded.
+
+```bash
+erebus-blacklist add "Jan Jansen"          # global
+erebus-blacklist add "Acme BV" --repo      # current repo only
+erebus-blacklist list                      # global + repo
+erebus-blacklist remove "Jan Jansen"
+erebus-blacklist path                      # show the file paths
+```
+
+Tokens generated from blacklist hits carry an inferred kind so the AI knows what shape of value to expect in the token's place:
+
+| Term example | Token shape |
+|--------------|-------------|
+| `Jan Jansen` | `[BLACKLIST_PERSON_1_a3f2c1]` |
+| `jan@example.com` | `[BLACKLIST_EMAIL_1_b4d2e1]` |
+| `NL91ABNA0417164300` | `[BLACKLIST_IBAN_1_c5e3f1]` |
+| `+31 6 12345678` | `[BLACKLIST_PHONE_1_d6f4g1]` |
+| `192.168.1.15` | `[BLACKLIST_IP_1_e7g5h1]` |
+
+> The global blacklist lives in your home directory and is not tied to any repo — keep personal names, home address, or family details there. Use the per-repo blacklist for project-specific codenames, partner names, or client data.
+
 ## Inline escape
 
 Append `~` to a word to prevent it from being tokenized in that message:
