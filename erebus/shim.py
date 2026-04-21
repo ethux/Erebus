@@ -211,13 +211,15 @@ def _log_usage_if_present(msg: dict):
     is_final = False
 
     # Claude Code wrapper: {"type": "assistant", "message": {...}}
+    # This wrapper format is always a complete turn — not a streaming delta —
+    # so log whenever usage is present regardless of stop_reason.
     inner = msg.get("message")
     if isinstance(inner, dict):
         u = inner.get("usage")
         if isinstance(u, dict):
             usage = u
             model = inner.get("model")
-            is_final = inner.get("stop_reason") is not None
+            is_final = True
     # Raw Anthropic message_delta: usage + delta.stop_reason at top level
     if usage is None:
         u = msg.get("usage")
