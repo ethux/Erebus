@@ -51,11 +51,12 @@ def _get_target_url(request: web.Request) -> str:
 def _tokenize_messages(messages: list, repo_config) -> dict:
     """Tokenize PII in chat completion message content. Returns new tokens found."""
     mode = getattr(repo_config, "mode", "balanced")
+    blacklist = getattr(repo_config, "blacklist", [])
     new_tokens = {}
     for msg in messages:
         content = msg.get("content")
         if isinstance(content, str) and content:
-            sanitized, tokens = tokenize(content, repo_config.sensitive_entities, repo_config.allowed_names, mode=mode)
+            sanitized, tokens = tokenize(content, repo_config.sensitive_entities, repo_config.allowed_names, mode=mode, blacklist=blacklist)
             if tokens:
                 msg["content"] = sanitized
                 TOKEN_MAP.update(tokens)
@@ -63,7 +64,7 @@ def _tokenize_messages(messages: list, repo_config) -> dict:
         elif isinstance(content, list):
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
-                    sanitized, tokens = tokenize(part["text"], repo_config.sensitive_entities, repo_config.allowed_names, mode=mode)
+                    sanitized, tokens = tokenize(part["text"], repo_config.sensitive_entities, repo_config.allowed_names, mode=mode, blacklist=blacklist)
                     if tokens:
                         part["text"] = sanitized
                         TOKEN_MAP.update(tokens)
