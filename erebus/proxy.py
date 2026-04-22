@@ -18,24 +18,21 @@ import os
 import sys
 import uuid
 import argparse
-from pathlib import Path
 
 import httpx
 from aiohttp import web
 
 from .filter import tokenize, detokenize, preload_gliner
 from .logger import init_db, log_event
-from .config import load_repo_config, OLLAMA_MODEL
+from .config import load_repo_config, save_token_map, OLLAMA_MODEL
 
 SESSION_ID = str(uuid.uuid4())[:8]
 TOKEN_MAP: dict = {}
-_TOKEN_MAP_PATH = Path.home() / ".erebus" / "token_map.json"
 
 
 def _persist_token_map():
-    """Write token map to shared file so MCP server and CLI can read it."""
-    _TOKEN_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _TOKEN_MAP_PATH.write_text(json.dumps(TOKEN_MAP, indent=2))
+    """Write token map with 0600 perms + age-based rotation (see config.save_token_map)."""
+    save_token_map(TOKEN_MAP)
 
 
 def _get_target_url(request: web.Request) -> str:

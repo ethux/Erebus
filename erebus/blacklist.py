@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from . import config
-from .config import REPO_BLACKLIST_FILENAME, _load_blacklist_file
+from .config import REPO_BLACKLIST_FILENAME, _load_blacklist_file, secure_path
 from .ui.colors import bold, dim, info, ok, warn
 
 
@@ -43,7 +43,7 @@ def _ensure_file(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text(_HEADER, encoding="utf-8")
-        path.chmod(0o600)
+    secure_path(path, 0o600)
 
 
 def cmd_add(args) -> int:
