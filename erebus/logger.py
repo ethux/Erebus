@@ -2,11 +2,11 @@ import sqlite3
 import json
 from datetime import datetime
 from pathlib import Path
-from .config import DB_PATH
+from .config import DB_PATH, ensure_erebus_dir, secure_path
 
 
 def init_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_erebus_dir()
     conn = sqlite3.connect(DB_PATH)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS sessions (
@@ -29,6 +29,7 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    secure_path(DB_PATH, 0o600)
 
 
 USAGE_FIELDS = (
@@ -199,21 +200,105 @@ def usage_summary(days: int = None, session: str = None):
     print()
 
 
+def prune_log(days: int) -> int:
+    """Delete all events older than `days` days. Returns the row count removed.
+
+    Supports GDPR Article 5(1)(e) — storage limitation. Raw prompts that may
+    contain PII the filter missed should not accumulate indefinitely.
+    """
+    if days < 0:
+        raise ValueError("days must be >= 0")
+    if not DB_PATH.exists():
+        return 0
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "DELETE FROM events WHERE timestamp < datetime('now', ?)",
+        (f"-{days} days",),
+    )
+    removed = cur.rowcount
+    conn.commit()
+    conn.execute("VACUUM")
+    conn.close()
+    return removed
+
+
+def forget_term(term: str) -> int:
+    """Delete every event mentioning `term` in any of its text columns.
+
+    Case-insensitive substring match over raw, sanitized, tokens_map, and
+    metadata. Supports GDPR Article 17 — right to erasure. Returns the
+    number of rows removed.
+    """
+    term = term.strip()
+    if not term:
+        return 0
+    if not DB_PATH.exists():
+        return 0
+    like = f"%{term}%"
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        """
+        DELETE FROM events
+        WHERE IFNULL(raw, '')        LIKE ? COLLATE NOCASE
+           OR IFNULL(sanitized, '')  LIKE ? COLLATE NOCASE
+           OR IFNULL(tokens_map, '') LIKE ? COLLATE NOCASE
+           OR IFNULL(metadata, '')   LIKE ? COLLATE NOCASE
+        """,
+        (like, like, like, like),
+    )
+    removed = cur.rowcount
+    conn.commit()
+    conn.execute("VACUUM")
+    conn.close()
+    return removed
+
+
 def main_log():
     import argparse
-    parser = argparse.ArgumentParser(description="View erebus log")
+    parser = argparse.ArgumentParser(description="View or manage the erebus log")
     parser.add_argument("-n", type=int, default=20, help="Number of recent events to show")
     parser.add_argument("--usage", action="store_true",
                         help="Show token usage summary instead of event tail")
     parser.add_argument("--days", type=int, default=None,
-                        help="With --usage: only consider the last N days")
+                        help="With --usage or --prune: limit to the last N days")
     parser.add_argument("--session", default=None,
                         help="With --usage: filter to a single session id")
+    parser.add_argument("--prune", action="store_true",
+                        help="Delete events older than --days (GDPR storage limitation)")
     args = parser.parse_args()
+    if args.prune:
+        if args.days is None:
+            parser.error("--prune requires --days")
+        removed = prune_log(args.days)
+        print(f"Removed {removed} events older than {args.days} day(s).")
+        return
     if args.usage:
         usage_summary(days=args.days, session=args.session)
     else:
         tail_log(args.n)
+
+
+def main_forget():
+    """CLI entry point for erebus-forget — GDPR Article 17 erasure."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="erebus-forget",
+        description="Delete every log entry mentioning a given value (GDPR right to erasure).",
+    )
+    parser.add_argument("term", help="value to erase from the log (e.g. a name or email)")
+    parser.add_argument("--yes", action="store_true",
+                        help="skip the confirmation prompt")
+    args = parser.parse_args()
+
+    if not args.yes:
+        print(f"This will permanently delete every log entry mentioning: {args.term}")
+        ans = input("Continue? [y/N] ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+    removed = forget_term(args.term)
+    print(f"Removed {removed} events mentioning {args.term!r}.")
+    return 0
 
 
 def log_event(session_id: str, event_type: str, raw: str = None,

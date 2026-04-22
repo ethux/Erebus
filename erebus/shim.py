@@ -23,9 +23,13 @@ import sys
 import threading
 import time
 import uuid
-from pathlib import Path
 
-from .config import get_real_claude_binary, load_repo_config
+from .config import (
+    get_real_claude_binary,
+    load_repo_config,
+    load_token_map,
+    save_token_map,
+)
 from .filter import tokenize, detokenize, preload_gliner
 from .logger import init_db, log_event
 
@@ -34,14 +38,11 @@ SESSION_ID = str(uuid.uuid4())[:8]
 TOKEN_MAP: dict = {}  # accumulated across session
 CWD = os.getcwd()
 REPO_CONFIG = load_repo_config(CWD)
-_TOKEN_MAP_PATH = Path.home() / ".erebus" / "token_map.json"
 
 
 def _persist_token_map():
-    """Write token map to shared file so MCP server and CLI can read it."""
-    import json as _json
-    _TOKEN_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _TOKEN_MAP_PATH.write_text(_json.dumps(TOKEN_MAP, indent=2))
+    """Write token map with 0600 perms + age-based rotation (see config.save_token_map)."""
+    save_token_map(TOKEN_MAP)
 
 
 def _tokenize_text(text: str, source: str = "user") -> str:

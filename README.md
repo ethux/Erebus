@@ -252,6 +252,27 @@ Output:
 
 Usage tracking is independent of PII detection — every API turn is counted, even in sessions where nothing was tokenized.
 
+## GDPR controls
+
+Erebus writes three sensitive files: the SQLite log, the token map, and the blacklists. All of them are chmod'd to `0600` (the containing `~/.erebus/` directory is `0700`), so a second user on the same machine can't read your tokenized data at rest.
+
+**Retention — Article 5(1)(e):**
+
+```bash
+erebus-log --prune --days 30   # delete every event older than 30 days
+```
+
+**Right to erasure — Article 17:**
+
+```bash
+erebus-forget "Jan Jansen"              # remove every log entry mentioning the value
+erebus-forget "jan@example.com" --yes   # skip confirmation
+```
+
+Matching is case-insensitive and searches raw prompts, sanitized copies, token maps, and metadata. Use it when a data subject asks you to delete their information, or just as routine hygiene.
+
+**Token-map rotation:** `~/.erebus/token_map.json` is age-capped. Entries older than 7 days are wiped on the next load — the file can never accumulate a month of PII mappings just because you forgot to clean it up.
+
 ## Uninstall
 
 ```bash

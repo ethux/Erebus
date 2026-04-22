@@ -42,6 +42,7 @@ erebus-proxy = "erebus.proxy:main"
 erebus-reveal = "erebus.reveal:main"
 erebus-mcp = "erebus.mcp_server:main"
 erebus-blacklist = "erebus.blacklist:main"
+erebus-forget = "erebus.logger:main_forget"
 
 [tool.setuptools.packages.find]
 where = ["."]
