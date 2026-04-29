@@ -32,12 +32,19 @@ from .config import (
 )
 from .filter import tokenize, detokenize, preload_gliner
 from .logger import init_db, log_event
+from .verifiers import parse_verifier_list
 
 # Session state
 SESSION_ID = str(uuid.uuid4())[:8]
 TOKEN_MAP: dict = {}  # accumulated across session
 CWD = os.getcwd()
 REPO_CONFIG = load_repo_config(CWD)
+_VERIFIERS = parse_verifier_list(REPO_CONFIG.verifier)
+
+
+def _verifier_list() -> list[str]:
+    """Per-process parsed verifier list. Cached at import time."""
+    return _VERIFIERS
 
 
 def _persist_token_map():
@@ -47,7 +54,7 @@ def _persist_token_map():
 
 def _tokenize_text(text: str, source: str = "user") -> str:
     """Tokenize a string, update TOKEN_MAP, log if needed. Returns sanitized text."""
-    sanitized, new_tokens = tokenize(text, REPO_CONFIG.sensitive_entities, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist)
+    sanitized, new_tokens = tokenize(text, REPO_CONFIG.sensitive_entities, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist, verifiers=_verifier_list(), verifier_llm_model=REPO_CONFIG.verifier_llm_model)
     if new_tokens:
         TOKEN_MAP.update(new_tokens)
         _persist_token_map()
@@ -86,7 +93,7 @@ def process_outgoing(line: str) -> str:
         # User-typed text
         if block.get("type") == "text":
             original = block["text"]
-            sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist)
+            sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist, verifiers=_verifier_list(), verifier_llm_model=REPO_CONFIG.verifier_llm_model)
             if new_tokens:
                 any_pii = True
                 TOKEN_MAP.update(new_tokens)
@@ -107,7 +114,7 @@ def process_outgoing(line: str) -> str:
         elif block.get("type") == "tool_result":
             content = block.get("content", "")
             if isinstance(content, str) and content:
-                sanitized, new_tokens = tokenize(content, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist)
+                sanitized, new_tokens = tokenize(content, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist, verifiers=_verifier_list(), verifier_llm_model=REPO_CONFIG.verifier_llm_model)
                 if new_tokens:
                     any_pii = True
                     TOKEN_MAP.update(new_tokens)
@@ -127,7 +134,7 @@ def process_outgoing(line: str) -> str:
                 for sub in content:
                     if isinstance(sub, dict) and sub.get("type") == "text":
                         original = sub["text"]
-                        sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist)
+                        sanitized, new_tokens = tokenize(original, REPO_CONFIG.sensitive_entities, REPO_CONFIG.allowed_names, mode=REPO_CONFIG.mode, blacklist=REPO_CONFIG.blacklist, verifiers=_verifier_list(), verifier_llm_model=REPO_CONFIG.verifier_llm_model)
                         if new_tokens:
                             any_pii = True
                             TOKEN_MAP.update(new_tokens)

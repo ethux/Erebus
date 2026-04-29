@@ -167,6 +167,13 @@ class RepoConfig:
     log_enabled: bool = True
     mode: str = "balanced"  # strict | balanced | relaxed
     blacklist: list[str] = field(default_factory=list)  # hard-blocked terms (merged global + repo)
+    # Optional second-pass verifiers layered on top of GLiNER + regex.
+    # Comma-separated list of pass names, e.g. "openai-pf", "gemma",
+    # "openai-pf,gemma". Empty string disables verification.
+    verifier: str = ""
+    # Gemma verifier model ID (any Ollama tag). Keep small (1B-ish) so the
+    # per-message latency stays workable.
+    verifier_llm_model: str = "gemma3:1b"
 
 
 # Patterns forced into block_file_patterns so the blacklist files themselves
