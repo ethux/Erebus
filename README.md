@@ -252,6 +252,22 @@ Output:
 
 Usage tracking is independent of PII detection — every API turn is counted, even in sessions where nothing was tokenized.
 
+## Verifier layer (opt-in)
+
+For GDPR-critical use, an optional second-pass verifier can run on top of GLiNER to catch misses from a different angle.
+
+| Verifier | What it is | Hardware | Cost |
+|----------|------------|----------|------|
+| `piiranha` | [iiiorg/piiranha-v1-detect-personal-information](https://huggingface.co/iiiorg/piiranha-v1-detect-personal-information), an mdeberta-v3 fine-tune covering 17 PII types across six languages | CPU | ~750MB, ~50-150ms/call |
+
+Enable in `.erebus/pii-filter.json`:
+
+```json
+{ "verifier": "piiranha" }
+```
+
+Spans the verifier flags are tokenized as `[VERIFIED_<KIND>_<N>_<uid>]` so you can tell them apart from first-pass hits in the audit log. If the model isn't installed the verifier is a no-op, so the rest of the filter keeps working.
+
 ## GDPR controls
 
 Erebus writes three sensitive files: the SQLite log, the token map, and the blacklists. All of them are chmod'd to `0600` (the containing `~/.erebus/` directory is `0700`), so a second user on the same machine can't read your tokenized data at rest.

@@ -5,8 +5,13 @@ Each verifier is a pluggable pass that returns a list of `Span` objects
 it thinks are PII. The filter pipeline tokenizes anything the earlier
 passes didn't already cover.
 
-This package only provides the framework (Span dataclass, config parser,
-graceful-failure contract). Individual verifier modules are added on top.
+Verifiers:
+  * piiranha: iiiorg/piiranha-v1-detect-personal-information, an
+              mdeberta-v3 fine-tune (~750MB, CPU-friendly). 17 PII
+              types across six languages.
+
+All verifiers degrade to a no-op if the underlying model is missing, so
+the rest of the filter keeps working in environments without them.
 """
 from dataclasses import dataclass
 

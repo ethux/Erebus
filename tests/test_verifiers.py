@@ -62,6 +62,56 @@ def test_no_verifiers_argument_is_noop():
     print("  ✓ tokenize without verifiers is identical to tokenize with empty list")
 
 
+# ── Piiranha integration ─────────────────────────────────────────────────────
+
+@_no_gliner
+def test_piiranha_span_is_tokenized():
+    """A Piiranha-flagged span that GLiNER missed should be tokenized."""
+    text = "The contact is Aisha Khan, age 34."
+    mocked = [Span(start=15, end=25, text="Aisha Khan", label="PERSON")]
+    with patch("erebus.verifiers.piiranha.predict", return_value=mocked):
+        sanitized, tokens = tokenize(text, verifiers=["piiranha"])
+    assert "Aisha Khan" not in sanitized
+    assert any(k.startswith("[VERIFIED_PERSON_") for k in tokens)
+    print(f"  ✓ Piiranha span tokenized: {sanitized}")
+
+
+@_no_gliner
+def test_verifier_skips_existing_token_region():
+    """A span landing inside an existing [TOKEN_...] must be ignored."""
+    text = "Hello [PERSON_1_abc123] how are you?"
+    mocked = [Span(start=6, end=22, text="[PERSON_1_abc123]", label="PERSON")]
+    with patch("erebus.verifiers.piiranha.predict", return_value=mocked):
+        sanitized, tokens = tokenize(text, verifiers=["piiranha"])
+    assert sanitized == text
+    assert tokens == {}
+    print("  ✓ verifier ignores spans inside existing tokens")
+
+
+@_no_gliner
+def test_verifier_skips_allowed_names():
+    """A span matching an allowlist entry must pass through."""
+    text = "Google is a company."
+    mocked = [Span(start=0, end=6, text="Google", label="ORGANIZATION")]
+    with patch("erebus.verifiers.piiranha.predict", return_value=mocked):
+        sanitized, _tokens = tokenize(text, verifiers=["piiranha"])
+    assert "Google" in sanitized
+    print("  ✓ verifier respects allowlist (Google)")
+
+
+@_no_gliner
+def test_verifier_failure_is_silent():
+    """If a verifier raises, tokenize must still return un-altered text."""
+    text = "Hello world"
+    def _boom(*_a, **_kw):
+        raise RuntimeError("model unavailable")
+    with patch("erebus.verifiers.piiranha.predict", side_effect=_boom):
+        sanitized, tokens = tokenize(text, verifiers=["piiranha"])
+    assert sanitized == text
+    assert tokens == {}
+    print("  ✓ verifier exceptions are swallowed")
+
+
 # ── Runner ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -70,6 +120,10 @@ if __name__ == "__main__":
         test_parse_verifier_list_trimmed_and_lowercased,
         test_unknown_verifier_name_is_ignored,
         test_no_verifiers_argument_is_noop,
+        test_piiranha_span_is_tokenized,
+        test_verifier_skips_existing_token_region,
+        test_verifier_skips_allowed_names,
+        test_verifier_failure_is_silent,
     ]
     print("\n=== Verifier Framework Tests ===\n")
     passed = 0

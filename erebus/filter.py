@@ -424,7 +424,12 @@ def _run_verifiers(text: str, verifiers: list[str], llm_model: str,
         if not n:
             continue
         spans: list = []
-        # Verifier modules register themselves here in follow-up commits.
+        if n == "piiranha":
+            try:
+                from .verifiers import piiranha
+                spans = piiranha.predict(text)
+            except Exception:
+                spans = []
         # An unknown name is a silent no-op so the rest of the filter
         # keeps working when a verifier isn't installed.
         collected.extend(spans)
