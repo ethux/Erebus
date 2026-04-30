@@ -256,17 +256,22 @@ Usage tracking is independent of PII detection — every API turn is counted, ev
 
 For GDPR-critical use, an optional second-pass verifier can run on top of GLiNER to catch misses from a different angle. Two verifier choices are available; pick **one** based on hardware.
 
-| Verifier | What it is | Hardware | Cost |
-|----------|------------|----------|------|
-| `piiranha` | [iiiorg/piiranha-v1-detect-personal-information](https://huggingface.co/iiiorg/piiranha-v1-detect-personal-information), an mdeberta-v3 fine-tune covering 17 PII types across six languages | CPU | ~750MB, ~50-150ms/call |
-| `openai-pf` | [openai/privacy-filter](https://huggingface.co/openai/privacy-filter), a 1.5B sparse MoE token classifier (50M active, Apache 2.0) covering 8 PII categories | GPU (or remote) | ~8GB, ~30-100ms/call on GPU |
+| Verifier | Kind | What it is | Hardware | Cost |
+|----------|------|------------|----------|------|
+| `piiranha` | NER | [iiiorg/piiranha-v1-detect-personal-information](https://huggingface.co/iiiorg/piiranha-v1-detect-personal-information), an mdeberta-v3 fine-tune covering 17 PII types across six languages | CPU | ~750MB, ~50-150ms/call |
+| `openai-pf` | NER | [openai/privacy-filter](https://huggingface.co/openai/privacy-filter), a 1.5B sparse MoE token classifier (50M active, Apache 2.0) covering 8 PII categories | GPU (or remote) | ~8GB, ~30-100ms/call on GPU |
+| `gemma` | LLM | Gemma 3 1B via Ollama (`gemma3:1b`), catches contextual / narrative leaks a pure NER can't see ("the engineer who runs the Rotterdam office") | CPU or GPU | ~800MB, ~300-600ms/call |
 
 Enable in `.erebus/pii-filter.json`:
 
 ```json
 { "verifier": "piiranha" }                 // CPU laptop
 { "verifier": "openai-pf" }                // local GPU, model loads in-process
+{ "verifier": "piiranha,gemma" }           // NER + contextual LLM
+{ "verifier": "openai-pf,gemma" }          // GPU NER + contextual LLM
 ```
+
+`verifier_llm_model` overrides the Ollama tag (default `gemma3:1b`).
 
 `openai-pf` can also run against a separate GPU box. Stand up an HTTP service that accepts `{"text": "..."}` and returns `{"spans": [{"start", "end", "text", "label"}]}`, then point Erebus at it:
 

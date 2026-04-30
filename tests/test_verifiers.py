@@ -137,6 +137,34 @@ def test_openai_pf_remote_url_is_used():
     print("  ✓ openai-pf remote URL is plumbed through")
 
 
+# ── Gemma LLM contextual verifier ────────────────────────────────────────────
+
+@_no_gliner
+def test_gemma_contextual_leak_is_tokenized():
+    text = "The engineer who runs the Rotterdam office handles it."
+    phrase = "engineer who runs the Rotterdam office"
+    start = text.find(phrase)
+    mocked = [Span(start=start, end=start + len(phrase), text=phrase, label="SENSITIVE")]
+    with patch("erebus.verifiers.gemma_llm.predict", return_value=mocked):
+        sanitized, tokens = tokenize(text, verifiers=["gemma"])
+    assert phrase not in sanitized
+    assert any(k.startswith("[VERIFIED_SENSITIVE_") for k in tokens)
+    print(f"  ✓ Gemma contextual leak tokenized: {sanitized}")
+
+
+@_no_gliner
+def test_gemma_model_id_is_passed_through():
+    """The configured Ollama tag must reach gemma_llm.predict."""
+    captured = {}
+    def _fake(t, model="", **kw):
+        captured["model"] = model
+        return []
+    with patch("erebus.verifiers.gemma_llm.predict", side_effect=_fake):
+        tokenize("anything", verifiers=["gemma"], verifier_llm_model="gemma3:1b")
+    assert captured["model"] == "gemma3:1b"
+    print("  ✓ verifier_llm_model is plumbed to gemma_llm.predict")
+
+
 @_no_gliner
 def test_verifier_failure_is_silent():
     """If a verifier raises, tokenize must still return un-altered text."""
@@ -164,6 +192,8 @@ if __name__ == "__main__":
         test_verifier_skips_allowed_names,
         test_openai_pf_span_is_tokenized,
         test_openai_pf_remote_url_is_used,
+        test_gemma_contextual_leak_is_tokenized,
+        test_gemma_model_id_is_passed_through,
         test_verifier_failure_is_silent,
     ]
     print("\n=== Verifier Framework Tests ===\n")

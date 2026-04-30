@@ -438,6 +438,12 @@ def _run_verifiers(text: str, verifiers: list[str], llm_model: str,
                 spans = openai_pf.predict(text, url=openai_pf_url)
             except Exception:
                 spans = []
+        elif n in ("gemma", "llm"):
+            try:
+                from .verifiers import gemma_llm
+                spans = gemma_llm.predict(text, model=llm_model)
+            except Exception:
+                spans = []
         # An unknown name is a silent no-op so the rest of the filter
         # keeps working when a verifier isn't installed.
         collected.extend(spans)

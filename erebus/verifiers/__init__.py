@@ -11,6 +11,9 @@ Verifiers:
                types across six languages.
   * openai-pf: openai/privacy-filter, a 1.5B sparse MoE token classifier
                (50M active params). Bigger and GPU-friendly. Apache 2.0.
+  * gemma:     a small local LLM (Gemma 3 1B by default via Ollama) that
+               flags contextual / narrative leaks a NER model can't see
+               ("the engineer who runs the Rotterdam office").
 
 Only ONE NER verifier runs at a time - piiranha and openai-pf overlap in
 purpose, so the user picks one based on hardware and parse_verifier_list
