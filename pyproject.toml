@@ -43,6 +43,7 @@ erebus-reveal = "erebus.reveal:main"
 erebus-mcp = "erebus.mcp_server:main"
 erebus-blacklist = "erebus.blacklist:main"
 erebus-forget = "erebus.logger:main_forget"
+erebus-benchmark = "erebus.benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

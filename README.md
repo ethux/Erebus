@@ -286,6 +286,21 @@ Only **one** NER verifier runs at a time. If you list both, the parser keeps the
 
 Spans the verifier flags are tokenized as `[VERIFIED_<KIND>_<N>_<uid>]` so you can tell them apart from first-pass hits in the audit log. If the model isn't installed the verifier is a no-op, so the rest of the filter keeps working.
 
+## Benchmarks
+
+To measure what the verifiers actually add for your kind of data, use `erebus-benchmark`:
+
+```bash
+erebus-benchmark --seed                       # create example corpus at ~/.erebus/benchmark/corpus.jsonl
+vi ~/.erebus/benchmark/corpus.jsonl            # replace with your real labeled cases
+erebus-benchmark                               # run every config and print metrics
+erebus-benchmark --only piiranha+gemma         # just one config
+```
+
+The corpus lives outside the repo on purpose, since it usually contains real PII or domain-specific terms. Format is one JSON object per line with `text` and `expected` (list of sensitive substrings that ought to be tokenized).
+
+Output shows recall, precision, F1, and p50/p95 latency for each pipeline combination so you can pick the right tradeoff for your data.
+
 ## GDPR controls
 
 Erebus writes three sensitive files: the SQLite log, the token map, and the blacklists. All of them are chmod'd to `0600` (the containing `~/.erebus/` directory is `0700`), so a second user on the same machine can't read your tokenized data at rest.
