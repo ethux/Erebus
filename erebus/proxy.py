@@ -52,6 +52,7 @@ def _tokenize_messages(messages: list, repo_config) -> dict:
     blacklist = getattr(repo_config, "blacklist", [])
     verifiers = parse_verifier_list(getattr(repo_config, "verifier", ""))
     llm_model = getattr(repo_config, "verifier_llm_model", "gemma3:1b")
+    openai_pf_url = getattr(repo_config, "verifier_openai_pf_url", "")
     new_tokens = {}
     for msg in messages:
         content = msg.get("content")
@@ -59,7 +60,7 @@ def _tokenize_messages(messages: list, repo_config) -> dict:
             sanitized, tokens = tokenize(content, repo_config.sensitive_entities,
                                          repo_config.allowed_names, mode=mode,
                                          blacklist=blacklist, verifiers=verifiers,
-                                         verifier_llm_model=llm_model)
+                                         verifier_llm_model=llm_model, verifier_openai_pf_url=openai_pf_url)
             if tokens:
                 msg["content"] = sanitized
                 TOKEN_MAP.update(tokens)
@@ -70,7 +71,7 @@ def _tokenize_messages(messages: list, repo_config) -> dict:
                     sanitized, tokens = tokenize(part["text"], repo_config.sensitive_entities,
                                                  repo_config.allowed_names, mode=mode,
                                                  blacklist=blacklist, verifiers=verifiers,
-                                                 verifier_llm_model=llm_model)
+                                                 verifier_llm_model=llm_model, verifier_openai_pf_url=openai_pf_url)
                     if tokens:
                         part["text"] = sanitized
                         TOKEN_MAP.update(tokens)

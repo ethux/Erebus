@@ -273,7 +273,8 @@ def tokenize(text: str, extra_entities: list[str] = None,
              mode: str = DEFAULT_MODE,
              blacklist: list[str] = None,
              verifiers: list[str] = None,
-             verifier_llm_model: str = "gemma3:1b") -> tuple[str, dict]:
+             verifier_llm_model: str = "gemma3:1b",
+             verifier_openai_pf_url: str = "") -> tuple[str, dict]:
     """
     Replace PII and secrets with reversible tokens.
     Returns (tokenized_text, token_map).
@@ -400,7 +401,8 @@ def tokenize(text: str, extra_entities: list[str] = None,
     # dispatcher in _run_verifiers.
     if verifiers:
         result, extra_tokens = _run_verifiers(
-            result, verifiers, verifier_llm_model, _is_allowed, counters,
+            result, verifiers, verifier_llm_model, verifier_openai_pf_url,
+            _is_allowed, counters,
         )
         token_map.update(extra_tokens)
 
@@ -408,7 +410,7 @@ def tokenize(text: str, extra_entities: list[str] = None,
 
 
 def _run_verifiers(text: str, verifiers: list[str], llm_model: str,
-                   is_allowed, counters: dict) -> tuple[str, dict]:
+                   openai_pf_url: str, is_allowed, counters: dict) -> tuple[str, dict]:
     """Run each configured verifier and tokenize any spans it flags.
 
     Spans are ignored when they overlap an existing [TOKEN] in `text` or
@@ -428,6 +430,12 @@ def _run_verifiers(text: str, verifiers: list[str], llm_model: str,
             try:
                 from .verifiers import piiranha
                 spans = piiranha.predict(text)
+            except Exception:
+                spans = []
+        elif n in ("openai-pf", "openai", "pf"):
+            try:
+                from .verifiers import openai_pf
+                spans = openai_pf.predict(text, url=openai_pf_url)
             except Exception:
                 spans = []
         # An unknown name is a silent no-op so the rest of the filter
