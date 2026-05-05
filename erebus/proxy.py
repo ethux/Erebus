@@ -47,13 +47,20 @@ def _get_target_url(request: web.Request) -> str:
 
 def _tokenize_messages(messages: list, repo_config) -> dict:
     """Tokenize PII in chat completion message content. Returns new tokens found."""
+    from .verifiers import parse_verifier_list
     mode = getattr(repo_config, "mode", "balanced")
     blacklist = getattr(repo_config, "blacklist", [])
+    verifiers = parse_verifier_list(getattr(repo_config, "verifier", ""))
+    llm_model = getattr(repo_config, "verifier_llm_model", "gemma3:1b")
+    openai_pf_url = getattr(repo_config, "verifier_openai_pf_url", "")
     new_tokens = {}
     for msg in messages:
         content = msg.get("content")
         if isinstance(content, str) and content:
-            sanitized, tokens = tokenize(content, repo_config.sensitive_entities, repo_config.allowed_names, mode=mode, blacklist=blacklist)
+            sanitized, tokens = tokenize(content, repo_config.sensitive_entities,
+                                         repo_config.allowed_names, mode=mode,
+                                         blacklist=blacklist, verifiers=verifiers,
+                                         verifier_llm_model=llm_model, verifier_openai_pf_url=openai_pf_url)
             if tokens:
                 msg["content"] = sanitized
                 TOKEN_MAP.update(tokens)
@@ -61,7 +68,10 @@ def _tokenize_messages(messages: list, repo_config) -> dict:
         elif isinstance(content, list):
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
-                    sanitized, tokens = tokenize(part["text"], repo_config.sensitive_entities, repo_config.allowed_names, mode=mode, blacklist=blacklist)
+                    sanitized, tokens = tokenize(part["text"], repo_config.sensitive_entities,
+                                                 repo_config.allowed_names, mode=mode,
+                                                 blacklist=blacklist, verifiers=verifiers,
+                                                 verifier_llm_model=llm_model, verifier_openai_pf_url=openai_pf_url)
                     if tokens:
                         part["text"] = sanitized
                         TOKEN_MAP.update(tokens)

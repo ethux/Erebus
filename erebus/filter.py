@@ -271,7 +271,10 @@ def _balanced_name_replacement(real_value: str, counters: dict) -> tuple[str, st
 def tokenize(text: str, extra_entities: list[str] = None,
              allowed_names: list[str] = None,
              mode: str = DEFAULT_MODE,
-             blacklist: list[str] = None) -> tuple[str, dict]:
+             blacklist: list[str] = None,
+             verifiers: list[str] = None,
+             verifier_llm_model: str = "gemma3:1b",
+             verifier_openai_pf_url: str = "") -> tuple[str, dict]:
     """
     Replace PII and secrets with reversible tokens.
     Returns (tokenized_text, token_map).
@@ -279,9 +282,14 @@ def tokenize(text: str, extra_entities: list[str] = None,
     Values in allowed_names are never tokenized.
 
     Modes:
-      strict   — tokenize all detected PII
-      balanced — keep first names, tokenize last names; keep single-word orgs
-      relaxed  — only tokenize structured PII (emails, IBANs, keys, etc.)
+      strict   - tokenize all detected PII
+      balanced - keep first names, tokenize last names; keep single-word orgs
+      relaxed  - only tokenize structured PII (emails, IBANs, keys, etc.)
+
+    Verifiers:
+      Optional second-pass checks run after GLiNER + regex + blacklist.
+      Concrete verifier names are registered by their own modules. Each
+      verifier only flags spans the earlier passes didn't touch.
     """
     if mode not in MODES:
         mode = DEFAULT_MODE
@@ -386,7 +394,88 @@ def tokenize(text: str, extra_entities: list[str] = None,
                 return tok
             result = pattern.sub(_replace, result)
 
+    # Step 5: Optional verifiers - second-pass checks that run after
+    # everything else and only flag spans not already covered by an
+    # existing token or an allowlist entry. Concrete verifier modules
+    # (e.g. piiranha, openai-pf, gemma) hook themselves into the
+    # dispatcher in _run_verifiers.
+    if verifiers:
+        result, extra_tokens = _run_verifiers(
+            result, verifiers, verifier_llm_model, verifier_openai_pf_url,
+            _is_allowed, counters,
+        )
+        token_map.update(extra_tokens)
+
     return result, token_map
+
+
+def _run_verifiers(text: str, verifiers: list[str], llm_model: str,
+                   openai_pf_url: str, is_allowed, counters: dict) -> tuple[str, dict]:
+    """Run each configured verifier and tokenize any spans it flags.
+
+    Spans are ignored when they overlap an existing [TOKEN] in `text` or
+    when `is_allowed` returns True for the span text. Returned (new_text,
+    extra_token_map) — the caller merges extras into the main token map.
+    """
+    extra: dict = {}
+    # Collect spans from every verifier in one go so we can de-duplicate and
+    # process right-to-left without replacements shifting later offsets.
+    collected = []
+    for name in verifiers:
+        n = name.strip().lower()
+        if not n:
+            continue
+        spans: list = []
+        if n == "piiranha":
+            try:
+                from .verifiers import piiranha
+                spans = piiranha.predict(text)
+            except Exception:
+                spans = []
+        elif n in ("openai-pf", "openai", "pf"):
+            try:
+                from .verifiers import openai_pf
+                spans = openai_pf.predict(text, url=openai_pf_url)
+            except Exception:
+                spans = []
+        elif n in ("gemma", "llm"):
+            try:
+                from .verifiers import gemma_llm
+                spans = gemma_llm.predict(text, model=llm_model)
+            except Exception:
+                spans = []
+        # An unknown name is a silent no-op so the rest of the filter
+        # keeps working when a verifier isn't installed.
+        collected.extend(spans)
+
+    if not collected:
+        return text, extra
+
+    # Drop spans inside existing [TOKEN_...] regions.
+    token_regions = [(m.start(), m.end()) for m in re.finditer(r"\[[A-Z_]+_\d+_[0-9a-f]+\]", text)]
+    def _in_token(start: int, end: int) -> bool:
+        return any(ts <= start and end <= te for ts, te in token_regions)
+
+    # Process right-to-left; drop duplicates and overlapping/allowed/in-token spans.
+    seen: list[tuple[int, int]] = []
+    result = text
+    for sp in sorted(collected, key=lambda s: (s.start, -s.end), reverse=True):
+        if sp.end <= sp.start:
+            continue
+        if _in_token(sp.start, sp.end):
+            continue
+        if any(max(sp.start, s) < min(sp.end, e) for s, e in seen):
+            continue
+        if is_allowed(sp.text):
+            continue
+        label = sp.label if sp.label else "SENSITIVE"
+        counters[label] = counters.get(label, 0) + 1
+        uid = uuid.uuid4().hex[:6]
+        tok = f"[VERIFIED_{label}_{counters[label]}_{uid}]"
+        extra[tok] = sp.text
+        result = result[:sp.start] + tok + result[sp.end:]
+        seen.append((sp.start, sp.end))
+    return result, extra
 
 
 # ── Blacklist term classification ─────────────────────────────────────────────

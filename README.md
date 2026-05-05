@@ -252,6 +252,55 @@ Output:
 
 Usage tracking is independent of PII detection — every API turn is counted, even in sessions where nothing was tokenized.
 
+## Verifier layer (opt-in)
+
+For GDPR-critical use, an optional second-pass verifier can run on top of GLiNER to catch misses from a different angle. Two verifier choices are available; pick **one** based on hardware.
+
+| Verifier | Kind | What it is | Hardware | Cost |
+|----------|------|------------|----------|------|
+| `piiranha` | NER | [iiiorg/piiranha-v1-detect-personal-information](https://huggingface.co/iiiorg/piiranha-v1-detect-personal-information), an mdeberta-v3 fine-tune covering 17 PII types across six languages | CPU | ~750MB, ~50-150ms/call |
+| `openai-pf` | NER | [openai/privacy-filter](https://huggingface.co/openai/privacy-filter), a 1.5B sparse MoE token classifier (50M active, Apache 2.0) covering 8 PII categories | GPU (or remote) | ~8GB, ~30-100ms/call on GPU |
+| `gemma` | LLM | Gemma 3 1B via Ollama (`gemma3:1b`), catches contextual / narrative leaks a pure NER can't see ("the engineer who runs the Rotterdam office") | CPU or GPU | ~800MB, ~300-600ms/call |
+
+Enable in `.erebus/pii-filter.json`:
+
+```json
+{ "verifier": "piiranha" }                 // CPU laptop
+{ "verifier": "openai-pf" }                // local GPU, model loads in-process
+{ "verifier": "piiranha,gemma" }           // NER + contextual LLM
+{ "verifier": "openai-pf,gemma" }          // GPU NER + contextual LLM
+```
+
+`verifier_llm_model` overrides the Ollama tag (default `gemma3:1b`).
+
+`openai-pf` can also run against a separate GPU box. Stand up an HTTP service that accepts `{"text": "..."}` and returns `{"spans": [{"start", "end", "text", "label"}]}`, then point Erebus at it:
+
+```json
+{
+  "verifier": "openai-pf",
+  "verifier_openai_pf_url": "https://my-gpu.internal/privacy-filter"
+}
+```
+
+Only **one** NER verifier runs at a time. If you list both, the parser keeps the first and drops the rest, since they overlap in purpose and running both would just be wasteful.
+
+Spans the verifier flags are tokenized as `[VERIFIED_<KIND>_<N>_<uid>]` so you can tell them apart from first-pass hits in the audit log. If the model isn't installed the verifier is a no-op, so the rest of the filter keeps working.
+
+## Benchmarks
+
+To measure what the verifiers actually add for your kind of data, use `erebus-benchmark`:
+
+```bash
+erebus-benchmark --seed                       # create example corpus at ~/.erebus/benchmark/corpus.jsonl
+vi ~/.erebus/benchmark/corpus.jsonl            # replace with your real labeled cases
+erebus-benchmark                               # run every config and print metrics
+erebus-benchmark --only piiranha+gemma         # just one config
+```
+
+The corpus lives outside the repo on purpose, since it usually contains real PII or domain-specific terms. Format is one JSON object per line with `text` and `expected` (list of sensitive substrings that ought to be tokenized).
+
+Output shows recall, precision, F1, and p50/p95 latency for each pipeline combination so you can pick the right tradeoff for your data.
+
 ## GDPR controls
 
 Erebus writes three sensitive files: the SQLite log, the token map, and the blacklists. All of them are chmod'd to `0600` (the containing `~/.erebus/` directory is `0700`), so a second user on the same machine can't read your tokenized data at rest.

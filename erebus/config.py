@@ -167,6 +167,18 @@ class RepoConfig:
     log_enabled: bool = True
     mode: str = "balanced"  # strict | balanced | relaxed
     blacklist: list[str] = field(default_factory=list)  # hard-blocked terms (merged global + repo)
+    # Optional second-pass verifiers layered on top of GLiNER + regex.
+    # Comma-separated list of pass names, e.g. "piiranha", "openai-pf",
+    # "piiranha,gemma", "openai-pf,gemma". Empty string disables it.
+    # Only one NER verifier (piiranha OR openai-pf) runs per turn.
+    verifier: str = ""
+    # Gemma verifier model ID (any Ollama tag). Keep small (1B-ish) so the
+    # per-message latency stays workable.
+    verifier_llm_model: str = "gemma3:1b"
+    # If set, openai-pf POSTs to this URL instead of loading the model
+    # in-process. Lets you run the heavy NER on a separate GPU box while
+    # the rest of erebus stays on the laptop.
+    verifier_openai_pf_url: str = ""
 
 
 # Patterns forced into block_file_patterns so the blacklist files themselves
