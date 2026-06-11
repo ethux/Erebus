@@ -1,0 +1,32 @@
+#!/bin/sh
+# Pre-commit checks: ruff lint, max-file-length ratchet, dead-code scan.
+# Enable once per clone with:  make hooks
+# Bypass in an emergency with: git commit --no-verify
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+staged_py=$(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
+[ -z "$staged_py" ] && exit 0
+
+for tool in ruff pylint; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "pre-commit: $tool not found. Install dev tools with: pip install -e '.[dev]'" >&2
+        exit 1
+    fi
+done
+
+echo "pre-commit: ruff check"
+printf '%s\n' "$staged_py" | tr '\n' '\0' | xargs -0 ruff check --
+
+echo "pre-commit: pylint (max module lines)"
+printf '%s\n' "$staged_py" | tr '\n' '\0' | xargs -0 pylint --
+
+if command -v vulture >/dev/null 2>&1; then
+    echo "pre-commit: dead code (vulture)"
+    vulture
+else
+    echo "pre-commit: vulture not found, skipping dead-code scan (pip install -e '.[dev]')" >&2
+fi
+
+echo "pre-commit: OK"

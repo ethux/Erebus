@@ -1,0 +1,111 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "erebus"
+version = "1.0.0"
+description = "Privacy-first PII filter for AI code editors — tokenizes sensitive data before it reaches the AI, de-tokenizes responses"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "ETHUX" },
+]
+keywords = ["pii", "privacy", "claude", "ai", "security", "gdpr", "secrets"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "gliner>=0.2.0",
+    "ollama>=0.3.0",
+    "aiohttp>=3.9.0",
+    "httpx>=0.27.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ethux/erebus"
+Issues = "https://github.com/ethux/erebus/issues"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.15",
+    "pylint>=3.3",
+    "vulture>=2.14",
+]
+
+[project.scripts]
+erebus = "erebus.shim:main"
+erebus-codex = "erebus.codex_shim:main"
+erebus-setup = "erebus.setup:main_install"
+erebus-update = "erebus.setup:main_update"
+erebus-uninstall = "erebus.setup:main_uninstall"
+erebus-log = "erebus.audit.logger:main_log"
+erebus-daemon = "erebus.runtime.daemon:run_daemon"
+erebus-proxy = "erebus.proxy:main"
+erebus-reveal = "erebus.commands.reveal:main"
+erebus-mcp = "erebus.runtime.mcp_server:main"
+erebus-blacklist = "erebus.commands.blacklist:main"
+erebus-forget = "erebus.audit.logger:main_forget"
+erebus-benchmark = "erebus.commands.benchmark:main"
+erebus-loc = "erebus.audit.loc:main"
+erebus-catalog = "erebus.commands.catalog:main"
+erebus-check-file = "erebus.commands.check_file:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["erebus*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["build"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (unused imports/variables, undefined names)
+    "I",    # isort (import sorting)
+    "UP",   # pyupgrade (modern Python syntax)
+    "B",    # flake8-bugbear (likely bugs)
+    "C90",  # mccabe (function complexity)
+    "SIM",  # flake8-simplify
+    "ERA",  # eradicate (commented-out code)
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E731",   # lambda assignments are fine for small callbacks
+    "SIM105", # try/except/pass is clearer and faster than contextlib.suppress
+    "SIM117", # nested with-statements often read better than one long line
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+# proxy.py needs a guarded aiohttp import (with fallback) before the remaining imports
+"erebus/proxy.py" = ["E402"]
+
+# Pylint runs alongside ruff for the one rule ruff doesn't have:
+# C0302 too-many-lines (max lines per module). Everything else stays off.
+[tool.pylint.main]
+disable = ["all"]
+enable = ["too-many-lines"]
+ignore-paths = ["build/.*"]
+persistent = false
+
+[tool.pylint.format]
+max-module-lines = 600
+
+[tool.vulture]
+paths = ["erebus"]
+min_confidence = 80
+exclude = ["build/"]
+# Unused-but-required interface parameters (part of public signatures)
+ignore_names = ["page_size", "context_snippet"]
