@@ -32,6 +32,22 @@ except Exception:
     def log_perf_event(event, **metadata):
         return None
 
+from .lifecycle import (
+    daemon_child_env as _daemon_child_env,
+)
+from .lifecycle import (
+    memory_ceiling_watchdog as _memory_ceiling_watchdog,
+)
+from .lifecycle import (
+    parent_process_watchdog as _parent_process_watchdog,
+)
+from .lifecycle import (
+    release_accelerator_cache as _release_accelerator_cache,
+)
+from .lifecycle import (
+    socket_path_watchdog as _socket_path_watchdog,
+)
+
 SOCKET_PATH = os.path.expanduser("~/.erebus/gliner.sock")
 PID_PATH = os.path.expanduser("~/.erebus/gliner.pid")
 # Exclusive, held for the daemon's whole life: makes "exactly one daemon loads
@@ -39,7 +55,6 @@ PID_PATH = os.path.expanduser("~/.erebus/gliner.pid")
 # editor windows starting together). Without it, each racer loaded its own
 # ~2 GB model copy and could exhaust memory.
 LOCK_PATH = os.path.expanduser("~/.erebus/gliner.lock")
-PARENT_PID_ENV = "EREBUS_DAEMON_PARENT_PID"
 MODEL_LOCK = threading.Lock()
 # Module-global so the fd (and thus the lock) lives as long as the process.
 _singleton_lock_fd: int | None = None
@@ -57,37 +72,6 @@ def _acquire_singleton_lock() -> int | None:
         os.close(fd)
         return None
     return fd
-
-
-def _daemon_child_env() -> dict[str, str]:
-    """Environment for a daemon spawned by ensure_daemon()."""
-    env = os.environ.copy()
-    env[PARENT_PID_ENV] = str(os.getpid())
-    return env
-
-
-def _expected_parent_pid() -> int | None:
-    raw = os.environ.get(PARENT_PID_ENV)
-    try:
-        pid = int(raw) if raw else os.getppid()
-    except ValueError:
-        pid = os.getppid()
-    return pid if pid > 1 else None
-
-
-def _parent_process_gone(expected_parent_pid: int) -> bool:
-    """True once a spawned daemon is no longer owned by its launcher."""
-    if expected_parent_pid <= 1:
-        return False
-    if os.getppid() != expected_parent_pid:
-        return True
-    try:
-        os.kill(expected_parent_pid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-    return False
 
 GLINER_LABELS = [
     "person", "email address", "phone number", "address",
@@ -206,6 +190,7 @@ def handle_client(conn, model):
                 entity_count = len(result)
             else:
                 result = []
+            _release_accelerator_cache()
             log_perf_event(
                 "gliner_inference",
                 **timer.finish(),
@@ -225,6 +210,8 @@ def handle_client(conn, model):
             pass
     finally:
         conn.close()
+
+
 
 
 def run_daemon():
@@ -270,51 +257,12 @@ def run_daemon():
     model = _load_model()
     print("GLiNER model ready.", file=sys.stderr, flush=True)
 
-    threading.Thread(target=_socket_path_watchdog, daemon=True).start()
+    threading.Thread(target=_socket_path_watchdog, args=(SOCKET_PATH,), daemon=True).start()
+    threading.Thread(target=_memory_ceiling_watchdog, daemon=True).start()
 
     while True:
         conn, _ = server.accept()
         threading.Thread(target=handle_client, args=(conn, model), daemon=True).start()
-
-
-def _socket_path_watchdog():
-    """Exit if our socket path vanishes from disk.
-
-    Clients find the daemon by socket path; if something deletes it (an older
-    stop_daemon unlinked it unconditionally), this process is unreachable
-    forever yet still blocks fresh daemons via the singleton lock — every
-    request then burns the full spawn wait and degrades. Exiting releases the
-    lock so the next ensure_daemon() can start a healthy instance.
-    """
-    misses = 0
-    while True:
-        time.sleep(15)
-        misses = misses + 1 if not os.path.exists(SOCKET_PATH) else 0
-        if misses >= 2:
-            print("GLiNER daemon socket path vanished; exiting so a fresh "
-                  "daemon can bind.", file=sys.stderr, flush=True)
-            os._exit(1)
-
-
-def _parent_process_watchdog():
-    """Exit once a daemon spawned by ensure_daemon() becomes orphaned.
-
-    Spawned daemons inherit the launcher's PID; direct shell launches use their
-    initial PPID. If a redeploy/restart kills that parent, this process is
-    reparented while keeping the model, socket, and lock alive. Exiting here
-    releases that memory and lets the replacement service generation own a
-    fresh daemon. Daemons launched directly by launchd/systemd start with
-    PPID=1 and are left alone.
-    """
-    parent_pid = _expected_parent_pid()
-    if parent_pid is None:
-        return
-    while True:
-        time.sleep(15)
-        if _parent_process_gone(parent_pid):
-            print("GLiNER daemon parent exited; releasing model and singleton lock.",
-                  file=sys.stderr, flush=True)
-            os._exit(0)
 
 
 def is_daemon_running() -> bool:

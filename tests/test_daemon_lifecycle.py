@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from erebus.runtime import daemon
+from erebus.runtime import daemon, lifecycle
 
 CHILD_SRC = """
 import fcntl, os, sys, time
@@ -113,37 +113,37 @@ def test_wedged_recovery_refuses_non_daemon_processes():
 
 
 def test_parent_watchdog_marks_reparented_daemon_orphaned():
-    with patch.object(daemon.os, "getppid", return_value=1), \
-         patch.object(daemon.os, "kill") as kill:
-        assert daemon._parent_process_gone(4242) is True
+    with patch.object(lifecycle.os, "getppid", return_value=1), \
+         patch.object(lifecycle.os, "kill") as kill:
+        assert lifecycle.parent_process_gone(4242) is True
         kill.assert_not_called()
 
-    with patch.object(daemon.os, "getppid", return_value=4242), \
-         patch.object(daemon.os, "kill") as kill:
-        assert daemon._parent_process_gone(4242) is False
+    with patch.object(lifecycle.os, "getppid", return_value=4242), \
+         patch.object(lifecycle.os, "kill") as kill:
+        assert lifecycle.parent_process_gone(4242) is False
         kill.assert_called_once_with(4242, 0)
     print("  ok parent watchdog treats ppid changes as orphaned")
 
 
 def test_spawn_env_records_expected_parent_pid():
-    with patch.object(daemon.os, "getpid", return_value=4242):
-        env = daemon._daemon_child_env()
-    assert env[daemon.PARENT_PID_ENV] == "4242"
+    with patch.object(lifecycle.os, "getpid", return_value=4242):
+        env = lifecycle.daemon_child_env()
+    assert env[lifecycle.PARENT_PID_ENV] == "4242"
     print("  ok spawned daemon records its expected parent pid")
 
 
 def test_expected_parent_pid_uses_env_or_initial_ppid():
-    with patch.dict(daemon.os.environ, {daemon.PARENT_PID_ENV: "4242"}), \
-         patch.object(daemon.os, "getppid", return_value=9999):
-        assert daemon._expected_parent_pid() == 4242
+    with patch.dict(lifecycle.os.environ, {lifecycle.PARENT_PID_ENV: "4242"}), \
+         patch.object(lifecycle.os, "getppid", return_value=9999):
+        assert lifecycle.expected_parent_pid() == 4242
 
-    with patch.dict(daemon.os.environ, {}, clear=True), \
-         patch.object(daemon.os, "getppid", return_value=4343):
-        assert daemon._expected_parent_pid() == 4343
+    with patch.dict(lifecycle.os.environ, {}, clear=True), \
+         patch.object(lifecycle.os, "getppid", return_value=4343):
+        assert lifecycle.expected_parent_pid() == 4343
 
-    with patch.dict(daemon.os.environ, {}, clear=True), \
-         patch.object(daemon.os, "getppid", return_value=1):
-        assert daemon._expected_parent_pid() is None
+    with patch.dict(lifecycle.os.environ, {}, clear=True), \
+         patch.object(lifecycle.os, "getppid", return_value=1):
+        assert lifecycle.expected_parent_pid() is None
     print("  ok parent watchdog covers spawned and direct non-launchd daemons")
 
 
@@ -160,8 +160,36 @@ def test_ensure_daemon_passes_parent_pid_to_spawned_daemon():
         daemon.ensure_daemon()
 
     kwargs = popen.call_args.kwargs
-    assert kwargs["env"][daemon.PARENT_PID_ENV] == str(os.getpid())
+    assert kwargs["env"][lifecycle.PARENT_PID_ENV] == str(os.getpid())
     print("  ok ensure_daemon passes parent pid to spawned daemon")
+
+
+def test_memory_ceiling_parses_env_override():
+    """Regression for the 2026-06-12 incident: the daemon's MPS allocator
+    retained 30 GB after a day of varied-shape inference."""
+    with patch.dict(lifecycle.os.environ, {lifecycle.MEMORY_CEILING_ENV: "2048"}):
+        assert lifecycle.memory_ceiling_mb() == 2048
+    with patch.dict(lifecycle.os.environ, {lifecycle.MEMORY_CEILING_ENV: "64"}):
+        assert lifecycle.memory_ceiling_mb() == 1024, "floor must be 1 GB"
+    with patch.dict(lifecycle.os.environ, {lifecycle.MEMORY_CEILING_ENV: "not-a-number"}):
+        assert lifecycle.memory_ceiling_mb() == lifecycle._DEFAULT_MEMORY_CEILING_MB
+    with patch.dict(lifecycle.os.environ, {}, clear=True):
+        assert lifecycle.memory_ceiling_mb() == lifecycle._DEFAULT_MEMORY_CEILING_MB
+    print("  ok memory ceiling honors env override, floor, and garbage input")
+
+
+def test_peak_footprint_reports_sane_value():
+    mb = lifecycle.process_peak_footprint_mb()
+    assert 1 < mb < 1_000_000, f"implausible footprint: {mb}MB"
+    print(f"  ok peak footprint reports a sane value ({mb:.0f}MB)")
+
+
+def test_release_accelerator_cache_never_raises():
+    # Must be safe with or without torch/accelerators present.
+    lifecycle.release_accelerator_cache()
+    with patch.dict(sys.modules, {"torch": None}):
+        lifecycle.release_accelerator_cache()
+    print("  ok accelerator cache release is unconditionally safe")
 
 
 if __name__ == "__main__":
@@ -174,6 +202,9 @@ if __name__ == "__main__":
         test_spawn_env_records_expected_parent_pid,
         test_expected_parent_pid_uses_env_or_initial_ppid,
         test_ensure_daemon_passes_parent_pid_to_spawned_daemon,
+        test_memory_ceiling_parses_env_override,
+        test_peak_footprint_reports_sane_value,
+        test_release_accelerator_cache_never_raises,
     ]
     print("\n=== Daemon Lifecycle Tests ===\n")
     passed = 0
