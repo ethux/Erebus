@@ -42,6 +42,15 @@ python tests/test_proxy_tokenize_latency.py
 python tests/test_check_file.py
 
 echo ""
+echo "=== Safe Cloud Chat layer (safechat/) ==="
+# Strippable layer (specs/005): the glob simply matches nothing once
+# safechat/ is removed, so this block self-skips.
+for t in safechat/tests/test_*.py; do
+  [ -e "$t" ] || continue
+  python "$t"
+done
+
+echo ""
 echo "=== Boundary Gateway Tests ==="
 # Static FR-008 audit first: a boundary violation should fail the gate fast,
 # before the per-module gateway loop runs.

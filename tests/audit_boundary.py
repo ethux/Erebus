@@ -289,13 +289,13 @@ class _BoundaryVisitor(ast.NodeVisitor):
 
 # ── filter.py structural check ────────────────────────────────────────────────
 
-# filter.py is a re-export-only facade; only these top-level defs are permitted.
-_FILTER_ALLOWED_DEFS = frozenset({"__getattr__", "_get_cached_tokenize_result"})
+# filter.py is a re-export-only facade; only __getattr__ is an allowed top-level def.
+_FILTER_ALLOWED_DEFS = frozenset({"__getattr__"})
 
 
 def _check_filter_facade(tree: ast.Module, rel: str) -> list[tuple[int, str]]:
-    """erebus/filter.py may hold imports/assignments/__getattr__/the documented
-    dead-code shim only. Any other top-level def is a violation."""
+    """erebus/filter.py may hold imports/assignments/__getattr__ only.
+    Any other top-level def is a violation."""
     out: list[tuple[int, str]] = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

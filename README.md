@@ -8,7 +8,7 @@ Privacy-first PII filter for AI code editors. Tokenizes sensitive data before it
 
 ## Project status
 
-Erebus is a v1.0.0 release, but it is still young software. Expect possible
+Erebus is a v1.0.1 release, but it is still young software. Expect possible
 bugs, editor-specific edge cases, and cases where unusual payloads need another
 pass. Keep a human review loop around sensitive workflows and please open an
 issue if something looks off.
@@ -246,11 +246,22 @@ shrinks them), and a `vulture` dead-code scan.
 
 ---
 
-## Kill switch
+## Environment variables
+
+| Variable | Default | What it controls |
+|----------|---------|------------------|
+| `EREBUS_GLINER_THREADS` | `min(8, CPU cores - 2)` | CPU threads the GLiNER detector may use. PII detection runs on every prompt and tool result and, by default, spreads across most of your cores for speed, so you may see several cores hit 100% during a turn. Lower it (e.g. `2` to `4`) to cap CPU use, at the cost of slightly slower detection on large inputs. |
+| `EREBUS_GLINER_DEVICE` | `mps` on Apple Silicon, else `cpu` | Inference device for the detector: `mps`, `cpu`, or `cuda`. On Apple Silicon, MPS (the GPU) runs detection roughly 3x faster than CPU. |
+| `EREBUS_BYPASS` | unset | Set to `1` to bypass all filtering for one session (kill switch): `EREBUS_BYPASS=1 claude`. |
+
+`EREBUS_GLINER_THREADS` and `EREBUS_GLINER_DEVICE` are read when the GLiNER
+daemon starts. To make a change persist for editor-launched sessions on macOS:
 
 ```bash
-EREBUS_BYPASS=1 claude    # bypass all filtering for one session
+launchctl setenv EREBUS_GLINER_THREADS 4   # GUI apps inherit it on next launch
 ```
+
+Then restart the daemon (it respawns on demand) and your editor.
 
 ---
 

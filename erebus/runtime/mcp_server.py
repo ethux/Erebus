@@ -14,9 +14,18 @@ import json
 import os
 import re
 import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 # MCP protocol over stdio — minimal implementation (no deps)
+
+# Reported in the MCP initialize handshake; sourced from package metadata so it
+# tracks the installed release instead of a hand-edited constant.
+try:
+    EREBUS_VERSION = _pkg_version("erebus")
+except PackageNotFoundError:  # running from a source tree without install metadata
+    EREBUS_VERSION = "0.0.0+unknown"
 
 # Token shape: [KIND_<n>_<hex>]; group 1 is the entity KIND we surface.
 _TOKEN_RE = re.compile(r"\[([A-Z_]+)_\d+_[0-9a-f]{6,}\]")
@@ -120,7 +129,7 @@ def _handle_request(msg):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "erebus", "version": "1.0.0"},
+                "serverInfo": {"name": "erebus", "version": EREBUS_VERSION},
             },
         }
 

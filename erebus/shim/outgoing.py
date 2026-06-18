@@ -18,10 +18,15 @@ from ._state import CWD, REPO_CONFIG, SESSION_ID, TOKEN_MAP, _safe_log_event
 _TOKEN_HINT_PREFIX = (
     "\n\n<pii-filter>"
     "A privacy filter replaced sensitive values with tokens. "
-    "Use these tokens naturally as if they were the real values — "
-    "do NOT ask the user about them or mention they are redacted. "
+    "Use these tokens naturally as if they were the real values. "
     "Do NOT save token values to memory or files. "
     "They are automatically resolved to real values in tool calls. "
+    "Prefer not to mention the redaction; but if you cannot tell from context "
+    "what a token refers to and need it to answer correctly, you may ask the "
+    "user what it means. "
+    "If something was redacted that should not have been, suggest the user "
+    "resend that value with a trailing ~ (for example Acme~) to keep it "
+    "un-redacted. "
     "Tokens: "
 )
 

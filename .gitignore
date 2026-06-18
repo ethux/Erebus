@@ -9,6 +9,7 @@ dist/
 .claude/
 .erebus/
 .pytest_cache/
+.playwright-mcp/
 specs/
 .specify/
 .agents/
@@ -21,3 +22,5 @@ Thumbs.db
 *.tmp
 *.swp
 docs/
+safechat/
+space/

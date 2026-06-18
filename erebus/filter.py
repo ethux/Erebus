@@ -98,11 +98,6 @@ __all__ = [
     "warn_detection_degraded",
 ]
 
-# Dead code kept as a facade-only compat shim (carve-map risk 4): no callers
-# remain anywhere; intentionally NOT carved into erebus/core/.
-def _get_cached_tokenize_result(key: tuple, original_text: str | None = None) -> tuple[str, dict] | None:
-    return _get_cached_tokenize_result_detail(key, original_text)[0]
-
 
 # Mutable module state owned (and sometimes REBOUND) by the core modules.
 # Resolved on every attribute read so facade-level reads stay live.
