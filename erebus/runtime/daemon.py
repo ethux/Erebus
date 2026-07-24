@@ -47,6 +47,7 @@ from .lifecycle import (
 from .lifecycle import (
     socket_path_watchdog as _socket_path_watchdog,
 )
+from .model_loading import _default_threads, _load_model
 
 SOCKET_PATH = os.path.expanduser("~/.erebus/gliner.sock")
 PID_PATH = os.path.expanduser("~/.erebus/gliner.pid")
@@ -79,54 +80,6 @@ GLINER_LABELS = [
     "iban", "passport number", "ip address", "username",
     "password", "api key", "date of birth", "bank account number",
 ]
-
-
-def _default_threads() -> int:
-    """Detector thread count. Defaults to most of the box so batched windows
-    (specs/003-proxy-tokenize-latency) parallelise; override via env."""
-    env = os.environ.get("EREBUS_GLINER_THREADS")
-    if env:
-        try:
-            return max(1, int(env))
-        except ValueError:
-            pass
-    cpu = os.cpu_count() or 4
-    return max(1, min(8, cpu - 2))
-
-
-def _detector_device() -> str:
-    """Inference device: EREBUS_GLINER_DEVICE overrides, else MPS when present.
-
-    Measured on M-series: MPS runs GLiNER ~3x faster than CPU with identical
-    outputs, which is the difference between sub-second and multi-second
-    tokenization on novel interactive turns.
-    """
-    env = os.environ.get("EREBUS_GLINER_DEVICE")
-    if env:
-        return env
-    try:
-        import torch
-        if torch.backends.mps.is_available():
-            return "mps"
-    except Exception:
-        pass
-    return "cpu"
-
-
-def _load_model():
-    import torch
-    torch.set_num_threads(_default_threads())
-    from gliner import GLiNER
-    model = GLiNER.from_pretrained("urchade/gliner_multi_pii-v1")
-    device = _detector_device()
-    if device != "cpu":
-        try:
-            model = model.to(device)
-            print(f"GLiNER running on {device}.", file=sys.stderr, flush=True)
-        except Exception as exc:
-            print(f"GLiNER {device} unavailable ({exc}); staying on CPU.",
-                  file=sys.stderr, flush=True)
-    return model
 
 
 def handle_client(conn, model):
@@ -214,6 +167,34 @@ def handle_client(conn, model):
 
 
 
+def _bind_reclaiming_socket():
+    """Bind the Unix socket, robustly reclaiming a stale one (FR-004).
+
+    Called only while holding the exclusive singleton lock, so any socket on
+    disk is guaranteed stale — a previous daemon that died without cleanup, not
+    a live one. We unlink it before bind so a concurrent start can never hit
+    "address already in use"; if bind still races the file, we reclaim and
+    retry once. A starter that failed to take the lock returns before ever
+    reaching here, so it never touches the socket.
+    """
+    def _reclaim():
+        try:
+            os.unlink(SOCKET_PATH)
+        except FileNotFoundError:
+            pass
+
+    _reclaim()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(SOCKET_PATH)
+    except OSError:
+        # Stale socket reappeared between unlink and bind — reclaim and retry
+        # once. Safe: we hold the lock, so nothing live owns this path.
+        _reclaim()
+        server.bind(SOCKET_PATH)
+    return server
+
+
 def run_daemon():
     """Main daemon loop."""
     global _singleton_lock_fd
@@ -234,9 +215,6 @@ def run_daemon():
 
     # We hold the exclusive lock, so reclaiming the socket can't disturb a live
     # daemon — any socket on disk is stale.
-    if os.path.exists(SOCKET_PATH):
-        os.unlink(SOCKET_PATH)
-
     os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
 
     # Write PID
@@ -248,8 +226,7 @@ def run_daemon():
     # Bind socket before loading the model so ensure_daemon() detects us
     # quickly.  Connections that arrive during model loading queue in the
     # kernel backlog (listen 8) and are served once the model is ready.
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(SOCKET_PATH)
+    server = _bind_reclaiming_socket()
     server.listen(8)
 
     # Load model (this is the slow part — only happens once)
@@ -260,8 +237,22 @@ def run_daemon():
     threading.Thread(target=_socket_path_watchdog, args=(SOCKET_PATH,), daemon=True).start()
     threading.Thread(target=_memory_ceiling_watchdog, daemon=True).start()
 
+    # A long-lived server must survive any single client. handle_client isolates
+    # per-connection faults (a client that hangs up or cancels mid-request, and
+    # any dependency that surfaces "closed kqueue" / NoEventLoopError from the
+    # inference path); the accept loop itself must also never die on a transient
+    # accept() error (FR-002). Only a torn-down listening socket is fatal.
     while True:
-        conn, _ = server.accept()
+        try:
+            conn, _ = server.accept()
+        except OSError as exc:
+            if server.fileno() == -1:
+                print("GLiNER daemon listening socket closed; exiting.",
+                      file=sys.stderr, flush=True)
+                return
+            print(f"GLiNER daemon accept() error ignored: {exc}",
+                  file=sys.stderr, flush=True)
+            continue
         threading.Thread(target=handle_client, args=(conn, model), daemon=True).start()
 
 

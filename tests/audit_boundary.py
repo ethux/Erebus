@@ -93,7 +93,14 @@ def _is_allowlisted(rel_posix: str) -> bool:
     if rel_posix in ALLOWLIST:
         return True
     # tests/ is allowlisted wholesale.
-    return rel_posix.startswith("tests/")
+    if rel_posix.startswith("tests/"):
+        return True
+    # erebus/gateway/ is the enterprise server gateway (specs/007): a separate,
+    # self-contained tokenization boundary, not a thin editor client. It owns its
+    # own per-tenant tokenize/restore and carries its own FR-041..043 guard
+    # (tests/gateway/test_no_antipatterns.py), so the laptop product's single-core
+    # FR-008 invariant does not govern it.
+    return rel_posix.startswith("erebus/gateway/")
 
 
 # ── Blessed-facade import provenance ──────────────────────────────────────────

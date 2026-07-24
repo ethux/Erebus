@@ -220,6 +220,7 @@ def test_update_reloads_from_plist_instead_of_kickstarting():
         agents = home / "Library" / "LaunchAgents"
         agents.mkdir(parents=True)
         (agents / f"{services.OPENAI_PROXY_LABEL}.plist").write_text("<plist/>")
+        (agents / f"{services.GLINER_DAEMON_LABEL}.plist").write_text("<plist/>")
         reloaded, kickstarted = [], []
 
         with (
@@ -227,13 +228,14 @@ def test_update_reloads_from_plist_instead_of_kickstarting():
             patch.object(services.platform, "system", return_value="Darwin"),
             patch.object(services, "_reap_legacy_launch_agents"),
             patch.object(services, "_launchctl_reload",
-                         side_effect=lambda p, label, port: reloaded.append(label) or True),
+                         side_effect=lambda p, label, port=None: reloaded.append(label) or True),
             patch.object(services, "restart_launchd_service",
                          side_effect=lambda label: kickstarted.append(label) or True),
         ):
             assert services.restart_proxy_services()
 
-        assert reloaded == [services.OPENAI_PROXY_LABEL]
+        # Services with a plist on disk reload from it; the daemon (portless) too.
+        assert reloaded == [services.OPENAI_PROXY_LABEL, services.GLINER_DAEMON_LABEL]
         assert kickstarted == [services.PROXY_LABEL], "no plist on disk -> kickstart fallback"
     print("  ok update reloads services from their plists")
 

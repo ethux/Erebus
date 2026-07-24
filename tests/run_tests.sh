@@ -28,6 +28,10 @@ python tests/test_wrapper_integration.py
 python tests/test_catalog_model.py
 python tests/test_setup_services.py
 python tests/test_daemon_lifecycle.py
+python tests/test_daemon_reliability.py
+python tests/test_daemon_service.py
+python tests/test_degraded_backstop.py
+python tests/test_detection_unchanged.py
 python tests/test_shim_retokenize_gate.py
 python tests/test_unresolved_block.py
 python tests/test_detok_write_scope.py
@@ -59,6 +63,20 @@ for t in tests/boundary/test_*.py; do
   [ -e "$t" ] || continue
   python "$t"
 done
+
+echo ""
+echo "=== Enterprise Server Gateway (erebus/gateway/, specs/007) ==="
+# DB-backed gateway tests create their own throwaway PostgreSQL databases; the
+# whole block is skipped when psycopg or a reachable Postgres is unavailable so
+# CI without Postgres still passes. Set EREBUS_PG_DSN to point at a server.
+if python -c "import psycopg, os; psycopg.connect(os.environ.get('EREBUS_PG_DSN','postgresql:///postgres')).close()" 2>/dev/null; then
+  for t in tests/gateway/test_*.py; do
+    [ -e "$t" ] || continue
+    python "$t"
+  done
+else
+  echo "  (skipped: psycopg + a reachable PostgreSQL required)"
+fi
 
 echo "================================================"
 echo "  All tests done"

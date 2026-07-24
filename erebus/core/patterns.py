@@ -68,6 +68,11 @@ SECRET_PATTERNS = [
     # Trailing lookaheads: reject continuations (word char, hyphen, or a dot
     # that starts another label) but allow a sentence-ending period.
     (r"(?i)(?<![\w.+%-])[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}(?![\w\-])(?!\.[\w\-])", "EMAIL_ADDRESS"),
+    # Phone numbers in international +CC form, including space/paren/hyphen grouping
+    # (e.g. a WhatsApp sender label "+31 6 12345678"). High confidence and GLiNER-
+    # independent: requires a leading + and 8+ digit-ish chars, so it does not fire on
+    # short "+5" / "C++"-style tokens. National (no-+) forms are left to NER.
+    (r"(?<![\w+])\+\d[\d ().-]{6,18}\d(?!\w)", "PHONE_NUMBER"),
     # Specific token formats (high confidence)
     (r"sk-[a-zA-Z0-9\-_]{20,}",              "API_KEY"),
     (r"ghp_[a-zA-Z0-9]{36}",                  "GITHUB_TOKEN"),

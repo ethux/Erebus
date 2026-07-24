@@ -34,9 +34,11 @@ from .editors import (
     uninstall_vibe,
 )
 from .services import (
+    install_gliner_daemon_service,
     install_openai_proxy_service,
     install_proxy_service,
     restart_proxy_services,
+    uninstall_gliner_daemon_service,
     uninstall_openai_proxy_service,
     uninstall_proxy_service,
 )
@@ -72,6 +74,7 @@ def main_install():
     install_proxy_service()
     if "codex" in editors:
         install_openai_proxy_service()
+    install_gliner_daemon_service()
     print(ok("\nDone. Run `erebus-uninstall` to remove."))
     print(info("Try it: erebus-log  (view activity log after first use)\n"))
 
@@ -92,6 +95,7 @@ def main_uninstall():
     if "codex" in editors:
         uninstall_openai_proxy_service()
     uninstall_proxy_service()
+    uninstall_gliner_daemon_service()
     print(ok("\nUninstalled.\n"))
 
 

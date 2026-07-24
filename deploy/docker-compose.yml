@@ -1,0 +1,73 @@
+# Erebus deployable gateway - local/beta self-hosted stand-up (008 FR-013, research R9).
+#
+# Brings up Postgres (the shared state) and the gateway. Matches quickstart.md Option A:
+#
+#   cp deploy/gateway.env.example gateway.env   # fill DSN, master key, provider, etc.
+#   docker compose -f deploy/docker-compose.yml --env-file gateway.env up
+#
+# The gateway reads its full configuration from gateway.env (env_file below) and serves on
+# :8080. The Postgres DSN in gateway.env must point at the `postgres` service on this
+# network, e.g. postgresql://erebus:erebus@postgres:5432/erebus_gateway, matching the
+# credentials below.
+#
+# GLiNER detection: the production GLiNER daemon speaks over a Unix domain socket on the
+# local filesystem (~/.erebus/gliner.sock), so it is not wired as a separate TCP service in
+# this compose for a hermetic stand-up. Set EREBUS_DISABLE_GLINER=1 in gateway.env to stand
+# the stack up without GLiNER (an explicit, recorded regex-only posture). To run production
+# detection, run the GLiNER daemon (`erebus-daemon`) on a shared socket and mount it into the
+# gateway container, or co-locate detection in the gateway image; see the placeholder below.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: erebus
+      POSTGRES_PASSWORD: erebus
+      POSTGRES_DB: erebus_gateway
+    volumes:
+      - erebus_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erebus -d erebus_gateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    expose:
+      - "5432"
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: erebus-gateway
+    # Full operator configuration (DSN, master key, provider, detection, pool, etc.) is
+    # supplied from gateway.env; see deploy/gateway.env.example.
+    env_file:
+      - ../gateway.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      # Readiness drains the replica when shared state, key custody, or detection is
+      # unhealthy. Point a load balancer at /readyz; /healthz is liveness-only.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/readyz').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # Placeholder for production GLiNER detection (research R4). The daemon currently binds a
+  # Unix socket on the host filesystem, so wiring it cross-container needs a shared socket
+  # volume or co-location in the gateway image. Until then, set EREBUS_DISABLE_GLINER=1 in
+  # gateway.env for a hermetic regex-only stand-up.
+  #
+  # gliner:
+  #   image: erebus-gateway
+  #   command: ["erebus-daemon"]
+  #   volumes:
+  #     - erebus_gliner_sock:/home/erebus/.erebus
+
+volumes:
+  erebus_pgdata:
+  # erebus_gliner_sock:
