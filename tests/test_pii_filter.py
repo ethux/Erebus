@@ -39,6 +39,40 @@ def test_api_key_detected():
     print(f"  ✓ API key tokenized: {sanitized}")
 
 
+def test_phone_intl_spaced_detected_without_gliner():
+    """The '+31 6 NNNNNNNN' WhatsApp sender-label form must not depend on NER.
+
+    Regression for the reported leak: this exact space-separated international shape
+    reached the model un-tokenized while other senders were caught. Phone numbers are
+    structured PII and must be caught by the deterministic regex layer, GLiNER off.
+    """
+    from unittest.mock import patch
+
+    text = "WhatsApp\n+31 6 12345678: hoi\n+31 6 87654321: yo"
+    with patch("erebus.core.detect._predict_entities", return_value=[]):
+        sanitized, tokens = tokenize(text, mode="relaxed")
+    assert "+31 6 12345678" not in sanitized and "+31 6 87654321" not in sanitized
+    assert "12345678" not in sanitized and "87654321" not in sanitized
+    assert "[PHONE_NUMBER_" in sanitized
+    assert len(tokens) == 2
+    print(f"  ✓ Spaced intl phones tokenized without GLiNER: {sanitized}")
+
+
+def test_phone_variants_and_no_overmatch():
+    """Common international phone spellings are caught; short '+'-tokens are not."""
+    from unittest.mock import patch
+
+    with patch("erebus.core.detect._predict_entities", return_value=[]):
+        for phone in ("+31612345678", "+1 (555) 123-4567", "+44 20 7946 0958"):
+            sanitized, _tokens = tokenize(f"call {phone} today", mode="relaxed")
+            assert phone not in sanitized and "[PHONE_NUMBER_" in sanitized, phone
+        # No over-match on short '+' tokens or a bare version bump.
+        for benign in ("C++ code", "score +5 today", "bumped to +2.0"):
+            sanitized, _ = tokenize(benign, mode="relaxed")
+            assert "PHONE_NUMBER" not in sanitized, benign
+    print("  ✓ Phone variants caught; short '+' tokens not over-matched")
+
+
 def test_gitlab_token_detected():
     text = "My token is glpat-xxxxxxxxxxxxxxxxxxxx for the repo"
     sanitized, _tokens = tokenize(text)

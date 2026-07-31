@@ -28,6 +28,10 @@ python tests/test_wrapper_integration.py
 python tests/test_catalog_model.py
 python tests/test_setup_services.py
 python tests/test_daemon_lifecycle.py
+python tests/test_daemon_reliability.py
+python tests/test_daemon_service.py
+python tests/test_degraded_backstop.py
+python tests/test_detection_unchanged.py
 python tests/test_shim_retokenize_gate.py
 python tests/test_unresolved_block.py
 python tests/test_detok_write_scope.py
