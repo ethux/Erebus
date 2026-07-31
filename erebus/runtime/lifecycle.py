@@ -27,10 +27,30 @@ _DEFAULT_MEMORY_CEILING_MB = 8192
 
 # ── parent-death guard ─────────────────────────────────────────────────────────
 
+def fork_safety_env() -> dict[str, str]:
+    """The macOS fork-after-initialize mitigation the daemon must run with.
+
+    Once the Metal/Foundation (Objective-C) runtime is initialized (torch/MPS +
+    GLiNER), any fork() in the model path — huggingface_hub's parallel file
+    fetch, tokenizers' worker pool — aborts the child with
+    objc_initializeAfterForkError and takes the daemon down. This was the
+    dominant crash (18/33). The first var disables that abort; the second stops
+    tokenizers from forking workers at all. Both must be set before torch/gliner
+    import, so they belong in the spawn/service environment, not in-process.
+    """
+    return {
+        "OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "YES",
+        "TOKENIZERS_PARALLELISM": "false",
+    }
+
+
 def daemon_child_env() -> dict[str, str]:
     """Environment for a daemon spawned by ensure_daemon()."""
     env = os.environ.copy()
     env[PARENT_PID_ENV] = str(os.getpid())
+    # Belt-and-braces with the KeepAlive service's plist EnvironmentVariables:
+    # any transitional on-demand spawn gets the same fork-safety guarantee.
+    env.update(fork_safety_env())
     return env
 
 

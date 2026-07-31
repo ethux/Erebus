@@ -12,14 +12,17 @@ from importlib import metadata
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from ..runtime.lifecycle import fork_safety_env
 from ..runtime.ports import describe_port_holder
 from ..ui.colors import bold, info, ok, warn
 
 TCC_PROTECTED_DIRS = {"Desktop", "Documents", "Downloads"}
 PROXY_LABEL = "com.ethux.erebus-proxy"
 OPENAI_PROXY_LABEL = "com.ethux.erebus-proxy-openai"
+GLINER_DAEMON_LABEL = "com.ethux.erebus-gliner-daemon"
 PROXY_SERVICE_NAME = "erebus-proxy"
 OPENAI_PROXY_SERVICE_NAME = "erebus-proxy-openai"
+GLINER_DAEMON_SERVICE_NAME = "erebus-gliner-daemon"
 PROXY_PORT = 4747
 OPENAI_PROXY_PORT = 4748
 # Labels from older generations of this product that may survive in launchd
@@ -31,10 +34,18 @@ KNOWN_LEGACY_LABELS = ("com.ethux.pii-proxy",)
 
 
 def _find_proxy_binary() -> str:
-    uv_path = Path.home() / ".local" / "share" / "uv" / "tools" / "erebus" / "bin" / "erebus-proxy"
+    return _find_erebus_binary("erebus-proxy")
+
+
+def _find_daemon_binary() -> str:
+    return _find_erebus_binary("erebus-daemon")
+
+
+def _find_erebus_binary(name: str) -> str:
+    uv_path = Path.home() / ".local" / "share" / "uv" / "tools" / "erebus" / "bin" / name
     if uv_path.exists():
         return str(uv_path)
-    return shutil.which("erebus-proxy") or "erebus-proxy"
+    return shutil.which(name) or name
 
 
 def _editable_install_source(distribution_name: str = "erebus") -> Path | None:
@@ -117,6 +128,109 @@ def install_openai_proxy_service():
         target="https://chatgpt.com/backend-api/codex",
         log_suffix="proxy-openai",
     )
+
+
+def install_gliner_daemon_service():
+    """Install the GLiNER detection daemon as an always-warm KeepAlive service.
+
+    Keeps the model resident so there is no cold-start degraded window, and
+    carries the macOS fork-safety EnvironmentVariables so the dominant
+    objc-after-fork crash cannot happen. The daemon's own singleton lock keeps
+    this supervised instance and any transitional on-demand spawn from ever
+    double-loading, so it is safe to run alongside ensure_daemon().
+    """
+    print(bold("\nConfiguring GLiNER detection daemon service...\n"))
+    daemon_bin = _find_daemon_binary()
+    system = platform.system()
+
+    if system == "Darwin":
+        blocker = _launchd_editable_install_blocker()
+        if blocker:
+            print(warn(blocker))
+            raise SystemExit(1)
+        _install_gliner_daemon_launchd(daemon_bin)
+    elif system == "Linux":
+        _install_gliner_daemon_systemd(daemon_bin)
+    else:
+        print(warn(f"Auto-start not supported on {system} — the daemon spawns on "
+                   f"demand instead (run: erebus-daemon)."))
+
+
+def build_gliner_daemon_plist(daemon_bin: str) -> str:
+    """The KeepAlive daemon LaunchAgent plist (fork-safety env baked in)."""
+    env_items = "".join(
+        f"\n        <key>{key}</key>\n        <string>{value}</string>"
+        for key, value in fork_safety_env().items()
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{GLINER_DAEMON_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{daemon_bin}</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>{env_items}
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ExitTimeOut</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>{Path.home()}/.erebus/gliner-daemon.out</string>
+    <key>StandardErrorPath</key>
+    <string>{Path.home()}/.erebus/daemon.log</string>
+</dict>
+</plist>"""
+
+
+def _install_gliner_daemon_launchd(daemon_bin: str):
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{GLINER_DAEMON_LABEL}.plist"
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(build_gliner_daemon_plist(daemon_bin))
+    if _launchctl_reload(plist_path, GLINER_DAEMON_LABEL):
+        print(ok(f"macOS LaunchAgent installed — {GLINER_DAEMON_LABEL} keeps the "
+                 f"detector warm"))
+    else:
+        print(warn(f"{GLINER_DAEMON_LABEL} is installed but not running yet — it will "
+                   f"start at next login, or run: "
+                   f"launchctl bootstrap gui/{os.getuid()} {plist_path}"))
+
+
+def _install_gliner_daemon_systemd(daemon_bin: str):
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    unit_path = unit_dir / f"{GLINER_DAEMON_SERVICE_NAME}.service"
+    env_lines = "".join(
+        f"Environment={key}={value}\n" for key, value in fork_safety_env().items()
+    )
+    unit = f"""[Unit]
+Description={GLINER_DAEMON_SERVICE_NAME}
+After=network.target
+
+[Service]
+{env_lines}ExecStart={daemon_bin}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+    unit_path.write_text(unit)
+    _sp.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    _sp.run(["systemctl", "--user", "enable", "--now",
+             f"{GLINER_DAEMON_SERVICE_NAME}.service"], capture_output=True)
+    print(ok("systemd user service installed — detection daemon stays warm"))
+    print(info(f"Status: systemctl --user status {GLINER_DAEMON_SERVICE_NAME}"))
+
+
+def uninstall_gliner_daemon_service():
+    _uninstall_proxy_service(GLINER_DAEMON_LABEL, GLINER_DAEMON_SERVICE_NAME)
 
 
 def _install_proxy_service(label: str, service_name: str, port: int,
@@ -212,7 +326,7 @@ def _gui_domain_available() -> bool:
     return result.returncode == 0
 
 
-def _launchctl_reload(plist_path: Path, label: str, port: int) -> bool:
+def _launchctl_reload(plist_path: Path, label: str, port: int | None = None) -> bool:
     """Make launchd's in-memory job definition match the plist on disk.
 
     Uses bootout/bootstrap instead of legacy unload/load: unload can fail
@@ -239,7 +353,7 @@ def _launchctl_reload(plist_path: Path, label: str, port: int) -> bool:
         print(warn(f"{label} is still loaded after bootout — reboot, or run: "
                    f"launchctl bootout {launchd_target(label)}"))
         return False
-    holder = describe_port_holder(port)
+    holder = describe_port_holder(port) if port else None
     if holder:
         print(warn(f"Port {port} is held by {holder} — the service will crash-loop "
                    f"until that process exits. Kill it to recover immediately."))
@@ -338,7 +452,7 @@ def restart_systemd_service(service_name: str) -> bool:
     return True
 
 
-def _reload_or_restart(label: str, port: int) -> bool:
+def _reload_or_restart(label: str, port: int | None = None) -> bool:
     """Refresh a service from its on-disk plist, falling back to kickstart.
 
     erebus-update must not kickstart launchd's cached job definition: a stale
@@ -363,12 +477,14 @@ def restart_proxy_services() -> bool:
         results = [
             _reload_or_restart(PROXY_LABEL, PROXY_PORT),
             _reload_or_restart(OPENAI_PROXY_LABEL, OPENAI_PROXY_PORT),
+            _reload_or_restart(GLINER_DAEMON_LABEL, None),
         ]
         return any(results)
     if system == "Linux":
         results = [
             restart_systemd_service(PROXY_SERVICE_NAME),
             restart_systemd_service(OPENAI_PROXY_SERVICE_NAME),
+            restart_systemd_service(GLINER_DAEMON_SERVICE_NAME),
         ]
         return any(results)
     print(warn(f"Auto-restart not supported on {system}"))
