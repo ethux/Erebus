@@ -5,6 +5,50 @@ All notable changes to Erebus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-09-10
+
+Codex proxy latency. Measured over 431 Codex turns (2026-09-05) the proxy added
+avg 4.7 s (p95 14.5 s) before the upstream call, and long streams stalled until
+Codex hit its SSE idle timeout. GLiNER was not the cause; the proxy's own
+bookkeeping was. Detection output is unchanged.
+
+Measured after the fixes over 302 live Codex turns: the proxy's own bookkeeping
+fell from the dominant cost to 12% of the tokenize pass, and the multi-second
+stalls are gone. What remains is detector time.
+
+### Fixed
+
+- **Audit-log recovery no longer scans the whole log on every turn.** A cached
+  history item whose tokens no longer resolved triggered a full scan of
+  `log.db` (3.4 GB live, ~18 s) on every request. Recovery now reads only the
+  newest 5000 rows, remembers misses for five minutes, and evicts the cached
+  item so it is tokenized afresh instead of replaying a token whose value is lost.
+- **Expired escape allowances are swept** on store open and hourly; 174k
+  expired rows had accumulated and were re-read on every store write. Re-granting
+  an allowance that is still active is no longer a write.
+- **`~` escapes match words only.** Code and markdown such as `~/path`,
+  `~~strike~~`, `a~b` and `=~` no longer count as escapes; each false match was
+  a store write plus a rewrite of the legacy token map.
+- **Known-value pre-scan probes only candidate values** (leading-trigram index)
+  instead of every stored value per cached item.
+- **Tokenization runs off the event loop** on a single worker thread, so a slow
+  turn no longer freezes other in-flight Codex streams.
+- **Streaming detokenization scales with the text, not the token store.** Each
+  SSE delta probed all ~13k stored tokens against the whole buffer (45 ms per
+  10 KB); it now resolves only the tokens present in the text.
+- **New tokens are stored in one transaction per turn** instead of one per token
+  (each transaction rewrote the legacy export).
+- **`erebus-update --from <path>` rebuilds from source.** uv reused the wheel it
+  had built for the same version, so a local update could silently install stale
+  code. The command now passes `--reinstall`.
+- **Large tool outputs are cacheable.** A history item over 16 KB whose sanitized
+  text reused an earlier token (known-value pre-scan, result-cache hit) could never
+  be stored in the message cache (`uncacheable_patch`), so it went back through
+  GLiNER on every turn: 1981 of 2466 misses live were 74 such items. Span patches
+  are now derived by aligning the original and sanitized texts with every token's
+  value, and the span cap is 2048. Items that are still uncacheable now record
+  why (`uncacheable_patch:<reason>`) in the perf log.
+
 ## [1.0.2] - 2026-07-31
 
 Detection-availability release. The GLiNER detection daemon had been crash-looping,

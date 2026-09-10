@@ -270,23 +270,37 @@ def forget_term(term: str) -> int:
     return removed
 
 
+# Recovery walks the newest rows only. The audit DB grows without bound (3.4 GB
+# live, 2026-09-05) and an unbounded ``ORDER BY id DESC`` fetched every
+# tokens_map row into Python: ~18 s per lookup, paid on every proxy turn that
+# carried a token the store no longer knew. Recent rows are where a rotated
+# live-map token can still be found; older ones are the known-value store's job.
+AUDIT_RECOVERY_MAX_ROWS = 5000
+# Recovery is best-effort: do not sit out a long writer lock on the loop thread.
+AUDIT_RECOVERY_LOCK_TIMEOUT_S = 1.0
+
+
 def lookup_token_values(tokens: set[str]) -> dict[str, str]:
-    """Look up exact token placeholders from logged token maps.
+    """Look up exact token placeholders from recently logged token maps.
 
     This is a recovery path for long-running conversations: the live token map
     can be rotated or overwritten while Claude still has older placeholders in
-    context. Only the structured tokens_map column is searched.
+    context. Only the structured tokens_map column of the newest
+    AUDIT_RECOVERY_MAX_ROWS rows is searched.
     """
     wanted = {token for token in tokens if token}
     if not wanted or not DB_PATH.exists():
         return {}
 
     found: dict[str, str] = {}
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT tokens_map FROM events WHERE tokens_map IS NOT NULL ORDER BY id DESC"
-    ).fetchall()
-    conn.close()
+    conn = sqlite3.connect(DB_PATH, timeout=AUDIT_RECOVERY_LOCK_TIMEOUT_S)
+    try:
+        rows = conn.execute(
+            "SELECT tokens_map FROM events WHERE tokens_map IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (AUDIT_RECOVERY_MAX_ROWS,),
+        ).fetchall()
+    finally:
+        conn.close()
 
     for (tokens_map,) in rows:
         try:

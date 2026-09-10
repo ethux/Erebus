@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import errno
 import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from ..audit.logger import init_db, log_event
 from ..config import load_repo_config
@@ -29,7 +31,7 @@ from .telemetry import SESSION_ID, log_request_tokenize_metrics
 from .tokenmap import TOKEN_MAP, get_boundary
 
 
-def _tokenize_request_body(request, parsed_body: dict, repo_config, is_chat: bool):
+def _tokenize_request_body(endpoint: str, parsed_body: dict, repo_config, is_chat: bool):
     """Tokenize one filterable request body in place; log PII findings."""
     if is_chat:
         new_tokens, turn_type, log_subject = tokenize_chat_request(parsed_body, repo_config)
@@ -42,8 +44,54 @@ def _tokenize_request_body(request, parsed_body: dict, repo_config, is_chat: boo
                   sanitized=json.dumps(log_subject)[:500],
                   tokens_map=new_tokens,
                   metadata={"cwd": os.getcwd(), "source": "proxy",
-                            "endpoint": request.path, "token_count": len(new_tokens)})
+                            "endpoint": endpoint, "token_count": len(new_tokens)})
     return parsed_body, new_tokens, turn_type
+
+
+def _tokenize_turn(endpoint: str, method: str, body: bytes, repo_config,
+                   boundary) -> tuple[bytes, str, str, bool]:
+    """One request's synchronous tokenize pass: (body, turn_type, degraded_reason, is_streaming).
+
+    Runs on the app's single tokenize worker thread, never on the event loop:
+    a Codex turn's pass takes seconds (history replay, detector, audit log),
+    and on the loop it froze every other in-flight stream until Codex hit its
+    SSE idle timeout. One worker keeps turns serialized, so the thread-local
+    degraded signal the Boundary turn reads stays that turn's own.
+    """
+    request_body_bytes = len(body)
+    is_chat = _is_chat_endpoint(endpoint)
+    turn_type = "chat"
+    degraded_reason = ""
+    is_streaming = False
+    # The turn resets the turn-scoped degraded signal before any tokenization
+    # for this request and warns (debounced) on exit if the turn degraded.
+    with boundary.turn() as turn_state:
+        tok_timer = PerfTimer()
+        tokenize_error = ""
+        try:
+            parsed_body = json.loads(body)
+            is_streaming = bool(parsed_body.get("stream", False))
+            parsed_body, new_tokens, turn_type = _tokenize_request_body(
+                endpoint, parsed_body, repo_config, is_chat)
+            body = json.dumps(parsed_body).encode()
+        except (json.JSONDecodeError, KeyError):
+            new_tokens = {}
+            tokenize_error = "json_or_key"
+
+        log_request_tokenize_metrics(
+            repo_config, tok_timer.finish(),
+            endpoint=endpoint, method=method,
+            request_body_bytes=request_body_bytes, response_body_bytes=len(body),
+            turn_type=turn_type, api_family="chat" if is_chat else "responses",
+            new_tokens=new_tokens, error=tokenize_error)
+
+        if turn_state.degraded:
+            degraded_reason = turn_state.degraded_reason
+
+    if degraded_reason:
+        log_perf_event("detector_degraded", reason=degraded_reason,
+                       endpoint=endpoint, turn_type=turn_type)
+    return body, turn_type, degraded_reason, is_streaming
 
 
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
@@ -55,52 +103,19 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     repo_config = request.app["repo_config"]
     body = await request.read()
-    request_body_bytes = len(body)
     method = request.method
     headers = forwardable_request_headers(request)
 
-    # Tokenize PII in model requests.
-    is_chat = _is_chat_endpoint(request.path)
-    is_responses = _is_responses_endpoint(request.path)
-    is_filterable = is_chat or is_responses
+    # Tokenize PII in model requests (off the loop; see _tokenize_turn).
+    is_filterable = _is_chat_endpoint(request.path) or _is_responses_endpoint(request.path)
     is_streaming = False
-
     turn_type = "chat"
     degraded_reason = ""
-    boundary = get_boundary(repo_config)
-    # The turn resets the turn-scoped degraded signal before any tokenization
-    # for this request and warns (debounced) on exit if the turn degraded. The
-    # tokenize block below is synchronous (no awaits), so the flag can't be
-    # clobbered by an interleaved request.
-    with boundary.turn() as turn_state:
-        if is_filterable and body and method in ("POST", "PUT"):
-            tok_timer = PerfTimer()
-            tokenize_error = ""
-            try:
-                parsed_body = json.loads(body)
-                is_streaming = parsed_body.get("stream", False)
-                parsed_body, new_tokens, turn_type = _tokenize_request_body(
-                    request, parsed_body, repo_config, is_chat)
-                body = json.dumps(parsed_body).encode()
-            except (json.JSONDecodeError, KeyError):
-                new_tokens = {}
-                tokenize_error = "json_or_key"
-
-            log_request_tokenize_metrics(
-                repo_config, tok_timer.finish(),
-                endpoint=request.path, method=method,
-                request_body_bytes=request_body_bytes, response_body_bytes=len(body),
-                turn_type=turn_type, api_family="chat" if is_chat else "responses",
-                new_tokens=new_tokens, error=tokenize_error)
-
-        # Capture the degraded signal before the first await: the thread-local
-        # turn flag is only trustworthy until another request's handler runs.
-        if turn_state.degraded:
-            degraded_reason = turn_state.degraded_reason
-
-    if degraded_reason:
-        log_perf_event("detector_degraded", reason=degraded_reason,
-                       endpoint=request.path, turn_type=turn_type)
+    if is_filterable and body and method in ("POST", "PUT"):
+        boundary = get_boundary(repo_config)
+        body, turn_type, degraded_reason, is_streaming = await asyncio.get_running_loop().run_in_executor(
+            request.app["tokenize_executor"], _tokenize_turn,
+            request.path, method, body, repo_config, boundary)
 
     # Forward request
     client: httpx.AsyncClient = request.app["http_client"]
@@ -131,6 +146,9 @@ def create_app(target_url: str = "https://api.mistral.ai") -> web.Application:
     app["repo_config"] = load_repo_config()
     # One Boundary per process (module-level fallback covers helper/test calls).
     app["boundary"] = get_boundary(app["repo_config"])
+    # Exactly one worker: tokenize passes stay serialized (shared caches, the
+    # thread-local turn signal) while the loop keeps streaming other responses.
+    app["tokenize_executor"] = ThreadPoolExecutor(max_workers=1, thread_name_prefix="erebus-tokenize")
 
     async def on_startup(app):
         app["http_client"] = httpx.AsyncClient(timeout=120.0, follow_redirects=True)
@@ -147,6 +165,7 @@ def create_app(target_url: str = "https://api.mistral.ai") -> web.Application:
 
     async def on_cleanup(app):
         await app["http_client"].aclose()
+        app["tokenize_executor"].shutdown(wait=True)
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)

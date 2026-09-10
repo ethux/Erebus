@@ -79,7 +79,7 @@ def test_launchd_blocker_allows_editable_install_outside_tcc_dirs():
 
 def test_update_install_command_uses_uv_upgrade_or_local_source():
     assert setup_cli.update_install_command(None, True) == ["uv", "tool", "upgrade", "erebus", "--reinstall"]
-    assert setup_cli.update_install_command(".", True) == ["uv", "tool", "install", "--force", "."]
+    assert setup_cli.update_install_command(".", True) == ["uv", "tool", "install", "--force", "--reinstall", "."]
 
     pip_cmd = setup_cli.update_install_command(None, False)
     assert pip_cmd[-5:] == ["-m", "pip", "install", "--upgrade", "erebus"]

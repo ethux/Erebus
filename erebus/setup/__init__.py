@@ -103,7 +103,10 @@ def update_install_command(source: str | None, has_uv: bool) -> list[str]:
     """Return the package update command for the current installer."""
     if has_uv:
         if source:
-            return ["uv", "tool", "install", "--force", source]
+            # --reinstall (implies --refresh) forces a rebuild: with the version
+            # and pyproject.toml unchanged, uv otherwise reuses the wheel it
+            # built last time and silently installs stale code (2026-09-06).
+            return ["uv", "tool", "install", "--force", "--reinstall", source]
         return ["uv", "tool", "upgrade", "erebus", "--reinstall"]
     python = shutil.which("python3") or sys.executable
     package = source or "erebus"

@@ -7,6 +7,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import threading
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -23,11 +24,27 @@ CREATE INDEX IF NOT EXISTS idx_known_values_value ON known_values(value);
 CREATE INDEX IF NOT EXISTS idx_known_values_created_at ON known_values(created_at);
 CREATE TABLE IF NOT EXISTS escape_allowances (id INTEGER PRIMARY KEY, value TEXT NOT NULL, granted_at TEXT NOT NULL, expires_at TEXT NOT NULL, source TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_escape_allowances_value ON escape_allowances(value);
+CREATE INDEX IF NOT EXISTS idx_escape_allowances_expires_at ON escape_allowances(expires_at);
 CREATE TABLE IF NOT EXISTS meta (schema_version INTEGER NOT NULL, generation INTEGER NOT NULL DEFAULT 0, seeded_from_legacy INTEGER NOT NULL DEFAULT 0);
 """  # noqa: E501
 
 _INSERT_KV = ("INSERT OR IGNORE INTO known_values (token, value, label, created_at, last_seen_at, source)"
               " VALUES (?, ?, ?, ?, ?, ?)")
+
+# One connection per DB file is shared by the proxy's tokenize worker and its
+# event loop (streaming detokenization). SQLite serializes statements, but a
+# BEGIN from one thread inside another thread's open transaction raises and
+# would flip the store to degraded mode, so every transaction and read holds
+# this (re-entrant) lock.
+_DB_LOCK = threading.RLock()
+
+# Audit-log recovery (FR-018) is expensive and a token that is not there now
+# will not be there on the next turn either. Remember misses per process and
+# retry only after the window; otherwise a poisoned cache entry rescans the
+# audit log on every request (measured 2026-09-05: 18 s per turn, 47% of
+# Codex tokenize time).
+_AUDIT_RETRY_SECONDS = 300.0
+_UNRESOLVABLE: dict[str, float] = {}  # token -> clock.monotonic() deadline for the next retry
 
 # Degraded transient-token mode (FR-012): process-local fallback shared by every handle.
 _degraded = False
@@ -74,7 +91,8 @@ def _durable_value(value: str) -> bool:
     return len(value.strip()) >= 2
 def _q(conn: sqlite3.Connection, sql: str, params=()) -> list[sqlite3.Row]:
     try:  # read query that degrades to "no rows" instead of raising
-        return conn.execute(sql, params).fetchall()
+        with _DB_LOCK:
+            return conn.execute(sql, params).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -106,6 +124,7 @@ class KnownValueDB:
                     _set_degraded(True)
             self._conns.append((path, conn))
         self._seed_from_legacy()
+        self.sweep_allowances()
 
     def _read_paths(self) -> list[object]:
         if self._session_only:
@@ -140,17 +159,18 @@ class KnownValueDB:
         conn = self._write_conn
         if conn is None:
             raise sqlite3.OperationalError("known-values DB unavailable")
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            result = fn(conn)
-            conn.execute("UPDATE meta SET generation = generation + 1")
-            conn.execute("COMMIT")
-        except BaseException:
-            with suppress(sqlite3.Error):
-                conn.execute("ROLLBACK")
-            raise
-        _set_degraded(False)
-        self._export_legacy()
+        with _DB_LOCK:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                result = fn(conn)
+                conn.execute("UPDATE meta SET generation = generation + 1")
+                conn.execute("COMMIT")
+            except BaseException:
+                with suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
+                raise
+            _set_degraded(False)
+            self._export_legacy()
         return result
 
     def _safe_write(self, fn):
@@ -281,20 +301,36 @@ class KnownValueDB:
 
     def ingest(self, token: str, value: str, label: str = "", source: str = "") -> None:
         """Adopt an externally minted (token, value) pair; no-op when the token is already stored."""
-        if self.lookup_value(token) is not None:
-            return
-        lbl = label or _label_of(token, "INGESTED")
-        if not _durable_value(value):
-            # The token may already sit in model-bound text, so the mapping must
-            # stay resolvable — but only transiently, never in the durable DB.
-            # lookup_value() sees transients, so this logs once per token.
-            print(f"erebus: keeping degenerate value for {token} transient only "
-                  f"(len<2, source={source!r})", file=sys.stderr)
-            _store_transient(token, value, _normalize_label(lbl), source)
+        self.ingest_many({token: value}, label=label, source=source)
+
+    def ingest_many(self, pairs: dict[str, str], label: str = "", source: str = "") -> None:
+        """Adopt externally minted (token, value) pairs in ONE transaction.
+
+        A Codex turn mints ~70 tokens; one transaction per token meant 70
+        generation bumps and 70 rewrites of the legacy export (~1 s per turn)."""
+        durable: list[tuple] = []
+        for token, value in pairs.items():
+            if self.lookup_value(token) is not None:
+                continue
+            lbl = label or _label_of(token, "INGESTED")
+            if not _durable_value(value):
+                # The token may already sit in model-bound text, so the mapping must
+                # stay resolvable — but only transiently, never in the durable DB.
+                # lookup_value() sees transients, so this logs once per token.
+                print(f"erebus: keeping degenerate value for {token} transient only "
+                      f"(len<2, source={source!r})", file=sys.stderr)
+                _store_transient(token, value, _normalize_label(lbl), source)
+                continue
+            durable.append((token, value, lbl))
+        if not durable:
             return
         ts = clock.now().isoformat()
-        if self._safe_write(lambda c: c.execute(_INSERT_KV, (token, value, lbl, ts, ts, source))) is None:
-            _store_transient(token, value, _normalize_label(lbl), source)
+        def _do(c):
+            c.executemany(_INSERT_KV, [(token, value, lbl, ts, ts, source) for token, value, lbl in durable])
+            return True
+        if self._safe_write(_do) is None:
+            for token, value, lbl in durable:
+                _store_transient(token, value, _normalize_label(lbl), source)
 
     def bulk_view(self) -> KnownValueView:
         self._try_recover()
@@ -319,9 +355,13 @@ class KnownValueDB:
                    for conn in self._live_conns())
 
     def resolve_missing(self, tokens: set[str]) -> dict[str, str]:
-        """Recover unknown tokens from the audit log and persist them (FR-018)."""
+        """Recover unknown tokens from the audit log and persist them (FR-018).
+
+        The store is always consulted; the audit-log scan is skipped for tokens
+        that already failed recovery within ``_AUDIT_RETRY_SECONDS``."""
         resolved = {t: v for t in tokens if (v := self.lookup_value(t)) is not None}
-        missing = tokens - resolved.keys()
+        now = clock.monotonic()
+        missing = {t for t in tokens - resolved.keys() if _UNRESOLVABLE.get(t, 0.0) <= now}
         if not missing:
             return resolved
         try:  # lazy import: the audit logger lives outside core
@@ -330,6 +370,11 @@ class KnownValueDB:
         except Exception as exc:
             print(f"erebus: audit-log token recovery failed: {exc}", file=sys.stderr)
             found = {}
+        for token in missing:
+            if token in found:
+                _UNRESOLVABLE.pop(token, None)
+            else:
+                _UNRESOLVABLE[token] = now + _AUDIT_RETRY_SECONDS
         if found:
             now_iso = clock.now().isoformat()
             def _do(c):
@@ -344,28 +389,70 @@ class KnownValueDB:
         return resolved
 
     def grant_allowance(self, value: str, window_min: int, source: str = "") -> None:
-        """Record a user escape: the value may pass unprotected until expiry (FR-013)."""
+        """Record a user escape: the value may pass unprotected until expiry (FR-013).
+
+        One row per value. A re-grant while the current allowance still has at
+        least half its window left is a no-op (no write, no generation bump):
+        the same escaped history is resent on every turn, and each write used
+        to rebuild every view and rewrite the legacy export."""
         self._try_recover()
         now = clock.now()
         expires = now + timedelta(minutes=window_min)
-        ok = self._safe_write(lambda c: c.execute(
-            "INSERT INTO escape_allowances (value, granted_at, expires_at, source) VALUES (?, ?, ?, ?)",
-            (value, now.isoformat(), expires.isoformat(), source)))
+        conn = self._write_conn
+        if conn is not None:
+            current = _q(conn, "SELECT expires_at FROM escape_allowances WHERE value = ?"
+                               " ORDER BY expires_at DESC LIMIT 1", (value,))
+            current_expiry = _parse_iso(current[0]["expires_at"]) if current else None
+            if current_expiry is not None and current_expiry >= now + timedelta(minutes=window_min / 2):
+                return
+        def _do(c):
+            c.execute("DELETE FROM escape_allowances WHERE value = ?", (value,))
+            c.execute("INSERT INTO escape_allowances (value, granted_at, expires_at, source) VALUES (?, ?, ?, ?)",
+                      (value, now.isoformat(), expires.isoformat(), source))
+            return True  # _safe_write reports failure as None
+        ok = self._safe_write(_do)
         if ok is None:  # degraded: keep the allowance in memory so escapes still work
             prev = _TRANSIENT_ALLOWANCES.get(value)
             _TRANSIENT_ALLOWANCES[value] = max(expires, prev) if prev else expires
 
     def active_allowances(self) -> dict[str, datetime]:
-        """value -> expires_at for every non-expired allowance (FR-013/FR-014)."""
+        """value -> expires_at for every non-expired allowance (FR-013/FR-014).
+
+        Expired rows are filtered in SQL (ISO-8601 UTC strings order
+        lexicographically), so the cost follows the live allowances, not the
+        table's history."""
         self._try_recover()
         now = clock.now()
         out: dict[str, datetime] = {}
         rows = [(row["value"], _parse_iso(row["expires_at"])) for conn in self._live_conns()
-                for row in _q(conn, "SELECT value, expires_at FROM escape_allowances")]
+                for row in _q(conn, "SELECT value, expires_at FROM escape_allowances WHERE expires_at > ?",
+                              (now.isoformat(),))]
         for value, expires in rows + list(_TRANSIENT_ALLOWANCES.items()):
             if expires and expires > now and expires > out.get(value, now):
                 out[value] = expires
         return out
+
+    def sweep_allowances(self) -> int:
+        """Delete expired escape allowances (every scope DB). No generation bump:
+        nothing an open view can see changes. Returns the rows removed."""
+        cutoff = clock.now().isoformat()
+        removed = 0
+        for _, conn in self._conns:
+            if conn is None:
+                continue
+            with suppress(sqlite3.Error), _DB_LOCK:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    removed += conn.execute("DELETE FROM escape_allowances WHERE expires_at <= ?",
+                                            (cutoff,)).rowcount or 0
+                    conn.execute("COMMIT")
+                except BaseException:
+                    with suppress(sqlite3.Error):
+                        conn.execute("ROLLBACK")
+                    raise
+        for value in [v for v, e in _TRANSIENT_ALLOWANCES.items() if e <= clock.now()]:
+            del _TRANSIENT_ALLOWANCES[value]
+        return removed
 
     def sweep(self) -> int:
         """Rotate aged values + expired allowances; no-op for 'permanent' (FR-016)."""
@@ -402,13 +489,14 @@ class KnownValueDB:
             if conn is None:
                 continue
             try:
-                conn.execute("BEGIN IMMEDIATE")
-                n = conn.execute("DELETE FROM known_values WHERE value = ?", (value,)).rowcount or 0
-                n += conn.execute("DELETE FROM escape_allowances WHERE value = ?", (value,)).rowcount or 0
-                if n:
-                    conn.execute("UPDATE meta SET generation = generation + 1")
-                    erased = True
-                conn.execute("COMMIT")
+                with _DB_LOCK:
+                    conn.execute("BEGIN IMMEDIATE")
+                    n = conn.execute("DELETE FROM known_values WHERE value = ?", (value,)).rowcount or 0
+                    n += conn.execute("DELETE FROM escape_allowances WHERE value = ?", (value,)).rowcount or 0
+                    if n:
+                        conn.execute("UPDATE meta SET generation = generation + 1")
+                        erased = True
+                    conn.execute("COMMIT")
             except sqlite3.OperationalError:
                 with suppress(sqlite3.Error):
                     conn.execute("ROLLBACK")

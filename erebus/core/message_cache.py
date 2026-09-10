@@ -26,7 +26,7 @@ _MSG_CACHE_MAX = 16_384
 _MSG_CACHE_MAX_BYTES = 8 * 1024 * 1024
 _MSG_CACHE_MAX_PATCH_CHARS = 16_384
 _MSG_CACHE_MAX_PATCHES = 128
-_MSG_CACHE_MAX_SPANS = 512
+_MSG_CACHE_MAX_SPANS = 2048  # a CSV-like tool output can carry hundreds of values; the 128 KB entry cap still applies
 _MSG_CACHE_PATH = Path.home() / ".erebus" / "message_cache.json"
 _MSG_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _MSG_CACHE_LOADED = False
@@ -204,8 +204,8 @@ def save_message_cache() -> None:
 
         merged = dict(existing)
         for key in _MSG_CACHE_DIRTY_KEYS:
+            merged.pop(key, None)  # evicted keys leave the file too
             if key in _MSG_CACHE:
-                merged.pop(key, None)
                 merged[key] = _MSG_CACHE[key]
         entries = dict(list(merged.items())[-_MSG_CACHE_MAX:])
         payload = {"version": _MSG_CACHE_VERSION, "entries": entries}
@@ -236,7 +236,50 @@ def apply_text_span_patches(text: str, spans: list[list[Any]]) -> str:
     return "".join(chunks)
 
 
-def collect_token_span_patch(original: str, sanitized: str, tokens: dict) -> dict[str, Any] | None:
+def _align_token_spans(original: str, sanitized: str, tokens: dict) -> list[list[Any]] | None:
+    """Spans that turn ``original`` into ``sanitized``, by walking both texts.
+
+    ``sanitized`` is ``original`` with some substrings replaced by tokens whose
+    values ``tokens`` supplies; literal text between tokens must match
+    position for position. A token the original already carried aligns as a
+    literal. None when a token's value is unknown or the texts diverge
+    elsewhere (an escape marker was stripped, say)."""
+    spans: list[list[Any]] = []
+    o = s = 0
+    for match in TOKEN_RE.finditer(sanitized):
+        literal = sanitized[s:match.start()]
+        if not original.startswith(literal, o):
+            return None, "text_diverged"
+        o += len(literal)
+        token = match.group(0)
+        value = tokens.get(token)
+        if isinstance(value, str) and value and value != token and original.startswith(value, o):
+            spans.append([o, o + len(value), token])
+            o += len(value)
+        elif original.startswith(token, o):
+            o += len(token)
+        else:
+            return None, "token_value_unknown"
+        s = match.end()
+    if original[o:] != sanitized[s:]:
+        return None, "tail_diverged"
+    return spans, ""
+
+
+def collect_token_span_patch(original: str, sanitized: str, tokens: dict,
+                             diag: dict | None = None) -> dict[str, Any] | None:
+    """Express ``sanitized`` as token spans over ``original``, or None.
+
+    ``diag`` (optional) receives a privacy-safe ``reason`` for a rejection, so
+    the telemetry can say WHY an item is uncacheable rather than only that it is.
+    """
+    aligned, reason = _align_token_spans(original, sanitized, tokens)
+    if aligned is not None:
+        if len(aligned) <= _MSG_CACHE_MAX_SPANS:
+            return {"spans": aligned}
+        reason = "too_many_spans"
+    if diag is not None:
+        diag["reason"] = reason
     candidates = []
     for token, value in tokens.items():
         if (not isinstance(token, str) or not TOKEN_RE.fullmatch(token)
@@ -261,16 +304,19 @@ def collect_token_span_patch(original: str, sanitized: str, tokens: dict) -> dic
             return None
     if apply_text_span_patches(original, spans) != sanitized:
         return None
+    if diag is not None:
+        diag.pop("reason", None)  # the fallback succeeded; nothing to report
     return {"spans": spans}
 
 
-def collect_text_patches(original: Any, sanitized: Any, tokens: dict, path: tuple = ()) -> list[dict[str, Any]] | None:
+def collect_text_patches(original: Any, sanitized: Any, tokens: dict, path: tuple = (),
+                         diag: dict | None = None) -> list[dict[str, Any]] | None:
     if isinstance(original, str) and isinstance(sanitized, str):
         if original == sanitized:
             return []
         if len(sanitized) <= _MSG_CACHE_MAX_PATCH_CHARS:
             return [{"path": list(path), "value": sanitized}]
-        span_patch = collect_token_span_patch(original, sanitized, tokens)
+        span_patch = collect_token_span_patch(original, sanitized, tokens, diag)
         return None if span_patch is None else [{"path": list(path), **span_patch}]
 
     if isinstance(original, list) and isinstance(sanitized, list) and len(original) == len(sanitized):
@@ -281,7 +327,7 @@ def collect_text_patches(original: Any, sanitized: Any, tokens: dict, path: tupl
         return []
     patches = []
     for key, (before, after) in pairs:
-        nested = collect_text_patches(before, after, tokens, path + (key,))  # noqa: RUF005
+        nested = collect_text_patches(before, after, tokens, path + (key,), diag)  # noqa: RUF005
         if nested is None:
             return None
         patches.extend(nested)
@@ -317,10 +363,12 @@ def store_message_cache_entry(key: str | None, original: Any, sanitized: Any, to
     if not key:
         _log_store(timer, text_chars, len(tokens), cache_result="skip", reason="no_key")
         return
-    patches = collect_text_patches(original, sanitized, tokens)
+    diag: dict = {}
+    patches = collect_text_patches(original, sanitized, tokens, diag=diag)
     if patches is None:
         _log_store(timer, text_chars, len(tokens), cache_result="skip",
-                   reason="uncacheable_patch", cache_key=key[:12])
+                   reason=f"uncacheable_patch:{diag.get('reason') or 'unknown'}",
+                   cache_key=key[:12])
         return
     entry = normalize_message_cache_entry(
         {"patches": patches, "tokens": token_keys_from_patches(patches, tokens)})
@@ -365,12 +413,25 @@ def _log_apply(timer: PerfTimer, kind: str, text_chars: int, **fields: Any) -> N
                    text_chars=text_chars, **fields)
 
 
+def evict_message_cache_entry(key: str) -> None:
+    """Drop an entry from memory and, on the next save, from the file."""
+    global _MSG_CACHE_DIRTY
+    if _MSG_CACHE.pop(key, None) is not None:
+        _MSG_CACHE_DIRTY_KEYS.add(key)
+        _MSG_CACHE_DIRTY = True
+
+
 def apply_message_cache_entry(key: str | None, item: Any, collected: dict, kind: str = "message",
-                              record_tokens: Callable[[list[str], dict], None] | None = None,
+                              record_tokens: Callable[[list[str], dict], bool | None] | None = None,
                               retokenize_item: Callable[[Any], dict] | None = None) -> bool:
     """Reapply a cached entry's patches to `item`; True on a hit. The caller's
     `record_tokens(token_keys, collected)` resolves the entry's token keys into
     `collected` (proxy wires TOKEN_MAP recovery; Boundary wires the DB later).
+    It runs BEFORE any patch is applied and may return False when a token no
+    longer resolves anywhere: such an entry would send the model a token whose
+    value is lost (its reply could never be detokenized) and, live, cost an
+    audit-log scan on every turn. The entry is evicted and the untouched item
+    is reported as a miss so the caller tokenizes it afresh.
 
     `retokenize_item(item) -> inserted_tokens` re-runs the known-value pre-scan
     over EVERY model-bound text field of the applied item. This must run on the
@@ -392,6 +453,11 @@ def apply_message_cache_entry(key: str | None, item: Any, collected: dict, kind:
         _log_apply(timer, kind, text_chars, cache_result="miss", reason="not_found", cache_key=key[:12])
         return False
     _MSG_CACHE.move_to_end(key)
+    if record_tokens is not None and record_tokens(entry.get("tokens", []), collected) is False:
+        evict_message_cache_entry(key)
+        _log_apply(timer, kind, text_chars, cache_result="miss", reason="unresolvable_tokens",
+                   cache_key=key[:12], cached_token_count=len(entry.get("tokens", [])))
+        return False
     for patch in entry.get("patches", []):
         path = tuple(patch["path"])
         if "value" in patch:
@@ -407,8 +473,6 @@ def apply_message_cache_entry(key: str | None, item: Any, collected: dict, kind:
         inserted = retokenize_item(item)
         if inserted:
             collected.update(inserted)
-    if record_tokens is not None:
-        record_tokens(entry.get("tokens", []), collected)
     _log_apply(timer, kind, text_chars, cache_result="hit", cache_key=key[:12],
                patch_count=len(entry.get("patches", [])),
                cached_token_count=len(entry.get("tokens", [])))

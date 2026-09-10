@@ -43,6 +43,7 @@ python tests/test_catalog_cli.py
 python tests/test_proxy_catalog_integration.py
 python tests/test_catalog_api_e2e.py
 python tests/test_proxy_tokenize_latency.py
+python tests/test_proxy_bookkeeping_latency.py
 python tests/test_check_file.py
 
 echo ""
