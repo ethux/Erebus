@@ -5,7 +5,7 @@ import json
 
 from ..core import _set_path_value, message_cache_key, save_message_cache, store_message_cache_entry
 from .payload import collect_text_paths
-from .tokenmap import _persist_mirror, _record_new_tokens, apply_message_cache_entry, get_boundary
+from .tokenmap import _persist_mirror, _record_new_tokens, apply_message_cache_entry, get_boundary, patch_tokens_for
 
 
 def _tokenize_proxy_text(text: str, repo_config) -> tuple[str, dict]:
@@ -69,7 +69,7 @@ def _tokenize_messages(messages: list, repo_config) -> dict:
         if isinstance(tool_calls, list):
             _, tc_tokens = _tokenize_payload_text(tool_calls, repo_config)
             _record_new_tokens(tc_tokens, msg_tokens)
-        store_message_cache_entry(cache_key, original, msg, msg_tokens)
+        store_message_cache_entry(cache_key, original, msg, patch_tokens_for(msg, msg_tokens))
         _record_new_tokens(msg_tokens, new_tokens)
     save_message_cache()
     if new_tokens:

@@ -19,7 +19,7 @@ to_model pipeline (design §3, T027 slice):
 from __future__ import annotations
 
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -33,6 +33,8 @@ from .message_cache import repo_config_cache_signature, stable_json_hash
 from .modes import DEFAULT_MODE
 from .patterns import TOKEN_RE
 from .prescan import KnownValuePrescan
+
+_ALLOWANCE_SWEEP_INTERVAL_S = 3600.0
 
 
 def _merge_tokenizer_results(base_text: str, base_tokens: dict,
@@ -78,6 +80,7 @@ class Boundary:
     _prescan: KnownValuePrescan = field(default_factory=KnownValuePrescan, repr=False)
     # (generation, recheck_after, excluded_values) — see _allowance_exclusions.
     _allowance_cache: tuple = field(default=(-1, None, frozenset()), repr=False)
+    _last_allowance_sweep: float = field(default=0.0, repr=False)
 
     @classmethod
     def from_config(cls, repo_config, project_dir: str, source: str = "") -> Boundary:
@@ -221,8 +224,7 @@ class Boundary:
         if not tokens or (db := self._get_db()) is None:
             return
         try:
-            for token, value in tokens.items():
-                db.ingest(token, value, source=self.source)
+            db.ingest_many(tokens, source=self.source)
         except Exception as exc:
             print(f"erebus: known-value ingest failed: {exc}", file=sys.stderr)
 
@@ -358,8 +360,10 @@ class Boundary:
         persisted = self.load_legacy_export()
         merged = dict(view)
         merged.update(persisted)
-        merged.update(mirror)
-        mirror.clear()
+        # Snapshot + update only (no clear): the proxy's event loop reads the
+        # mirror while its tokenize worker syncs it, and a cleared mirror would
+        # leave a streamed token literal for the duration of the refill.
+        merged.update(dict(mirror))
         mirror.update(merged)
         return set(view) - persisted.keys()
 
@@ -369,8 +373,9 @@ class Boundary:
         so mirror-only entries survive sessions where ingest cannot land."""
         self.sync_view_into(mirror)
         view = self._view.token_view
-        self._ingest_new_tokens({t: v for t, v in mirror.items() if view.get(t) != v})
-        self.export_mirror(mirror)
+        snapshot = dict(mirror)  # iterate a copy: another thread may add entries meanwhile
+        self._ingest_new_tokens({t: v for t, v in snapshot.items() if view.get(t) != v})
+        self.export_mirror(snapshot)
 
     def recover_tokens(self, tokens: set) -> dict[str, str]:
         """Resolve unknown tokens via the DB (includes audit-log recovery,
@@ -396,8 +401,8 @@ class Boundary:
     @contextmanager
     def turn(self):
         """Wrap one request/message cycle: reset the turn-degraded signal on
-        enter; on exit warn (debounced) if the turn degraded and flush pending
-        cache saves."""
+        enter; on exit warn (debounced) if the turn degraded, flush pending
+        cache saves, and (hourly) sweep expired escape allowances."""
         state.begin_detection_turn()
         try:
             yield TurnState()
@@ -406,6 +411,18 @@ class Boundary:
                 state.warn_detection_degraded(state.turn_degraded_reason())
             cache_disk._save_disk_cache()
             message_cache.save_message_cache()
+            self._sweep_allowances_if_due()
+
+    def _sweep_allowances_if_due(self) -> None:
+        """Long-lived processes (the proxy runs for days) must not let expired
+        allowances pile up between store opens; 174k rows had accumulated live."""
+        now = clock.monotonic()
+        if now - self._last_allowance_sweep < _ALLOWANCE_SWEEP_INTERVAL_S:
+            return
+        self._last_allowance_sweep = now
+        if (db := self._get_db()) is not None:
+            with suppress(Exception):
+                db.sweep_allowances()
 
     # -- escapes (FR-013/FR-014) ---------------------------------------------------
 

@@ -5,7 +5,7 @@ import json
 
 from ..core import message_cache_key, save_message_cache, store_message_cache_entry
 from .chat import _tokenize_payload_text
-from .tokenmap import _persist_mirror, _record_new_tokens, apply_message_cache_entry
+from .tokenmap import _persist_mirror, _record_new_tokens, apply_message_cache_entry, patch_tokens_for
 
 
 def _tokenize_responses_payload(value, repo_config, parent_key: str | None = None) -> tuple[object, dict]:
@@ -25,7 +25,7 @@ def _tokenize_responses_input(inp: list, repo_config) -> dict:
         original = json.loads(json.dumps(item))
         item, item_tokens = _tokenize_responses_payload(item, repo_config)
         inp[idx] = item
-        store_message_cache_entry(cache_key, original, item, item_tokens)
+        store_message_cache_entry(cache_key, original, item, patch_tokens_for(item, item_tokens))
         _record_new_tokens(item_tokens, new_tokens)
     save_message_cache()
     return new_tokens
@@ -48,7 +48,8 @@ def _tokenize_responses_non_input(parsed_body: dict, repo_config, new_tokens: di
     non_input_result, extra_tokens = _tokenize_responses_payload(non_input_item, repo_config)
     non_input_body: dict = non_input_result  # type: ignore[assignment]
     store_message_cache_entry(
-        non_input_key, non_input_original, non_input_body, extra_tokens, save=True)
+        non_input_key, non_input_original, non_input_body,
+        patch_tokens_for(non_input_body, extra_tokens), save=True)
     for k, v in non_input_body.items():
         parsed_body[k] = v
     _record_new_tokens(extra_tokens, new_tokens)

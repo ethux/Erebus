@@ -8,7 +8,7 @@ Privacy-first PII filter for AI code editors. Tokenizes sensitive data before it
 
 ## Project status
 
-Erebus is a v1.0.1 release, but it is still young software. Expect possible
+Erebus is a v1.0.3 release, but it is still young software. Expect possible
 bugs, editor-specific edge cases, and cases where unusual payloads need another
 pass. Keep a human review loop around sensitive workflows and please open an
 issue if something looks off.
