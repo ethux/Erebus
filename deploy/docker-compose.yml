@@ -3,7 +3,8 @@
 # Brings up Postgres (the shared state) and the gateway. Matches quickstart.md Option A:
 #
 #   cp deploy/gateway.env.example gateway.env   # fill DSN, master key, provider, etc.
-#   docker compose -f deploy/docker-compose.yml --env-file gateway.env up
+#   docker compose -f deploy/docker-compose.yml up           # pulls the published image
+#   docker compose -f deploy/docker-compose.yml up --build   # builds from source
 #
 # The gateway reads its full configuration from gateway.env (env_file below) and serves on
 # :8080. The Postgres DSN in gateway.env must point at the `postgres` service on this
@@ -38,11 +39,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: erebus-gateway
+    image: ${EREBUS_IMAGE:-ghcr.io/ethux/erebus-gateway:beta}
     # Full operator configuration (DSN, master key, provider, detection, pool, etc.) is
     # supplied from gateway.env; see deploy/gateway.env.example.
     env_file:
-      - ../gateway.env
+      - ${EREBUS_ENV_FILE:-../gateway.env}
     depends_on:
       postgres:
         condition: service_healthy

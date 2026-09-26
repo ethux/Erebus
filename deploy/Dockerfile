@@ -9,6 +9,7 @@
 # EREBUS_GATEWAY_PROVIDER. No secrets are baked into the image (do not COPY a filled-in env).
 #
 # Build from the repository root:  docker build -f deploy/Dockerfile -t erebus-gateway .
+# Published as ghcr.io/ethux/erebus-gateway (core AGPL-3.0, pro/ Elastic-2.0).
 FROM python:3.12-slim
 
 # Predictable Python runtime: no .pyc files, unbuffered stdout/stderr so logs stream out,
@@ -20,10 +21,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Copy the project source and install the package with the gateway extra (FastAPI, uvicorn,
-# psycopg, psycopg-pool, httpx, cryptography). The build context is the repository root.
+# Copy the project source (.dockerignore keeps env files, keys and dev dirs out) and install
+# the gateway extra plus erebus-pro. The build context is the repository root.
 COPY . /app
-RUN pip install '.[gateway]'
+# CPU-only torch first: the PyPI default pulls multi-GB CUDA libraries the gateway never uses.
+RUN pip install --index-url https://download.pytorch.org/whl/cpu torch \
+ && pip install '.[gateway]' ./pro
 
 # The gateway listens on 8080 by default (EREBUS_GATEWAY_PORT).
 EXPOSE 8080

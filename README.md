@@ -204,14 +204,22 @@ makes them a service you can run.
 
 ### Install
 
+The recommended self-hosted path is the published image with Docker Compose
+(Postgres + gateway):
+
 ```bash
-python -m pip install '.[gateway]'   # FastAPI, uvicorn, psycopg, httpx, cryptography
+docker pull ghcr.io/ethux/erebus-gateway:beta
+cp deploy/gateway.env.example gateway.env   # fill in the required values
+docker compose -f deploy/docker-compose.yml up
 ```
 
-A Docker Compose deployment (`deploy/docker-compose.yml`, bringing up Postgres,
-the GLiNER daemon, and the gateway together) is the recommended self-hosted path;
-fill in `gateway.env` with the DSN, master key, provider, and central credentials
-before bringing it up.
+Add `--build` to build the image from source. The compose file does not run the
+GLiNER daemon yet; set `EREBUS_DISABLE_GLINER=1` for a regex-only beta. Without
+Docker:
+
+```bash
+python -m pip install '.[gateway]' ./pro   # FastAPI, uvicorn, psycopg, httpx, cryptography, Pro
+```
 
 ### Required configuration
 

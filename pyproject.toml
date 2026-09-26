@@ -71,6 +71,10 @@ where = ["."]
 include = ["erebus*"]
 exclude = ["pro*"]
 
+[tool.setuptools.package-data]
+# Gateway migrations are read from the installed package at startup.
+"erebus.gateway" = ["schema/*.sql"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 120
