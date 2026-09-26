@@ -14,7 +14,7 @@ dev: ## Install dev tooling (ruff, pylint, vulture) and enable hooks
 
 lint: ## Ruff + pylint (max module lines) + dead-code scan
 	ruff check .
-	pylint --recursive=y erebus tests
+	pylint --recursive=y erebus tests pro
 	vulture
 
 fix: ## Auto-fix lint violations where safe

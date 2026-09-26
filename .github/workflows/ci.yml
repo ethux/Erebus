@@ -32,7 +32,7 @@ jobs:
         run: ruff check .
 
       - name: Enforce max file length (pylint C0302)
-        run: pylint --recursive=y erebus tests
+        run: pylint --recursive=y erebus tests pro
 
       - name: Dead code scan
         run: vulture
@@ -95,6 +95,10 @@ jobs:
         run: |
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
           python -m pip install -e '.[gateway]'
+          python -m pip install -e ./pro
 
       - name: Gateway release gate
         run: bash tests/gateway/run.sh --all
+
+      - name: Pro tests
+        run: for t in pro/tests/test_*.py; do python "$t"; done

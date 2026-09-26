@@ -78,6 +78,16 @@ else
   echo "  (skipped: psycopg + a reachable PostgreSQL required)"
 fi
 
+echo ""
+echo "=== Erebus Pro (pro/) ==="
+if python -c "import cryptography, fastapi" 2>/dev/null; then
+  for t in pro/tests/test_*.py; do
+    python "$t"
+  done
+else
+  echo "  (skipped: install '.[gateway]' for Pro tests)"
+fi
+
 echo "================================================"
 echo "  All tests done"
 echo "================================================"

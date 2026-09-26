@@ -114,7 +114,7 @@ persistent = false
 max-module-lines = 600
 
 [tool.vulture]
-paths = ["erebus"]
+paths = ["erebus", "pro/erebus_pro", "pro/tools"]
 min_confidence = 80
 exclude = ["build/"]
 # Unused-but-required interface parameters (part of public signatures)
