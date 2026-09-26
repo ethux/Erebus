@@ -17,6 +17,7 @@ PURE_TESTS=(
   residency
   no_antipatterns
   helpers_smoke
+  extensions
 )
 
 modules_missing() {

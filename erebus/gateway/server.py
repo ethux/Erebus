@@ -30,6 +30,7 @@ from .config import ConfigError, GatewayConfig
 from .crypto.keyprovider import MasterKeyKms
 from .detection import build_detector
 from .egress import build_egress, build_egress_stream
+from .extensions import load_extensions
 from .http_provider import build_http_post, close_client
 from .observability import Metrics
 from .overload import Limiter
@@ -156,6 +157,7 @@ def build_app_from_config(config: GatewayConfig):
         on_shutdown=assembly.aclose,  # lifespan drains pool + httpx on shutdown (FR-015)
     )
     assembly.app = app
+    load_extensions(app, config)
     return app, assembly
 
 
