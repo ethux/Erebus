@@ -7,7 +7,8 @@ cd "$(dirname "$0")/.."
 SMOKE_ENV=".smoke.env"
 export EREBUS_ENV_FILE="../${SMOKE_ENV}"
 export EREBUS_IMAGE="erebus-gateway:smoke"
-compose() { docker compose -f deploy/docker-compose.yml "$@"; }
+# Own compose project: `down -v` must never touch a real stack started from the same file.
+compose() { docker compose -p erebus-smoke -f deploy/docker-compose.yml "$@"; }
 trap 'compose down -v >/dev/null 2>&1 || true; rm -f "$SMOKE_ENV"' EXIT
 
 KEY="$(python3 -c 'import base64,secrets;print(base64.b64encode(secrets.token_bytes(32)).decode())')"

@@ -97,10 +97,29 @@ def main():
     check("mounted key file with newline verifies", from_file.status is Status.VALID)
     missing = from_env({"EREBUS_LICENSE_FILE": str(tmp / "nope")}, public_keys=keys)
     check("unreadable key file -> invalid, not a crash", missing.status is Status.INVALID)
+    utf16_file = tmp / "license-utf16.key"
+    utf16_file.write_text(token + "\n", encoding="utf-16")
+    utf16 = from_env({"EREBUS_LICENSE_FILE": str(utf16_file)}, public_keys=keys)
+    check("UTF-16 key file (PowerShell >) -> invalid, not a crash", utf16.status is Status.INVALID)
+    binary_file = tmp / "license.bin"
+    binary_file.write_bytes(b"\xff\xfe\x00\x80garbage")
+    check("binary key file -> invalid, not a crash",
+          from_env({"EREBUS_LICENSE_FILE": str(binary_file)}, public_keys=keys).status is Status.INVALID)
+    bom_file = tmp / "license-bom.key"
+    bom_file.write_text(token + "\n", encoding="utf-8-sig")
+    check("UTF-8 BOM key file (Notepad) verifies",
+          from_env({"EREBUS_LICENSE_FILE": str(bom_file)}, public_keys=keys, clock=lambda: NOW).status
+          is Status.VALID)
+    nested = _b64(("[" * 100_000 + "]" * 100_000).encode())
+    check("deeply nested claims -> LicenseError, not RecursionError", _raises(f"{prefix}.{nested}.{sig}", keys, ""))
 
     view = from_env({"EREBUS_LICENSE_KEY": token}, public_keys=keys, clock=lambda: NOW).public_view()
     check("public view has status, features, expiry and no customer",
           view == {"status": "valid", "features": ["kms", "siem"], "expires_at": lic.expires_at})
+
+    from erebus_pro.license import PUBLIC_KEYS
+    check("every embedded public key is a 32-byte Ed25519 key",
+          all(len(base64.urlsafe_b64decode(v + "=" * (-len(v) % 4))) == 32 for v in PUBLIC_KEYS.values()))
 
     print(f"\n{_passed}/{_passed} passed\n")
 

@@ -69,7 +69,11 @@ echo ""
 echo "=== Enterprise Server Gateway (erebus/gateway/) ==="
 # run.sh gives every DB-backed test its own throwaway database and skips them when
 # psycopg or Postgres is missing. Never point these tests at a shared database.
-bash tests/gateway/run.sh --all
+if python -c "import cryptography, fastapi" 2>/dev/null; then
+  bash tests/gateway/run.sh --all
+else
+  echo "  (skipped: install '.[gateway]' for gateway tests)"
+fi
 
 echo ""
 echo "=== Erebus Pro (pro/) ==="

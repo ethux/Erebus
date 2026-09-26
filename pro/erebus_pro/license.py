@@ -78,7 +78,7 @@ def verify(token: str, public_keys: Mapping[str, str] | None = None) -> License:
     try:
         signature = _b64decode(parts[2])
         claims = json.loads(_b64decode(parts[1]))
-    except (binascii.Error, ValueError) as exc:
+    except (binascii.Error, ValueError, RecursionError) as exc:
         raise LicenseError("license key is not decodable") from exc
     kid = claims.get("kid") if isinstance(claims, dict) else None
     if not isinstance(kid, str) or kid not in keys:
@@ -138,9 +138,12 @@ def from_env(env: Mapping[str, str] | None = None, *, public_keys: Mapping[str, 
     path = env.get("EREBUS_LICENSE_FILE", "").strip()
     if not token and path:
         try:
-            token = Path(path).read_text(encoding="utf-8").strip()
+            # utf-8-sig drops the BOM Notepad adds; UTF-16 (PowerShell's >) or binary is a bad file, not a crash.
+            token = Path(path).read_text(encoding="utf-8-sig").strip()
         except OSError as exc:
             return Entitlements(None, error=f"cannot read EREBUS_LICENSE_FILE: {exc.strerror}", clock=clock)
+        except ValueError:
+            return Entitlements(None, error="EREBUS_LICENSE_FILE is not UTF-8 text", clock=clock)
     if not token:
         return Entitlements(None, clock=clock)
     try:
