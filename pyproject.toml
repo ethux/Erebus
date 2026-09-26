@@ -7,7 +7,7 @@ name = "erebus"
 version = "1.0.3"
 description = "Privacy-first PII filter for AI code editors — tokenizes sensitive data before it reaches the AI, de-tokenizes responses"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.11"
 authors = [
     { name = "ETHUX" },
@@ -16,7 +16,7 @@ keywords = ["pii", "privacy", "claude", "ai", "security", "gdpr", "secrets"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
     "Topic :: Security",
     "Topic :: Software Development :: Quality Assurance",
@@ -69,6 +69,7 @@ erebus-check-file = "erebus.commands.check_file:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["erebus*"]
+exclude = ["pro*"]
 
 [tool.ruff]
 target-version = "py311"

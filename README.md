@@ -2,7 +2,7 @@
 
 Privacy-first PII filter for AI code editors. Tokenizes sensitive data before it leaves your machine, de-tokenizes responses so you see real values. Works with **Claude Code**, **Mistral Vibe**, **Codex**, and any OpenAI/Anthropic-compatible editor.
 
-**By [ETHUX](https://ethux.net)** | MIT License
+**By [ETHUX](https://ethux.net)** | AGPL-3.0 (core) · Elastic License 2.0 (pro/)
 
 ---
 
@@ -398,4 +398,8 @@ Then restart the daemon (it respawns on demand) and your editor.
 
 ## License
 
-MIT
+Everything outside `pro/` is licensed under the [GNU AGPL v3.0](LICENSE).
+Everything inside `pro/` is licensed under the [Elastic License 2.0](pro/LICENSE):
+the source is public, but using Pro features requires a license key from ETHUX.
+Versions up to and including 1.1.0-beta.1 were released under MIT and remain so.
+Commercial licensing: info@ethux.net.
