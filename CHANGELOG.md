@@ -5,6 +5,24 @@ All notable changes to Erebus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0-beta.2] - 2026-09-26
+
+First gateway release from `main`.
+
+### Changed
+- Core relicensed from MIT to AGPL-3.0-only. Releases up to 1.1.0-beta.1 remain MIT.
+
+### Added
+- Enterprise gateway (`erebus-gateway`) on `main`, with its Postgres release gate in CI.
+- `pro/`: Elastic License 2.0 extensions, offline Ed25519 license keys, `GET /v1/license`.
+- Public image `ghcr.io/ethux/erebus-gateway` (amd64 + arm64, SBOM, provenance).
+- CLA for outside contributions.
+
+### Fixed
+- A local `gateway.env` could be copied into locally built images.
+- The gateway image shipped without its SQL migrations and never became ready on a fresh database.
+- Image size down from 6.8 GB to 1.2 GB by using CPU-only torch.
+
 ## [1.0.3] - 2026-09-10
 
 Codex proxy latency. Measured over 431 Codex turns (2026-09-05) the proxy added
