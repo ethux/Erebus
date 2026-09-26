@@ -1,8 +1,8 @@
 .DEFAULT_GOAL := help
-.PHONY: help hooks dev lint fix deadcode test check
+.PHONY: help hooks dev lint fix deadcode test gateway-test check
 
 help: ## Show available targets
-	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-10s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 hooks: ## Enable the committed git hooks (.githooks/) for this clone
 	git config core.hooksPath .githooks
@@ -25,5 +25,8 @@ deadcode: ## Dead-code scan only (vulture)
 
 test: ## Run the full test suite
 	bash tests/run_tests.sh
+
+gateway-test: ## Run only enterprise gateway tests (requires PostgreSQL)
+	bash tests/gateway/run.sh --db
 
 check: lint test ## Everything CI runs

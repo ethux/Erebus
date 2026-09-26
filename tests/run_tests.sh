@@ -65,6 +65,19 @@ for t in tests/boundary/test_*.py; do
   python "$t"
 done
 
+echo ""
+echo "=== Enterprise Server Gateway (erebus/gateway/) ==="
+# DB-backed gateway tests create their own throwaway databases; skipped when
+# psycopg or a reachable Postgres is missing. EREBUS_PG_DSN picks the server.
+if python -c "import psycopg, os; psycopg.connect(os.environ.get('EREBUS_PG_DSN','postgresql:///postgres')).close()" 2>/dev/null; then
+  for t in tests/gateway/test_*.py; do
+    [ -e "$t" ] || continue
+    python "$t"
+  done
+else
+  echo "  (skipped: psycopg + a reachable PostgreSQL required)"
+fi
+
 echo "================================================"
 echo "  All tests done"
 echo "================================================"
