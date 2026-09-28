@@ -3,6 +3,7 @@
 """Offline license verification: format, signature, kid, expiry/grace, env loading."""
 import base64
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -116,6 +117,35 @@ def main():
     view = from_env({"EREBUS_LICENSE_KEY": token}, public_keys=keys, clock=lambda: NOW).public_view()
     check("public view has status, features, expiry and no customer",
           view == {"status": "valid", "features": ["kms", "siem"], "expires_at": lic.expires_at})
+
+    check("BOM-prefixed key verifies", verify("\ufeff" + token, keys) == lic)
+    check("double-quoted key verifies", verify(f'"{token}"', keys) == lic)
+    check("single-quoted key verifies", verify(f"'{token}'", keys) == lic)
+    wrapped = "\n".join(token[i:i + 60] for i in range(0, len(token), 60))
+    check("line-wrapped key (email) verifies", verify(wrapped, keys) == lic)
+
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logging.getLogger("erebus_pro.license").addHandler(handler)
+    clock[0] = NOW
+    watched = from_env({"EREBUS_LICENSE_KEY": token}, public_keys=keys, clock=lambda: clock[0])
+    _ = watched.status
+    check("valid license logs nothing", records == [])
+    clock[0] = lic.expires_at + 86400
+    _ = watched.status
+    _ = watched.status
+    check("entering grace logs one warning with days left",
+          len(records) == 1 and "13 day(s) left" in records[0].getMessage())
+    clock[0] = lic.expires_at + GRACE_SECONDS
+    watched.has("kms")
+    check("grace ending logs once more", len(records) == 2 and "expired" in records[1].getMessage())
+    records.clear()
+    _ = from_env({"EREBUS_LICENSE_KEY": "garbage"}, public_keys=keys).status
+    check("invalid key logs the reason, not the key",
+          len(records) == 1 and "not an Erebus license key" in records[0].getMessage()
+          and "garbage" not in records[0].getMessage())
+    logging.getLogger("erebus_pro.license").removeHandler(handler)
 
     from erebus_pro.license import PUBLIC_KEYS
     check("every embedded public key is a 32-byte Ed25519 key",

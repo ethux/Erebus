@@ -186,7 +186,7 @@ restores real values in the responses your developers see. Users never hold
 provider API keys. The operator holds one central credential per tenant, and the
 gateway injects it on the live request path.
 
-This is a beta (`1.1.0-beta.1`). The 007 framework guarantees (per-scope crypto
+This is a beta (`1.1.0-beta.2`). The 007 framework guarantees (per-scope crypto
 isolation, shared-state tokenization, governance) are unchanged; this milestone
 makes them a service you can run.
 
@@ -237,6 +237,8 @@ required to deploy.
 | `EREBUS_DISABLE_GLINER` | no (off) | Explicit detection-disabled posture; recorded in readiness |
 | `EREBUS_GATEWAY_CONCURRENCY` | no (`0`) | Per-tenant concurrency cap (`0` = unlimited) |
 | `EREBUS_GATEWAY_HTTP_TIMEOUT` | no (`30`) | Upstream HTTP timeout, seconds |
+| `EREBUS_LICENSE_KEY` | no | Erebus Pro license key; without one only core features run |
+| `EREBUS_LICENSE_FILE` | no | Path to a file holding the license key (e.g. a mounted secret); used when `EREBUS_LICENSE_KEY` is unset |
 
 ### Launch
 
