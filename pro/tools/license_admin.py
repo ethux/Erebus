@@ -2,15 +2,20 @@
 # Copyright (c) 2026 ETHUX
 """Maintainer tool for Erebus Pro license keys. Not shipped in the image.
 
-  python pro/tools/license_admin.py keygen --out signing.key
-  python pro/tools/license_admin.py issue --key signing.key --kid 2026-09 \\
-      --customer "Acme BV" --features kms,siem --days 365
+Pass `-` to keep the private key off disk: `keygen --out -` prints JSON for
+`bao kv put ... -`, and `issue --key -` reads the PEM from stdin.
+
+  python pro/tools/license_admin.py keygen --out - | bao kv put -mount=secret erebus/license-signing -
+  bao kv get -mount=secret -field=private_key_pem erebus/license-signing \\
+    | python pro/tools/license_admin.py issue --key - --kid 2026-09 \\
+        --customer "Acme BV" --features kms,siem --days 365
 """
 from __future__ import annotations
 
 import argparse
 import base64
 import json
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -25,13 +30,19 @@ def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
 
+def _generate() -> tuple[bytes, str]:
+    key = Ed25519PrivateKey.generate()
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                            serialization.NoEncryption())
+    return pem, _b64(key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))
+
+
 def keygen(out: Path) -> str:
     """Write a new PKCS8 private key to ``out`` (mode 600); return the public key for PUBLIC_KEYS."""
-    key = Ed25519PrivateKey.generate()
-    out.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                      serialization.NoEncryption()))
+    pem, public = _generate()
+    out.write_bytes(pem)
     out.chmod(0o600)
-    return _b64(key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))
+    return public
 
 
 def issue(private_pem: bytes, *, kid: str, customer: str, features: list[str], days: int,
@@ -59,10 +70,15 @@ def main() -> None:
     iss.add_argument("--days", type=int, required=True)
     args = parser.parse_args()
     if args.cmd == "keygen":
-        print(keygen(args.out))
+        if str(args.out) == "-":
+            pem, public = _generate()
+            print(json.dumps({"private_key_pem": pem.decode(), "public_key": public}))
+        else:
+            print(keygen(args.out))
     else:
+        pem = sys.stdin.buffer.read() if str(args.key) == "-" else args.key.read_bytes()
         features = [f.strip() for f in args.features.split(",") if f.strip()]
-        print(issue(args.key.read_bytes(), kid=args.kid, customer=args.customer, features=features, days=args.days))
+        print(issue(pem, kid=args.kid, customer=args.customer, features=features, days=args.days))
 
 
 if __name__ == "__main__":

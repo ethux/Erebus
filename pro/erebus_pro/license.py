@@ -27,7 +27,9 @@ GRACE_SECONDS = 14 * 86400
 
 # kid -> base64url raw Ed25519 public key. Rotate by adding a kid; never reuse or remove one
 # while licenses signed with it are still live.
-PUBLIC_KEYS: dict[str, str] = {}
+PUBLIC_KEYS: dict[str, str] = {
+    "2026-09": "T3uIv8BofmhNrXg0m82iJxUT7WV01RmfzkgsRhQ-ULA",  # private half: OpenBao secret/erebus/license-signing
+}
 
 
 class LicenseError(ValueError):
