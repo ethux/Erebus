@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "erebus"
-version = "1.0.3"
+version = "1.1.0b2"
 description = "Privacy-first PII filter for AI code editors — tokenizes sensitive data before it reaches the AI, de-tokenizes responses"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.11"
 authors = [
     { name = "ETHUX" },
@@ -16,7 +16,7 @@ keywords = ["pii", "privacy", "claude", "ai", "security", "gdpr", "secrets"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
     "Topic :: Security",
     "Topic :: Software Development :: Quality Assurance",
@@ -38,9 +38,18 @@ dev = [
     "pylint>=3.3",
     "vulture>=2.14",
 ]
+gateway = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+    "httpx>=0.27",
+    "cryptography>=43",
+]
 
 [project.scripts]
 erebus = "erebus.shim:main"
+erebus-gateway = "erebus.gateway.server:main"
 erebus-codex = "erebus.codex_shim:main"
 erebus-setup = "erebus.setup:main_install"
 erebus-update = "erebus.setup:main_update"
@@ -60,6 +69,11 @@ erebus-check-file = "erebus.commands.check_file:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["erebus*"]
+exclude = ["pro*"]
+
+[tool.setuptools.package-data]
+# Gateway migrations are read from the installed package at startup.
+"erebus.gateway" = ["schema/*.sql"]
 
 [tool.ruff]
 target-version = "py311"
@@ -104,7 +118,7 @@ persistent = false
 max-module-lines = 600
 
 [tool.vulture]
-paths = ["erebus"]
+paths = ["erebus", "pro/erebus_pro", "pro/tools"]
 min_confidence = 80
 exclude = ["build/"]
 # Unused-but-required interface parameters (part of public signatures)
