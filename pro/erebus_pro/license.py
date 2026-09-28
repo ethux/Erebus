@@ -12,6 +12,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
+import math
 import os
 import time
 from collections.abc import Callable, Mapping
@@ -21,6 +23,8 @@ from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+log = logging.getLogger(__name__)
 
 PREFIX = "erebus1"
 GRACE_SECONDS = 14 * 86400
@@ -74,7 +78,9 @@ def _claims_to_license(claims: object) -> License:
 def verify(token: str, public_keys: Mapping[str, str] | None = None) -> License:
     """Return the verified license in ``token`` or raise ``LicenseError``."""
     keys = PUBLIC_KEYS if public_keys is None else public_keys
-    parts = token.strip().split(".")
+    # Paste damage: a BOM (Notepad), quotes (--env-file) or line wraps (email) are not part of the key.
+    token = "".join(token.replace("\ufeff", "").split()).strip("'\"")
+    parts = token.split(".")
     if len(parts) != 3 or parts[0] != PREFIX:
         raise LicenseError("not an Erebus license key")
     try:
@@ -111,12 +117,27 @@ class Entitlements:
         self._lic = lic
         self._error = error
         self._clock = clock
+        self._last: Status | None = None
 
     @property
     def status(self) -> Status:
-        if self._error is not None:
-            return Status.INVALID
-        return status_of(self._lic, self._clock())
+        now = self._clock()
+        status = Status.INVALID if self._error is not None else status_of(self._lic, now)
+        if status is not self._last:
+            self._last = status
+            self._warn(status, now)
+        return status
+
+    def _warn(self, status: Status, now: float) -> None:
+        """One warning per status change, so a gateway running through expiry still says so."""
+        if status is Status.GRACE and self._lic is not None:
+            days = math.ceil((self._lic.expires_at + GRACE_SECONDS - now) / 86400)
+            log.warning("Erebus Pro license expired: grace period active, %d day(s) left to renew", days)
+        elif status is Status.EXPIRED:
+            log.warning("Erebus Pro license expired: Pro features are off, core gateway unaffected")
+        elif status is Status.INVALID:
+            log.warning("Erebus Pro license is invalid (%s): Pro features are off, core gateway unaffected",
+                        self._error)
 
     def has(self, feature: str) -> bool:
         return self.status in (Status.VALID, Status.GRACE) and self._lic is not None \
