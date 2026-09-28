@@ -24,3 +24,6 @@ Thumbs.db
 docs/
 safechat/
 space/
+*.env
+*.key
+*.pem

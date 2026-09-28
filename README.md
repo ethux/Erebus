@@ -2,7 +2,7 @@
 
 Privacy-first PII filter for AI code editors. Tokenizes sensitive data before it leaves your machine, de-tokenizes responses so you see real values. Works with **Claude Code**, **Mistral Vibe**, **Codex**, and any OpenAI/Anthropic-compatible editor.
 
-**By [ETHUX](https://ethux.net)** | MIT License
+**By [ETHUX](https://ethux.net)** | AGPL-3.0 (core) · Elastic License 2.0 (pro/)
 
 ---
 
@@ -177,6 +177,147 @@ Send this to Smith~ at Acme~ — they need the update
 
 ---
 
+## Deployable Gateway (beta)
+
+The single-machine proxy above protects one developer's machine. The **deployable
+gateway** is a self-hosted server that sits between a whole organization and its
+cloud AI provider: it tokenizes PII on egress, forwards only tokens upstream, and
+restores real values in the responses your developers see. Users never hold
+provider API keys. The operator holds one central credential per tenant, and the
+gateway injects it on the live request path.
+
+This is a beta (`1.1.0-beta.2`). The 007 framework guarantees (per-scope crypto
+isolation, shared-state tokenization, governance) are unchanged; this milestone
+makes them a service you can run.
+
+### Operator prerequisites
+
+- A reachable **PostgreSQL** database (the shared state all replicas point at).
+- A **GLiNER detection daemon** reachable for production detection, or run a
+  regex-only beta with `EREBUS_DISABLE_GLINER=1` (an explicit, recorded posture,
+  never a silent fallback).
+- A base64 software **master key** for key custody:
+
+  ```bash
+  python -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())"
+  ```
+
+### Install
+
+The recommended self-hosted path is the published image with Docker Compose
+(Postgres + gateway):
+
+```bash
+docker pull ghcr.io/ethux/erebus-gateway:beta
+cp deploy/gateway.env.example gateway.env   # fill in the required values
+docker compose -f deploy/docker-compose.yml up
+```
+
+Add `--build` to build the image from source. The compose file does not run the
+GLiNER daemon yet; set `EREBUS_DISABLE_GLINER=1` for a regex-only beta. Without
+Docker:
+
+```bash
+python -m pip install '.[gateway]' ./pro   # FastAPI, uvicorn, psycopg, httpx, cryptography, Pro
+```
+
+### Required configuration
+
+The gateway is configured entirely from the environment. No code change is ever
+required to deploy.
+
+| Variable | Required | Meaning |
+|----------|----------|---------|
+| `EREBUS_PG_DSN` | yes | Shared-state Postgres DSN (every replica points at one store) |
+| `EREBUS_GATEWAY_MASTER_KEY` | yes | base64 software master key for key custody (never logged) |
+| `EREBUS_GATEWAY_PROVIDER` | yes | Default upstream provider, e.g. `openai` |
+| `EREBUS_GATEWAY_HOST` | no (`0.0.0.0`) | Bind host |
+| `EREBUS_GATEWAY_PORT` | no (`8080`) | Bind port |
+| `EREBUS_GATEWAY_MODEL_MAP` | no | JSON `model -> provider` routing overrides |
+| `EREBUS_DISABLE_GLINER` | no (off) | Explicit detection-disabled posture; recorded in readiness |
+| `EREBUS_GATEWAY_CONCURRENCY` | no (`0`) | Per-tenant concurrency cap (`0` = unlimited) |
+| `EREBUS_GATEWAY_HTTP_TIMEOUT` | no (`30`) | Upstream HTTP timeout, seconds |
+| `EREBUS_LICENSE_KEY` | no | Erebus Pro license key; without one only core features run |
+| `EREBUS_LICENSE_FILE` | no | Path to a file holding the license key (e.g. a mounted secret); used when `EREBUS_LICENSE_KEY` is unset |
+
+### Launch
+
+```bash
+export EREBUS_PG_DSN=postgresql:///erebus_gateway
+export EREBUS_GATEWAY_MASTER_KEY=<base64 32 bytes>
+export EREBUS_GATEWAY_PROVIDER=openai
+erebus-gateway          # validates config + deps, runs migrations, serves on :8080
+```
+
+`erebus-gateway` validates its configuration and probes its critical dependencies
+(database reachable, master key usable, detection reachable unless disabled) before
+binding. If anything is wrong it prints the precise problem and **exits non-zero
+without serving** so the service never runs half-open.
+
+### Onboard a tenant (no restart)
+
+A new team becomes servable in one operator call, with no restart or redeploy:
+
+```bash
+curl -sX POST localhost:8080/v1/admin/tenants \
+  -H 'Authorization: Bearer <operator-credential>' \
+  -d '{"scope_key":"acme/payments",
+       "provider":"openai",
+       "central_credential":"sk-...",
+       "routes":[{"base_url":"https://api.openai.com","model_allowlist":["gpt-4o"]}],
+       "quota":{"rate_limit":600,"spend_budget":1000,"window_seconds":60},
+       "role":"gateway_operator"}'
+# -> {"scope_id":"...","api_credential":"egw_..."}   (api_credential is shown ONCE)
+```
+
+Only an operator role may onboard; any other role is refused with 403. Revoke a
+tenant credential with `DELETE /v1/admin/tenants/{credential_id}`.
+
+### Use it (transparent to the developer)
+
+```bash
+curl -sX POST localhost:8080/v1/chat/completions \
+  -H 'Authorization: Bearer egw_...' \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"email Jan at jan@acme.nl"}]}'
+# The upstream provider sees only tokens; the response you get back has real values restored.
+```
+
+The request carries the tenant's central credential to an approved route; a
+client-supplied provider credential is never forwarded, and an unapproved model or
+route is refused fail-closed. Set `"stream": true` for SSE streaming with restored
+values; a mid-stream failure aborts fail-closed without emitting raw or
+partial-token output.
+
+### Health and readiness
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /healthz` | Liveness. Returns 200 whenever the process is up. |
+| `GET /readyz` | Readiness. Returns 200 only when shared state, key custody, and detection are all healthy, else 503. |
+
+Point your load balancer health check at `GET /readyz`: it drains a replica when a
+critical dependency is unhealthy, so requests fail closed rather than leaking PII.
+Scale by running more `erebus-gateway` replicas against the same `EREBUS_PG_DSN`; a
+token minted by one replica restores on another. Operational telemetry is masked
+(no raw PII or secrets).
+
+### Run the release gate
+
+Before pointing production traffic at the gateway, run the strict release gate. It
+gives each test its own fresh database, never self-skips, and hard-fails without
+Postgres:
+
+```bash
+EREBUS_PG_DSN=postgresql:///postgres make gateway-test
+```
+
+The end-to-end acceptance (real uvicorn + a mock provider + real Postgres) verifies
+token-only egress, correct restoration, per-tenant central-credential egress, and
+fail-closed behavior. It binds localhost, so run it where localhost binds are
+permitted.
+
+---
+
 ## Architecture
 
 ```
@@ -267,4 +408,8 @@ Then restart the daemon (it respawns on demand) and your editor.
 
 ## License
 
-MIT
+Everything outside `pro/` is licensed under the [GNU AGPL v3.0](LICENSE).
+Everything inside `pro/` is licensed under the [Elastic License 2.0](pro/LICENSE):
+the source is public, but using Pro features requires a license key from ETHUX.
+Versions up to and including 1.1.0-beta.1 were released under MIT and remain so.
+Commercial licensing: info@ethux.net.

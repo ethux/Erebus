@@ -32,7 +32,7 @@ jobs:
         run: ruff check .
 
       - name: Enforce max file length (pylint C0302)
-        run: pylint --recursive=y erebus tests
+        run: pylint --recursive=y erebus tests pro
 
       - name: Dead code scan
         run: vulture
@@ -62,3 +62,43 @@ jobs:
         with:
           name: erebus-dist
           path: dist/*
+
+  gateway:
+    name: Gateway tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      EREBUS_PG_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install gateway (CPU torch)
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install -e '.[gateway]'
+          python -m pip install -e ./pro
+
+      - name: Gateway release gate
+        run: bash tests/gateway/run.sh --all
+
+      - name: Pro tests
+        run: for t in pro/tests/test_*.py; do python "$t"; done
