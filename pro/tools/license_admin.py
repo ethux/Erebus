@@ -2,11 +2,11 @@
 # Copyright (c) 2026 ETHUX
 """Maintainer tool for Erebus Pro license keys. Not shipped in the image.
 
-Pass `-` to keep the private key off disk: `keygen --out -` prints JSON for
-`bao kv put ... -`, and `issue --key -` reads the PEM from stdin.
+Pass `-` to keep the private key off disk: `keygen --out -` prints JSON to pipe straight
+into a secret store, and `issue --key -` reads the PEM from stdin.
 
-  python pro/tools/license_admin.py keygen --out - | bao kv put -mount=secret erebus/license-signing -
-  bao kv get -mount=secret -field=private_key_pem erebus/license-signing \\
+  python pro/tools/license_admin.py keygen --out - | <write the JSON to your secret store>
+  <read private_key_pem from your secret store> \\
     | python pro/tools/license_admin.py issue --key - --kid 2026-09 \\
         --customer "Acme BV" --features kms,siem --days 365
 """
