@@ -79,10 +79,44 @@ SECRET_PATTERNS = [
     (r"glpat-[a-zA-Z0-9\-_]{20,}",            "GITLAB_TOKEN"),
     (r"xox[baprs]-[a-zA-Z0-9\-]+",            "SLACK_TOKEN"),
     (r"AKIA[0-9A-Z]{16}",                      "AWS_KEY"),
-    (r"-----BEGIN [A-Z ]+PRIVATE KEY-----",    "PRIVATE_KEY"),
+    # Whole PEM block (header, base64 body, footer); the header alone when no footer
+    # follows. (?:[A-Z]+ )* also matches PKCS#8 "BEGIN PRIVATE KEY", which [A-Z ]+ never did.
+    (r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----(?:[\s\S]*?-----END (?:[A-Z]+ )*PRIVATE KEY-----)?",
+     "PRIVATE_KEY"),
     # Key=value assignments (only match actual assignments, not mentions)
     (r"(?i)password\s*[:=]\s*['\"]?\S{6,}",   "PASSWORD"),
     (r"(?i)secret\s*[:=]\s*['\"]?\S{6,}",     "SECRET"),
     (r'(?i)api[_\-]?key\s*[:=]\s*[\'"]?\S{8,}', "API_KEY"),
     (r'(?i)token\s*[:=]\s*[\'"]?\S{8,}',      "TOKEN"),
 ]
+
+# IBAN (ISO 13616), compact or space-grouped in fours, uppercase. Kept out of
+# SECRET_PATTERNS because the shape alone is too loose: the mod-97 check keeps
+# uppercase IDs and hashes of the same shape from being tokenized.
+_IBAN_RE = re.compile(
+    r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}"
+    r"(?:[A-Z0-9]{11,30}|(?: [A-Z0-9]{4}){2,7}(?: [A-Z0-9]{1,3})?)(?![A-Za-z0-9])"
+)
+
+
+def _iban_checksum_ok(raw: str) -> bool:
+    compact = raw.replace(" ", "")
+    if not 15 <= len(compact) <= 34:
+        return False
+    return int("".join(str(int(c, 36)) for c in compact[4:] + compact[:4])) % 97 == 1
+
+
+def iban_spans(text: str) -> list[tuple[int, int, str]]:
+    """``(start, end, "IBAN")`` for every checksum-valid IBAN in ``text``.
+
+    A grouped match can swallow a following all-caps word ("... 7034 BY"); on a
+    checksum miss the last group is dropped and checked again.
+    """
+    spans = []
+    for m in _IBAN_RE.finditer(text):
+        raw = m.group(0)
+        if not _iban_checksum_ok(raw) and " " in raw:
+            raw = raw.rsplit(" ", 1)[0]
+        if _iban_checksum_ok(raw):
+            spans.append((m.start(), m.start() + len(raw), "IBAN"))
+    return spans
