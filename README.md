@@ -193,9 +193,11 @@ makes them a service you can run.
 ### Operator prerequisites
 
 - A reachable **PostgreSQL** database (the shared state all replicas point at).
-- A **GLiNER detection daemon** reachable for production detection, or run a
-  regex-only beta with `EREBUS_DISABLE_GLINER=1` (an explicit, recorded posture,
-  never a silent fallback).
+- A **GLiNER detection daemon** reachable for production detection, or set
+  `EREBUS_DISABLE_GLINER=1` to run regex-only. Regex-only still tokenizes emails,
+  international phone numbers, IBANs, API keys, private keys and `key=value` secrets;
+  names, addresses, organisations and national phone formats need GLiNER. A GLiNER
+  outage never falls back to regex-only: requests fail closed with 503.
 - A base64 software **master key** for key custody:
 
   ```bash
@@ -214,7 +216,7 @@ docker compose -f deploy/docker-compose.yml up
 ```
 
 Add `--build` to build the image from source. The compose file does not run the
-GLiNER daemon yet; set `EREBUS_DISABLE_GLINER=1` for a regex-only beta. Without
+GLiNER daemon yet; set `EREBUS_DISABLE_GLINER=1` to run regex-only. Without
 Docker:
 
 ```bash
@@ -234,7 +236,7 @@ required to deploy.
 | `EREBUS_GATEWAY_HOST` | no (`0.0.0.0`) | Bind host |
 | `EREBUS_GATEWAY_PORT` | no (`8080`) | Bind port |
 | `EREBUS_GATEWAY_MODEL_MAP` | no | JSON `model -> provider` routing overrides |
-| `EREBUS_DISABLE_GLINER` | no (off) | Explicit detection-disabled posture; recorded in readiness |
+| `EREBUS_DISABLE_GLINER` | no (off) | Run regex-only detection without GLiNER; `/readyz` reports `regex-only` |
 | `EREBUS_GATEWAY_CONCURRENCY` | no (`0`) | Per-tenant concurrency cap (`0` = unlimited) |
 | `EREBUS_GATEWAY_HTTP_TIMEOUT` | no (`30`) | Upstream HTTP timeout, seconds |
 | `EREBUS_LICENSE_KEY` | no | Erebus Pro license key; without one only core features run |
@@ -250,9 +252,10 @@ erebus-gateway          # validates config + deps, runs migrations, serves on :8
 ```
 
 `erebus-gateway` validates its configuration and probes its critical dependencies
-(database reachable, master key usable, detection reachable unless disabled) before
-binding. If anything is wrong it prints the precise problem and **exits non-zero
-without serving** so the service never runs half-open.
+(database reachable, master key usable, GLiNER reachable unless
+`EREBUS_DISABLE_GLINER` is set) before binding. If anything is wrong it prints the
+precise problem and **exits non-zero without serving** so the service never runs
+half-open.
 
 ### Create the first operator
 
@@ -316,7 +319,7 @@ partial-token output.
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /healthz` | Liveness. Returns 200 whenever the process is up. |
-| `GET /readyz` | Readiness. Returns 200 only when shared state, key custody, and detection are all healthy, else 503. |
+| `GET /readyz` | Readiness. Returns 200 only when shared state, key custody, and detection are all healthy, else 503. The body's `detection` field is `available` (regex + GLiNER) or `regex-only`. |
 
 Point your load balancer health check at `GET /readyz`: it drains a replica when a
 critical dependency is unhealthy, so requests fail closed rather than leaking PII.

@@ -28,8 +28,9 @@ compose build
 docker run --rm -w /tmp --entrypoint python "$EREBUS_IMAGE" -c \
   'import pathlib, erebus.gateway as g; n = len(list((pathlib.Path(g.__file__).parent / "schema").glob("*.sql"))); print(f"{n} migrations in image"); raise SystemExit(n == 0)'
 compose up -d --wait
-curl -fsS http://localhost:8080/readyz
-echo
+READY="$(curl -fsS http://localhost:8080/readyz)"
+echo "$READY"
+grep -q '"detection":"regex-only"' <<<"$READY" || { echo "readyz is not regex-only"; exit 1; }
 curl -fsS http://localhost:8080/v1/license | grep -q '"status":"none"'
 # Bootstrap an operator in the image and use it; never echo the token.
 OP="$(compose exec -T gateway erebus-gateway create-operator --label smoke)"
