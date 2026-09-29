@@ -81,7 +81,10 @@ SECRET_PATTERNS = [
     (r"AKIA[0-9A-Z]{16}",                      "AWS_KEY"),
     # Whole PEM block (header, base64 body, footer); the header alone when no footer
     # follows. (?:[A-Z]+ )* also matches PKCS#8 "BEGIN PRIVATE KEY", which [A-Z ]+ never did.
-    (r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----(?:[\s\S]*?-----END (?:[A-Z]+ )*PRIVATE KEY-----)?",
+    # The body may not cross another "-----": a lazy [\s\S]*? rescanned to the end of
+    # the text for every footerless header (quadratic, GIL held).
+    (r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"
+     r"(?:(?:(?!-----)[\s\S])*-----END (?:[A-Z]+ )*PRIVATE KEY-----)?",
      "PRIVATE_KEY"),
     # Key=value assignments (only match actual assignments, not mentions)
     (r"(?i)password\s*[:=]\s*['\"]?\S{6,}",   "PASSWORD"),

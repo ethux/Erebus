@@ -7,6 +7,7 @@ only mod-97-valid IBANs, compact or grouped in fours.
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -19,6 +20,9 @@ _PKCS8 = ("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nBKcwgg
 _RSA = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn\n-----END RSA PRIVATE KEY-----"
 _OPENSSH = ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n"
             "-----END OPENSSH PRIVATE KEY-----")
+_ENCRYPTED = ("-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+              "DEK-Info: AES-128-CBC,3F17F5316E2BAC89\n\nMIIEowIBAAKCAQEA0Z3VS5JJ\n"
+              "-----END RSA PRIVATE KEY-----")
 
 
 def check(name, cond):
@@ -39,7 +43,8 @@ def _ibans(text):
 
 
 def test_private_key():
-    for name, pem in (("PKCS#8", _PKCS8), ("RSA", _RSA), ("OPENSSH", _OPENSSH)):
+    for name, pem in (("PKCS#8", _PKCS8), ("RSA", _RSA), ("OPENSSH", _OPENSSH),
+                      ("encrypted RSA", _ENCRYPTED)):
         check(f"{name}: the whole PEM block is one PRIVATE_KEY match",
               _private_key_matches(f"key:\n{pem}\nthanks") == [pem])
     check("header without a footer still matches the header",
@@ -49,6 +54,15 @@ def test_private_key():
           _private_key_matches(f"{_PKCS8}\nand\n{_RSA}") == [_PKCS8, _RSA])
     check("a public key is not a private key",
           _private_key_matches("-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----") == [])
+    # Many headers with no footer used to rescan to the end of the text per header
+    # (quadratic, GIL held): 4000 took 3.3 s. Linear now takes a few milliseconds.
+    for unit in ("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY----- x\n"):
+        text = unit * 4000
+        started = time.perf_counter()
+        hits = _private_key_matches(text)
+        elapsed = time.perf_counter() - started
+        check(f"4000 footerless headers ({len(text) // 1000} KB) scan in {elapsed:.3f}s (< 0.5s)",
+              elapsed < 0.5 and len(hits) == 4000)
 
 
 def test_iban():
