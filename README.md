@@ -257,17 +257,19 @@ without serving** so the service never runs half-open.
 ### Create the first operator
 
 Admin routes need an operator credential. Create the first one inside the running
-container (it reads `EREBUS_PG_DSN` and `EREBUS_GATEWAY_MASTER_KEY`; the master key never
-goes over HTTP):
+container. It reads `EREBUS_PG_DSN` and `EREBUS_GATEWAY_MASTER_KEY` from the container's
+environment; the master key is never sent over HTTP and no route accepts it.
 
 ```bash
 docker compose -f deploy/docker-compose.yml exec gateway erebus-gateway create-operator --label ops-alice
 ```
 
 Outside Docker, run `erebus-gateway create-operator` with both variables exported. It
-prints an `egw_` token once on stdout; put it in a secret manager. Use `exec`, not `run`,
-so the token stays out of container logs. An operator issues more operator credentials
-with `POST /v1/admin/operators`.
+prints an `egw_` token once on stdout (put it in a secret manager) and the credential id
+on stderr (revoke by it). Use `exec`, not `run`, so the token stays out of container logs.
+If the master key does not unseal the existing scope keys, it exits non-zero and writes
+nothing. An operator issues more operator credentials with `POST /v1/admin/operators`
+(body `{"label":"..."}`; returns `credential_id` and `api_credential`).
 
 Upgrading an existing deployment: every existing credential becomes tenant-only, so run
 `create-operator` once before using the admin routes.
@@ -288,8 +290,10 @@ curl -sX POST localhost:8080/v1/admin/tenants \
 ```
 
 Admin routes (`/v1/admin/*`, `/v1/audit`, `/v1/reveal`, `/metrics`) need an operator
-credential; a tenant credential gets 403 whatever the request claims. Scope keys starting
-with `_` are reserved. Audit, key and reveal calls name their target with `scope_key`.
+credential; no credential gets 401 and a tenant credential gets 403. A body `role`, an
+`X-Role` header or a query parameter grants nothing: privilege comes only from the
+credential. Onboarding always issues tenant credentials. Scope keys starting with `_` are
+reserved. Audit, key and reveal calls name their target with `scope_key`.
 Revoke any credential with `DELETE /v1/admin/tenants/{credential_id}`.
 
 ### Use it (transparent to the developer)

@@ -31,6 +31,12 @@ compose up -d --wait
 curl -fsS http://localhost:8080/readyz
 echo
 curl -fsS http://localhost:8080/v1/license | grep -q '"status":"none"'
+# Bootstrap an operator in the image and use it; never echo the token.
+OP="$(compose exec -T gateway erebus-gateway create-operator --label smoke)"
+[[ "$OP" == egw_* ]] || { echo "create-operator printed no token"; exit 1; }
+curl -fsS -o /dev/null -H "Authorization: Bearer ${OP}" http://localhost:8080/metrics
+status="$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Role: GATEWAY_OPERATOR' http://localhost:8080/metrics)"
+[ "$status" = 401 ] || { echo "admin route without a token returned ${status}, want 401"; exit 1; }
 docker run --rm --entrypoint sh "$EREBUS_IMAGE" -c \
   'for p in /app/gateway.env /app/.smoke.env /app/.git /app/.venv /app/specs /app/CLAUDE.md /app/tests; do [ ! -e "$p" ] || { echo "leaked into image: $p"; exit 1; }; done'
 echo "smoke OK"
