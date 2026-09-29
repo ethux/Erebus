@@ -74,6 +74,13 @@ def test_iban():
         check(f"grouped IBAN {iban[:4]}", _ibans(f"IBAN {iban}.") == [(iban, "IBAN")])
     check("a trailing all-caps word is not swallowed",
           _ibans("pay BE68 5390 0754 7034 BY Friday") == [("BE68 5390 0754 7034", "IBAN")])
+    for text, iban in (("BETAAL AAN BE68 5390 0754 7034 VOOR DE HUUR", "BE68 5390 0754 7034"),
+                       ("Pay ES91 2100 0418 4502 0005 1332 ASAP OK", "ES91 2100 0418 4502 0005 1332"),
+                       ("BE68 5390 0754 7034 TEST DATA", "BE68 5390 0754 7034")):
+        check(f"two swallowed trailing words are dropped: {text!r}", _ibans(text) == [(iban, "IBAN")])
+    check("two grouped IBANs separated by one space are both found",
+          _ibans("BE68 5390 0754 7034 BE68 5390 0754 7034")
+          == [("BE68 5390 0754 7034", "IBAN"), ("BE68 5390 0754 7034", "IBAN")])
     check("a bad checksum is not an IBAN", _ibans("NL00ABNA0417164300") == [])
     check("an uppercase sha256 is not an IBAN",
           _ibans("AB12" + "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B78") == [])

@@ -95,6 +95,11 @@ def _check_regex_only():
               "sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456": "API_KEY"})
     check("regex-only -> names are NER-only (the documented limit)", det("Ask Jan de Vries") == [])
     check("regex-only -> a bad IBAN checksum is not tokenized", det("NL00ABNA0417164300") == [])
+    for text, iban in (("BETAAL AAN BE68 5390 0754 7034 VOOR DE HUUR", "BE68 5390 0754 7034"),
+                       ("Pay ES91 2100 0418 4502 0005 1332 ASAP OK", "ES91 2100 0418 4502 0005 1332"),
+                       ("BE68 5390 0754 7034 TEST DATA", "BE68 5390 0754 7034")):
+        check(f"regex-only -> IBAN before two caps words is tokenized: {text!r}",
+              [(text[s:e], label) for s, e, label in det(text)] == [(iban, "IBAN")])
     pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----"
     check("regex-only -> the whole PEM block is one PRIVATE_KEY span",
           det(f"k:\n{pem}\n") == [(3, 3 + len(pem), "PRIVATE_KEY")])

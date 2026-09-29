@@ -109,17 +109,29 @@ def _iban_checksum_ok(raw: str) -> bool:
     return int("".join(str(int(c, 36)) for c in compact[4:] + compact[:4])) % 97 == 1
 
 
+def _longest_valid_prefix(raw: str) -> str:
+    while not _iban_checksum_ok(raw):
+        if " " not in raw:
+            return ""
+        raw = raw.rsplit(" ", 1)[0]
+    return raw
+
+
 def iban_spans(text: str) -> list[tuple[int, int, str]]:
     """``(start, end, "IBAN")`` for every checksum-valid IBAN in ``text``.
 
-    A grouped match can swallow a following all-caps word ("... 7034 BY"); on a
-    checksum miss the last group is dropped and checked again.
+    A grouped match can swallow following all-caps words ("... 7034 VOOR DE"), even
+    a second IBAN; trailing groups are dropped until the checksum holds, and the
+    scan resumes right after the kept IBAN (or the failed start) so nothing
+    swallowed is skipped.
     """
     spans = []
-    for m in _IBAN_RE.finditer(text):
-        raw = m.group(0)
-        if not _iban_checksum_ok(raw) and " " in raw:
-            raw = raw.rsplit(" ", 1)[0]
-        if _iban_checksum_ok(raw):
+    pos = 0
+    while m := _IBAN_RE.search(text, pos):
+        raw = _longest_valid_prefix(m.group(0))
+        if raw:
             spans.append((m.start(), m.start() + len(raw), "IBAN"))
+            pos = m.start() + len(raw)
+        else:
+            pos = m.start() + 1
     return spans
