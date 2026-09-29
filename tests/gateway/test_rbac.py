@@ -1,24 +1,29 @@
-"""RBAC separation-of-duties unit tests (FR-016/FR-017).
+"""Two-level privilege model unit tests (010 FR-004).
 
-Pure logic, no database. Verifies default-deny on unknown role/action, that each
-role grants only its own actions, that no single role holds all four sensitive
-actions (REVEAL/MANAGE_KEYS/READ_AUDIT/PROVISION), and that GATEWAY_OPERATOR can
-never REVEAL.
+Pure logic, no database. The privilege stored on a credential is the only authorization
+input: ``operator`` may perform every admin action, ``tenant`` none. Unknown privileges,
+the retired role names and unknown actions are all denied.
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
+from erebus.gateway import rbac
 from erebus.gateway.rbac import (
-    SENSITIVE_ACTIONS,
+    OPERATOR,
+    TENANT,
     Action,
-    Role,
+    Privilege,
     allowed_actions,
     authorize,
+    is_operator,
 )
 
 _passed = 0
+
+_LEGACY = ("GATEWAY_OPERATOR", "POLICY_ADMIN", "KEY_MANAGER", "REVEAL_REVIEWER", "AUDITOR", "OPERATOR",
+           "TENANT", "", None, 1)
 
 
 def check(name, cond):
@@ -29,74 +34,37 @@ def check(name, cond):
     _passed += 1
 
 
-# The intended grant per role (the spec's role->allowed-actions mapping).
-_EXPECTED: dict[Role, set[Action]] = {
-    Role.GATEWAY_OPERATOR: {Action.MANAGE_POLICY, Action.PROVISION},
-    Role.POLICY_ADMIN: {Action.MANAGE_POLICY, Action.PROVISION},
-    Role.KEY_MANAGER: {Action.MANAGE_KEYS},
-    Role.REVEAL_REVIEWER: {Action.REVEAL},
-    Role.AUDITOR: {Action.READ_AUDIT},
-}
-
-
 def main():
-    print("\n=== Gateway RBAC separation of duties (FR-016/FR-017) ===\n")
+    print("\n=== Gateway two-level privilege model (010 FR-004) ===\n")
 
-    # Default-deny on unknown role / unknown action.
-    check(
-        "unknown role denied for every action",
-        all(not authorize("NOT_A_ROLE", a) for a in Action),
-    )
-    check(
-        "unknown action denied for every role",
-        all(not authorize(r, "NOT_AN_ACTION") for r in Role),
-    )
-    check("unknown role has no allowed actions", allowed_actions("NOT_A_ROLE") == frozenset())
-    check("None role/action denied", not authorize(None, None))  # type: ignore[arg-type]
+    check("OPERATOR/TENANT are the plain strings the directory stores",
+          OPERATOR == "operator" and TENANT == "tenant"
+          and type(OPERATOR) is str and type(TENANT) is str)
+    check("Privilege has exactly operator and tenant", {p.value for p in Privilege} == {"operator", "tenant"})
 
-    # Each role grants exactly its own actions and nothing else.
-    for role, expected in _EXPECTED.items():
-        check(f"{role.value} grants exactly {sorted(a.value for a in expected)}",
-              set(allowed_actions(role)) == expected)
-        for action in Action:
-            want = action in expected
-            check(
-                f"authorize({role.value}, {action.value}) == {want}",
-                authorize(role, action) is want,
-            )
+    check("operator allows every action", allowed_actions(Privilege.OPERATOR) == frozenset(Action))
+    check("tenant allows no action", allowed_actions(Privilege.TENANT) == frozenset())
+    for action in Action:
+        check(f"authorize(operator, {action.value}) is True", authorize(Privilege.OPERATOR, action) is True)
+        check(f"authorize(tenant, {action.value}) is False", authorize(Privilege.TENANT, action) is False)
 
-    # Sensitive-action ownership is unique where the spec requires it.
-    check("REVEAL belongs only to REVEAL_REVIEWER",
-          {r for r in Role if authorize(r, Action.REVEAL)} == {Role.REVEAL_REVIEWER})
-    check("MANAGE_KEYS belongs only to KEY_MANAGER",
-          {r for r in Role if authorize(r, Action.MANAGE_KEYS)} == {Role.KEY_MANAGER})
-    check("READ_AUDIT belongs only to AUDITOR",
-          {r for r in Role if authorize(r, Action.READ_AUDIT)} == {Role.AUDITOR})
-    check("MANAGE_POLICY held by POLICY_ADMIN and GATEWAY_OPERATOR only",
-          {r for r in Role if authorize(r, Action.MANAGE_POLICY)}
-          == {Role.POLICY_ADMIN, Role.GATEWAY_OPERATOR})
-    check("PROVISION held by POLICY_ADMIN and GATEWAY_OPERATOR only",
-          {r for r in Role if authorize(r, Action.PROVISION)}
-          == {Role.POLICY_ADMIN, Role.GATEWAY_OPERATOR})
+    check("string privileges behave like the enum members",
+          allowed_actions("operator") == frozenset(Action) and allowed_actions("tenant") == frozenset()
+          and authorize("operator", "READ_AUDIT") and not authorize("tenant", "READ_AUDIT"))
+    check("is_operator only for operator", is_operator("operator") and is_operator(Privilege.OPERATOR)
+          and not is_operator("tenant") and not is_operator(Privilege.TENANT))
 
-    # Separation of duties: no single role holds all four sensitive actions.
-    check("SENSITIVE_ACTIONS is the four-action set",
-          frozenset(
-              {Action.REVEAL, Action.MANAGE_KEYS, Action.READ_AUDIT, Action.PROVISION}) == SENSITIVE_ACTIONS)
-    for role in Role:
-        check(f"{role.value} does NOT hold all four sensitive actions",
-              not allowed_actions(role) >= SENSITIVE_ACTIONS)
+    for name in _LEGACY:
+        check(f"retired or unknown privilege {name!r} holds nothing",
+              allowed_actions(name) == frozenset() and not is_operator(name)
+              and not any(authorize(name, a) for a in Action))
 
-    # Explicit guard called out by the spec.
-    check("GATEWAY_OPERATOR cannot REVEAL", not authorize(Role.GATEWAY_OPERATOR, Action.REVEAL))
-    check("GATEWAY_OPERATOR cannot MANAGE_KEYS",
-          not authorize(Role.GATEWAY_OPERATOR, Action.MANAGE_KEYS))
-    check("GATEWAY_OPERATOR cannot READ_AUDIT",
-          not authorize(Role.GATEWAY_OPERATOR, Action.READ_AUDIT))
+    check("unknown action denied for both privileges",
+          not authorize("operator", "NOT_AN_ACTION") and not authorize("tenant", "NOT_AN_ACTION"))
+    check("None privilege/action denied", not authorize(None, None))  # type: ignore[arg-type]
 
-    # String-keyed calls behave identically to enum-keyed calls (API ergonomics).
-    check("string role/action authorizes like enums",
-          authorize("AUDITOR", "READ_AUDIT") and not authorize("AUDITOR", "REVEAL"))
+    check("the retired Role enum is gone", not hasattr(rbac, "Role"))
+    check("the separation-of-duties set is gone", not hasattr(rbac, "SENSITIVE_ACTIONS"))
 
     print(f"\n{_passed}/{_passed} passed\n")
 

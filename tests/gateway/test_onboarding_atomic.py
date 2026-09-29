@@ -18,17 +18,17 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 os.environ.setdefault("EREBUS_DISABLE_GLINER", "1")
 
 import psycopg
 from fastapi.testclient import TestClient
+from helpers import operator_bearer
 
-from erebus.gateway import rbac
 from erebus.gateway.app import create_app
 from erebus.gateway.crypto.keyprovider import MasterKeyKms
-from erebus.gateway.store import credentials_directory, db
-from erebus.gateway.store.known_value_store import provision_scope
+from erebus.gateway.store import db
 from erebus.gateway.tenancy import DbScopeResolver
 
 _DSN = os.environ.get("EREBUS_PG_DSN", "postgresql:///erebus_009_onboard_atomic")
@@ -69,8 +69,7 @@ def main():
         conn.execute("TRUNCATE scopes CASCADE")
 
         kms = MasterKeyKms(_DSN, _KEY)
-        op_id = provision_scope(conn, kms, "ops/admin")
-        op_cred = credentials_directory.provision(conn, op_id, "ops/admin", label="operator")
+        op_cred = operator_bearer(conn)
 
         async def echo_egress(scope_id, payload):
             content = payload["messages"][-1]["content"]
@@ -86,7 +85,6 @@ def main():
         # RESPONSE (the DB-rollback assertions below run) instead of re-raising into the test.
         client = TestClient(app, raise_server_exceptions=False)
 
-        op_role = str(rbac.Role.GATEWAY_OPERATOR)
         op_headers = {"Authorization": "Bearer " + op_cred}
 
         def onboard(body):
@@ -97,7 +95,6 @@ def main():
             "central_credential": "CENTRAL-SECRET",
             "routes": [{"base_url": "https://api.openai.com", "model_allowlist": ["gpt-4o"]}],
             "quota": {"rate_limit": 100, "spend_budget": 1000, "window_seconds": 60},
-            "role": op_role,
         }
 
         def scopes_before():
@@ -135,19 +132,19 @@ def main():
         # Patch the LAST provisioning step (set_quota) to raise: by then the scope, API
         # credential, central credential, and routes are already written, so a single
         # transaction must roll ALL of them back, leaving no partial tenant.
-        from erebus.gateway import app as app_mod
+        from erebus.gateway.providers import quota  # onboarding calls quota.set_quota via the module
 
-        orig_set_quota = app_mod.quota.set_quota
+        orig_set_quota = quota.set_quota
 
         def boom(*_a, **_k):
             raise RuntimeError("forced mid-sequence failure")
 
         before = scopes_before()
-        app_mod.quota.set_quota = boom
+        quota.set_quota = boom
         try:
             r = onboard({**base, "scope_key": "org/forced-fail"})
         finally:
-            app_mod.quota.set_quota = orig_set_quota
+            quota.set_quota = orig_set_quota
         check("a forced mid-sequence failure is a 5xx (no success)", r.status_code >= 500)
         check("a forced mid-sequence failure left no scope row (rolled back, FR-004)",
               _scope_exists(pool, "org/forced-fail") == 0)
@@ -162,8 +159,9 @@ def main():
         ok = onboard({**base, "scope_key": "org/good"})
         check("a well-formed onboard returns 200", ok.status_code == 200)
         body = ok.json()
-        check("a well-formed onboard returns scope_id + api_credential",
-              bool(body.get("scope_id")) and body.get("api_credential", "").startswith("egw_"))
+        check("a well-formed onboard returns scope_id + credential_id + api_credential",
+              bool(body.get("scope_id")) and bool(body.get("credential_id"))
+              and body.get("api_credential", "").startswith("egw_"))
         cred = body["api_credential"]
         served = client.post(
             "/v1/chat/completions",

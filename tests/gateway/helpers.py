@@ -39,8 +39,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from erebus.gateway import rbac  # noqa: E402
 from erebus.gateway.crypto.keyprovider import KeyProvider  # noqa: E402
-from erebus.gateway.store import db  # noqa: E402
+from erebus.gateway.store import credentials_directory, db  # noqa: E402
 from erebus.gateway.store.known_value_store import (  # noqa: E402
     KnownValueStore,
     open_store,
@@ -99,6 +100,23 @@ def provision(conn: psycopg.Connection, kms: KeyProvider, scope_key: str) -> uui
     the store directly just to stand up a tenant.
     """
     return provision_scope(conn, kms, scope_key)
+
+
+def operator_bearer(conn: psycopg.Connection) -> str:
+    """Insert an operator credential and return its bearer token (the ``egw_`` plaintext).
+
+    The credential lives in the reserved operator home scope, created or reused here as a
+    bare scope row: operators never chat, so the home scope needs no key. Commit-visible to
+    other connections when ``conn`` is in autocommit (or has no open transaction).
+    """
+    home = credentials_directory.OPERATOR_SCOPE_KEY
+    with conn.transaction():
+        sid = conn.execute(
+            "INSERT INTO scopes (scope_key) VALUES (%s) "
+            "ON CONFLICT (scope_key) DO UPDATE SET status = 'active' RETURNING id",
+            (home,),
+        ).fetchone()[0]
+    return credentials_directory.provision(conn, sid, home, label="test-operator", privilege=rbac.OPERATOR)
 
 
 def open_scope_store(

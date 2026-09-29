@@ -3,9 +3,10 @@
 Chat path: authenticate -> resolve scope + tokenization mode -> per-tenant
 concurrency slot -> fail-closed quota reservation -> gate every message part
 (text tokenized, tool-call args tokenized, non-text modalities blocked) ->
-forward token-only -> restore (streamed or whole) -> audit. Governed routes:
-/v1/reveal (RBAC + grant + rate-limited), GET /v1/audit (auditor), POST
-/v1/admin/keys (key manager), POST /v1/admin/scopes (provisioning).
+forward token-only -> restore (streamed or whole) -> audit. Governed routes (operator
+credential only, 010; handlers in :mod:`.admin`): /v1/reveal (+ grant + rate-limited),
+GET /v1/audit, POST /v1/admin/keys, POST /v1/admin/scopes, POST/DELETE /v1/admin/tenants,
+POST /v1/admin/operators, GET /metrics.
 
 Every database operation runs through :func:`_db`, which checks out its own
 connection (from the pool when one is supplied) so concurrent requests across
@@ -23,7 +24,16 @@ import anyio
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from . import rbac
+from .admin import (
+    _handle_audit_query,
+    _handle_issue_operator,
+    _handle_key_op,
+    _handle_metrics,
+    _handle_onboard_tenant,
+    _handle_provision,
+    _handle_reveal,
+    _handle_revoke_tenant,
+)
 from .crypto.keyprovider import CryptoErased, KeyProvider
 from .deps import (
     DetectorPosture,
@@ -37,11 +47,9 @@ from .deps import (
 )
 from .detection import DetectionUnavailable
 from .gating import BlockedModality, EdgeRawError, restore_payload, tokenize_payload
-from .governance import audit, reveal
 from .modalities import Decision
 from .observability import Metric, Metrics
 from .overload import Limiter
-from .providers import credentials, quota
 from .runtime import (
     _acquire,
     _admit,
@@ -50,24 +58,14 @@ from .runtime import (
     _db,
     _record,
     _release,
+    _reserve_or_429,
     _slot,
 )
-from .store import credentials_directory
-from .store.known_value_store import open_store, provision_scope
+from .store.known_value_store import open_store
 from .streaming_restore import StreamRestorer
 from .tenancy import ScopeResolver
 from .tokenizer import Detector
 from .transport import EgressDenied
-
-
-async def _reserve_or_429(deps: GatewayDeps, scope_id: uuid.UUID, event: str) -> None:
-    try:
-        await _db(deps, lambda c: quota.check_and_reserve(c, scope_id))
-    except quota.QuotaExceeded as exc:
-        await _audit(deps, scope_id, event, "quota_rejected")
-        _record(deps, scope_id, Metric.QUOTA_REJECTIONS)  # masked 429 telemetry (FR-011)
-        raise HTTPException(status_code=429, detail="quota exceeded",
-                            headers={"Retry-After": "1"}) from exc
 
 
 async def _sanitize_or_fail(deps: GatewayDeps, scope_id: uuid.UUID, mode: str, payload: dict) -> dict:
@@ -171,219 +169,6 @@ async def _handle_chat_stream(deps: GatewayDeps, authorization: str | None, payl
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-async def _handle_reveal(deps: GatewayDeps, authorization: str | None, body: dict) -> dict:
-    _scope_key, scope_id = await _auth(deps, authorization)
-    await _reserve_or_429(deps, scope_id, "reveal")  # rate-limit detokenization (FR-018)
-    grantee, role = body.get("grantee", ""), body.get("role", "")
-    tokens = list(body.get("tokens", []))
-
-    def _do(conn) -> tuple[dict | None, str]:
-        if not rbac.authorize(role, rbac.Action.REVEAL):           # separation of duties (FR-016)
-            return None, "rbac_denied"
-        if not reveal.authorize_reveal(conn, scope_id, grantee, reveal.REVEAL_ROLE, set(tokens)):
-            return None, "grant_denied"                            # scoped, justified grant (FR-015)
-        store = open_store(conn, deps.key_provider, scope_id)
-        return {t: store.lookup(t) for t in tokens}, "ok"
-
-    values, outcome = await _db(deps, _do)
-    await _audit(deps, scope_id, "reveal", outcome)
-    if values is None:
-        raise HTTPException(status_code=403, detail=f"reveal denied: {outcome}")
-    return {"values": values}
-
-
-async def _handle_audit_query(deps: GatewayDeps, authorization: str | None, role: str) -> dict:
-    _scope_key, scope_id = await _auth(deps, authorization)
-    if not rbac.authorize(role, rbac.Action.READ_AUDIT):  # auditor only (FR-016/029)
-        raise HTTPException(status_code=403, detail="audit read denied")
-    rows = await _db(deps, lambda c: audit.query(c, scope_id))
-    return {"events": [{k: str(v) for k, v in r.items()} for r in rows]}
-
-
-async def _handle_key_op(deps: GatewayDeps, authorization: str | None, body: dict) -> dict:
-    _scope_key, scope_id = await _auth(deps, authorization)
-    role, op = body.get("role", ""), body.get("op", "")
-    if not rbac.authorize(role, rbac.Action.MANAGE_KEYS):  # key manager only (FR-016/040)
-        raise HTTPException(status_code=403, detail="key management denied")
-    if op == "rotate":
-        await anyio.to_thread.run_sync(lambda: deps.key_provider.rotate_kek(str(scope_id)))
-    elif op == "crypto_erase":
-        await anyio.to_thread.run_sync(lambda: deps.key_provider.destroy_kek(str(scope_id)))
-    else:
-        raise HTTPException(status_code=400, detail="unknown key op")
-    await _audit(deps, scope_id, "key_op", op)
-    return {"op": op, "status": "done"}
-
-
-async def _handle_provision(deps: GatewayDeps, authorization: str | None, body: dict) -> dict:
-    """Declaratively provision a scope (org/tenant/group) with its own key (FR-005/047)."""
-    _scope_key, scope_id = await _auth(deps, authorization)
-    role, new_key = body.get("role", ""), body.get("scope_key", "")
-    if not rbac.authorize(role, rbac.Action.PROVISION):  # operator / policy-admin only (FR-016)
-        raise HTTPException(status_code=403, detail="provision denied")
-    if not new_key:
-        raise HTTPException(status_code=400, detail="scope_key required")
-    sid = await _db(deps, lambda c: provision_scope(c, deps.key_provider, new_key))
-    await _audit(deps, scope_id, "provision", "ok")
-    return {"scope_key": new_key, "scope_id": str(sid)}
-
-
-def _nonneg_int(value: object, field: str) -> int:
-    """Parse ``value`` as a non-negative int, raising ``ValueError`` on anything malformed.
-
-    ``bool`` is rejected (it is an ``int`` subclass but never a quota number), as are
-    non-numeric strings and negative values, so a malformed quota fails validation up front
-    rather than provisioning a half-built tenant (009 R4).
-    """
-    if isinstance(value, bool):
-        raise ValueError(f"{field} must be a non-negative integer")
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field} must be a non-negative integer") from exc
-    if parsed < 0:
-        raise ValueError(f"{field} must be a non-negative integer")
-    return parsed
-
-
-def _nonneg_decimal(value: object, field: str) -> None:
-    """Validate ``value`` parses as a non-negative decimal, raising ``ValueError`` otherwise.
-
-    The spend budget is stored as a Postgres numeric; a non-numeric or negative budget is a
-    malformed quota and must be refused up front (009 R4) rather than surfacing later.
-    """
-    from decimal import Decimal, InvalidOperation
-    if isinstance(value, bool):
-        raise ValueError(f"{field} must be a non-negative number")
-    try:
-        parsed = Decimal(str(value))
-    except (TypeError, ValueError, InvalidOperation) as exc:
-        raise ValueError(f"{field} must be a non-negative number") from exc
-    if parsed < 0:
-        raise ValueError(f"{field} must be a non-negative number")
-
-
-def _validate_onboard(body: dict) -> None:
-    """Validate an onboarding body BEFORE any write; raise ``ValueError`` on malformed input.
-
-    ``scope_key``/``provider``/``central_credential`` must be non-empty strings, each route
-    must carry a non-empty ``base_url``, and the quota numbers must parse as non-negative
-    values. Validating up front means a bad request is refused with a 400 and zero rows
-    created, never a partially-provisioned tenant (009 R4/FR-004).
-    """
-    for field in ("scope_key", "provider", "central_credential"):
-        value = body.get(field)
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"{field} must be a non-empty string")
-    for route in body.get("routes", []):
-        if not route.get("base_url"):
-            raise ValueError("each route requires a base_url")
-    q = body.get("quota") or {}
-    _nonneg_int(q.get("rate_limit", 0), "quota.rate_limit")
-    _nonneg_int(q.get("window_seconds", 60), "quota.window_seconds")
-    _nonneg_int(q.get("concurrency_cap", 0), "quota.concurrency_cap")
-    _nonneg_decimal(q.get("spend_budget", 0), "quota.spend_budget")
-
-
-def _onboard_tenant(deps: GatewayDeps, conn, body: dict) -> tuple[uuid.UUID, str]:
-    """Wire a whole tenant atomically: scope + KEK, then credential + provider + routes + quota.
-
-    Reuses the existing per-scope modules end to end. Inputs are validated first (a malformed
-    route/quota raises before any write). The scope row + its KEK are provisioned by
-    ``provision_scope``, whose KEK insert runs on the key provider's own connection and so must
-    see a committed scope row; the rest -- API credential, central credential, routes, quota --
-    then runs inside a SINGLE ``conn.transaction()``. If any of those steps fails the whole
-    transaction rolls back AND the just-created scope is deleted (``ON DELETE CASCADE`` clears
-    its KEK), so a failed onboard leaves ZERO rows -- never a partially-provisioned tenant
-    (009 R4/FR-004). A scope that already existed is left intact on failure (idempotent
-    re-onboard never destroys a live tenant). The API credential plaintext is returned ONCE
-    (only its hash is stored). No 'policy' field is interpreted: per-tenant modality policy
-    stays a deployment-level config (a supplied ``policy`` is ignored for beta).
-    """
-    _validate_onboard(body)
-    scope_key = body["scope_key"]
-    provider = body["provider"]
-    q = body.get("quota") or {}
-    # Read pre-existence in its own committed transaction so no implicit transaction stays
-    # open: provision_scope must commit its scope-row insert (its OWN outermost transaction)
-    # before the key provider, on its separate connection, inserts the KEK that FKs to it.
-    with conn.transaction():
-        pre_existing = conn.execute(
-            "SELECT id FROM scopes WHERE scope_key = %s", (scope_key,)
-        ).fetchone()
-    sid = provision_scope(conn, deps.key_provider, scope_key)  # scope row + KEK (own txns)
-    try:
-        with conn.transaction():  # one txn: any failure here rolls back every tenant-visible row
-            crypto = open_store(conn, deps.key_provider, sid)._crypto
-            api_credential = credentials_directory.provision(conn, sid, scope_key, label=body.get("label", ""))
-            credentials.store_credential(conn, crypto, sid, provider, body["central_credential"])
-            for route in body.get("routes", []):
-                rid = credentials.add_route(
-                    conn, sid, provider, route["base_url"],
-                    model_allowlist=route.get("model_allowlist"),
-                )
-                credentials.approve_route(conn, sid, rid)
-            quota.set_quota(
-                conn, sid,
-                _nonneg_int(q.get("rate_limit", 0), "quota.rate_limit"),
-                q.get("spend_budget", 0),
-                _nonneg_int(q.get("window_seconds", 60), "quota.window_seconds"),
-                _nonneg_int(q.get("concurrency_cap", 0), "quota.concurrency_cap"),
-            )
-    except BaseException:
-        if pre_existing is None:  # we created the scope: undo it (cascade clears the KEK)
-            with contextlib.suppress(Exception), conn.transaction():
-                conn.execute("DELETE FROM scopes WHERE id = %s", (sid,))
-        raise
-    return sid, api_credential
-
-
-async def _handle_onboard_tenant(deps: GatewayDeps, authorization: str | None, body: dict) -> dict:
-    """Onboard a tenant end-to-end in one operator call; serve it with no restart (008 US3).
-
-    Operator-authenticated and RBAC-gated to PROVISION (operator / policy-admin only). All the
-    wiring runs on one checked-out connection so the new tenant is resolvable immediately. The
-    returned ``api_credential`` is the only time the plaintext is available (FR-006).
-    """
-    _scope_key, operator_scope_id = await _auth(deps, authorization)
-    role = body.get("role", "")
-    if not rbac.authorize(role, rbac.Action.PROVISION):  # operator / policy-admin only (FR-016)
-        raise HTTPException(status_code=403, detail="onboard denied")
-    if not body.get("scope_key") or not body.get("provider") or not body.get("central_credential"):
-        raise HTTPException(status_code=400, detail="scope_key, provider, central_credential required")
-    try:
-        sid, api_credential = await _db(deps, lambda c: _onboard_tenant(deps, c, body))
-    except (ValueError, KeyError) as exc:  # malformed route/quota: refuse 400, nothing written
-        await _audit(deps, operator_scope_id, "onboard", "rejected")
-        raise HTTPException(status_code=400, detail="invalid onboarding request") from exc
-    except CryptoErased as exc:  # scope previously crypto-erased: refuse fail-closed
-        await _audit(deps, operator_scope_id, "onboard", "fail_closed")
-        raise HTTPException(status_code=503, detail="protection unavailable") from exc
-    await _audit(deps, operator_scope_id, "onboard", "ok")
-    return {"scope_id": str(sid), "api_credential": api_credential}
-
-
-async def _handle_revoke_tenant(deps: GatewayDeps, authorization: str | None,
-                                credential_id: str, role: str) -> dict:
-    """Revoke an API credential (status -> revoked); operator-only, audited (008 US3).
-
-    After revocation the credential resolves to nothing, so subsequent requests are rejected
-    within the resolver cache TTL (FR-006).
-    """
-    _scope_key, operator_scope_id = await _auth(deps, authorization)
-    if not rbac.authorize(role, rbac.Action.PROVISION):  # operator / policy-admin only (FR-016)
-        raise HTTPException(status_code=403, detail="revoke denied")
-    try:
-        cred_uuid = uuid.UUID(credential_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="invalid credential_id") from exc
-    revoked = await _db(deps, lambda c: credentials_directory.revoke(c, cred_uuid))
-    await _audit(deps, operator_scope_id, "revoke_tenant", "ok" if revoked else "not_found")
-    if not revoked:
-        raise HTTPException(status_code=404, detail="credential not found or already revoked")
-    return {"credential_id": credential_id, "status": "revoked"}
-
-
 async def _no_provider_call(_payload: dict) -> dict:
     """Fallback provider_call when only the scope-aware egress is wired (008).
 
@@ -452,9 +237,8 @@ def create_app(*, conn=None, key_provider: KeyProvider, detector: Detector,
         return await _handle_reveal(deps, authorization, await request.json())
 
     @app.get("/v1/audit")
-    async def audit_route(authorization: str | None = Header(default=None),
-                          x_role: str = Header(default="")) -> dict:
-        return await _handle_audit_query(deps, authorization, x_role)
+    async def audit_route(authorization: str | None = Header(default=None), scope_key: str = "") -> dict:
+        return await _handle_audit_query(deps, authorization, scope_key)
 
     @app.post("/v1/admin/keys")
     async def keys_route(request: Request, authorization: str | None = Header(default=None)) -> dict:
@@ -469,20 +253,20 @@ def create_app(*, conn=None, key_provider: KeyProvider, detector: Detector,
         return await _handle_onboard_tenant(deps, authorization, await request.json())
 
     @app.delete("/v1/admin/tenants/{credential_id}")
-    async def revoke_tenant_route(credential_id: str, request: Request,
-                                  authorization: str | None = Header(default=None),
-                                  x_role: str = Header(default="")) -> dict:
+    async def revoke_tenant_route(credential_id: str, authorization: str | None = Header(default=None)) -> dict:
+        return await _handle_revoke_tenant(deps, authorization, credential_id)
+
+    @app.post("/v1/admin/operators")
+    async def operators_route(request: Request, authorization: str | None = Header(default=None)) -> dict:
         body = {}
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(Exception):  # the JSON body is optional
             body = await request.json()
-        role = body.get("role") or x_role
-        return await _handle_revoke_tenant(deps, authorization, credential_id, role)
+        return await _handle_issue_operator(deps, authorization, body if isinstance(body, dict) else {})
 
     if metrics_enabled and metrics is not None:
         @app.get("/metrics")
-        async def metrics_route(authorization: str | None = Header(default=None),
-                                x_role: str = Header(default="")) -> dict:
-            return await _handle_metrics(deps, authorization, x_role)
+        async def metrics_route(authorization: str | None = Header(default=None)) -> dict:
+            return await _handle_metrics(deps, authorization)
 
     return app
 
@@ -507,33 +291,6 @@ def _make_lifespan(on_shutdown: ShutdownHook | None):
                     await on_shutdown()
 
     return lifespan
-
-
-def _metrics_authorized(role: str) -> bool:
-    """``True`` iff ``role`` may observe the masked telemetry: an operator OR an auditor.
-
-    Reuses the existing RBAC surface (009 R2): the audit-reader (AUDITOR) and the operational
-    roles (GATEWAY_OPERATOR / POLICY_ADMIN, which hold PROVISION) may read the snapshot; every
-    other role -- and an unknown role -- is denied by default.
-    """
-    return rbac.authorize(role, rbac.Action.READ_AUDIT) or rbac.authorize(role, rbac.Action.PROVISION)
-
-
-async def _handle_metrics(deps: GatewayDeps, authorization: str | None, role: str) -> dict:
-    """Return the masked per-scope telemetry snapshot, authenticated + RBAC-gated (009 R2/FR-002).
-
-    The surface was previously open to any caller (it returned every scope id and counter).
-    Now it requires an authenticated credential (else 401) AND an operator/auditor role (else
-    403), like the other administrative routes; an unauthorized response discloses no scope
-    ids or counters. The authorized body is ``{scope_id: {metric_name: count}}`` -- integer
-    counters only, carrying no raw PII, prompt, credential, or other secret.
-    """
-    await _auth(deps, authorization)  # 401 on a missing/invalid credential; nothing disclosed
-    if not _metrics_authorized(role):  # operator / auditor only -> 403, nothing disclosed
-        raise HTTPException(status_code=403, detail="metrics read denied")
-    if deps.metrics is None:
-        return {"scopes": {}}
-    return {"scopes": deps.metrics.snapshot_all()}
 
 
 def _state_ready(conn) -> bool:

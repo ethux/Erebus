@@ -21,7 +21,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import psycopg
 from fastapi.testclient import TestClient
 
-from erebus.gateway import rbac
 from erebus.gateway.app import create_app
 from erebus.gateway.crypto.keyprovider import LocalKms
 from erebus.gateway.observability import Metric, Metrics
@@ -87,7 +86,7 @@ def main():
         app = create_app(
             conn=conn, key_provider=kms, detector=_detector,
             scopes=ScopeResolver({"cServed": "tenServed", "cCapped": "tenCapped",
-                                  "cRefused": "tenRefused"}),
+                                  "cRefused": "tenRefused", "cOp": "tenServed"}, operators={"cOp"}),
             scope_ids={"tenServed": served, "tenCapped": capped, "tenRefused": refused},
             egress=egress, metrics=metrics, metrics_enabled=True,
         )
@@ -120,8 +119,8 @@ def main():
         )
         check("blocked modality returns 415", rm.status_code == 415)
 
-        # Read the config-gated /metrics surface (now operator/auditor authenticated, 009 R2).
-        op_headers = {"Authorization": "Bearer cServed", "X-Role": str(rbac.Role.GATEWAY_OPERATOR)}
+        # Read the config-gated /metrics surface (operator credential only, 010).
+        op_headers = {"Authorization": "Bearer cOp"}
         rmet = client.get("/metrics", headers=op_headers)
         check("config-gated GET /metrics is exposed to an operator (T044/FR-002)",
               rmet.status_code == 200)
