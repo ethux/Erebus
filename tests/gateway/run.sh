@@ -19,6 +19,7 @@ PURE_TESTS=(
   helpers_smoke
   extensions
   detection_merge
+  detection_adapter
 )
 
 modules_missing() {

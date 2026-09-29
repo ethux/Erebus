@@ -1,21 +1,24 @@
 """Production detection adapter (008 T021/T015; research R4, FR-007).
 
 The gateway tokenizer takes an injectable ``Detector`` (``text -> [(start, end,
-label)]``). This module adapts ``erebus.core.detect`` (the GLiNER daemon client)
-into that shape, with the fail-closed posture a deployable privacy gateway needs:
+label)]``). This module builds it from two layers:
 
-* **available** -- detection ran at full strength; PII spans are returned and the
-  tokenizer can replace them before egress.
-* **degraded / unavailable** -- the GLiNER daemon was unreachable or the model was
-  still loading, so NER did not actually run. ``erebus.core.detect`` returns ``[]``
-  in this case (and marks the per-call signal degraded). Returning those empty
-  spans would forward NER-class PII (names/addresses/phones) raw to the provider,
-  so in gateway mode the adapter **raises** ``DetectionUnavailable`` and the chat
-  handler fails closed rather than leaking.
-* **disabled** -- the operator explicitly set ``EREBUS_DISABLE_GLINER`` (recorded
-  in ``GatewayConfig.detection_disabled``). This is a deliberate, surfaced config
-  choice, not an outage: the detector returns ``[]`` and never raises, and the
-  posture reports ``"disabled"`` so readiness/telemetry can show it.
+* **regex** -- the ``erebus.core.patterns`` structured-PII and secret patterns (email,
+  international phone, IBAN, API keys, private keys, ``key=value`` secrets). No daemon;
+  always runs.
+* **NER** -- ``erebus.core.detect`` (the GLiNER daemon client), unless the operator set
+  ``EREBUS_DISABLE_GLINER`` (``GatewayConfig.detection_disabled``).
+
+Postures surfaced in readiness/telemetry:
+
+* **available** -- regex + GLiNER ran at full strength.
+* **degraded** -- GLiNER is enabled but the daemon was unreachable or still loading.
+  The detector **raises** ``DetectionUnavailable`` and the chat handler fails closed
+  (503). Regex never stands in for a down GLiNER: names and addresses would ride to
+  the provider raw.
+* **regex-only** -- ``EREBUS_DISABLE_GLINER`` is set. Regex still runs; NER-only
+  classes (names, addresses, national phone formats) are not detected. A deliberate,
+  recorded choice: ready, never raises.
 
 The degraded signal is read from ``erebus.core.state`` (the same per-call flag the
 core tokenizer honors) rather than inferred from the empty result, so a genuinely
@@ -24,6 +27,7 @@ clean text is never mistaken for a degraded one.
 from __future__ import annotations
 
 import bisect
+import re
 from collections.abc import Callable
 
 from erebus.core import detect as core_detect
@@ -36,14 +40,17 @@ Span = tuple[int, int, str]
 # Posture values surfaced in readiness/telemetry (FR-007).
 AVAILABLE = "available"
 DEGRADED = "degraded"
-DISABLED = "disabled"
+REGEX_ONLY = "regex-only"
+
+# Compiled once; the patterns themselves live only in erebus.core.patterns.
+_REGEX = tuple((re.compile(pattern), label) for pattern, label in core_patterns.SECRET_PATTERNS)
 
 
 def _posture_is_healthy(posture: str) -> bool:
     """Map a posture string to a readiness boolean (008 R7/FR-008).
 
     Detection is ready unless it is actively ``degraded``: ``available`` is healthy
-    and ``disabled`` is a deliberate, surfaced operator choice that must NOT drain a
+    and ``regex-only`` is a deliberate, surfaced operator choice that must NOT drain a
     replica. Any unrecognized posture is treated as not-healthy (fail closed), so a
     new outage shape never silently reads as ready.
     """
@@ -91,25 +98,28 @@ def _merge(regex: list[Span], ner: list[Span], text: str) -> list[Span]:
     return [(start, end, label) for start, end, label in kept if label is not None]
 
 
-class _RecordedDisabledDetector:
-    """Detector for the explicit ``EREBUS_DISABLE_GLINER`` posture.
+def _regex_spans(text: str) -> list[Span]:
+    """Every core ``SECRET_PATTERNS`` hit plus checksum-valid IBANs, on the original text."""
+    spans = [(m.start(), m.end(), label) for rx, label in _REGEX for m in rx.finditer(text)]
+    spans.extend(core_patterns.iban_spans(text))
+    return spans
 
-    Always returns no spans and never raises: detection is off by deliberate
-    operator choice, and the posture records that choice as ``"disabled"`` so it is
-    visible in readiness/telemetry rather than masquerading as an outage.
+
+class _RegexOnlyDetector:
+    """Detector for the explicit ``EREBUS_DISABLE_GLINER`` posture: core regex, no NER.
+
+    Never touches the daemon and never raises; the posture records the choice as
+    ``"regex-only"`` so it is visible in readiness/telemetry, not mistaken for an outage.
     """
 
-    def __call__(self, text: str) -> list[tuple[int, int, str]]:
-        return []
+    def __call__(self, text: str) -> list[Span]:
+        return _merge(_regex_spans(text), [], text)
 
     def posture(self) -> str:
-        return DISABLED
+        return REGEX_ONLY
 
     def health(self) -> bool:
-        """Disabled detection is a deliberate, healthy posture: always ready.
-
-        Never raises -- a readiness probe must not take the service down.
-        """
+        """Regex-only is a deliberate, healthy posture: always ready. Never raises."""
         return True
 
 
@@ -159,17 +169,37 @@ class _CoreDetector:
         return _posture_is_healthy(self.posture())
 
 
+class _CompositeDetector:
+    """Regex + fail-closed GLiNER: the production detector when GLiNER is enabled.
+
+    NER runs first, so a down daemon raises :class:`DetectionUnavailable` before any
+    span is returned; regex hits never let a degraded request through.
+    """
+
+    def __init__(self) -> None:
+        self._ner = _CoreDetector()
+
+    def __call__(self, text: str) -> list[Span]:
+        ner = self._ner(text)  # raises DetectionUnavailable when GLiNER is degraded
+        return _merge(_regex_spans(text), ner, text)
+
+    def posture(self) -> str:
+        return self._ner.posture()
+
+    def health(self) -> bool:
+        return self._ner.health()
+
+
 def build_detector(config) -> Detector:
     """Return the gateway ``Detector`` for the given config (FR-007).
 
-    When ``config.detection_disabled`` is set (``EREBUS_DISABLE_GLINER``), returns a
-    recorded-disabled detector that always yields no spans and never raises. Otherwise
-    returns the fail-closed adapter over ``erebus.core.detect`` that raises
-    :class:`DetectionUnavailable` when detection is degraded/unavailable. Both expose a
-    ``posture()`` reporting ``available`` | ``degraded`` | ``disabled`` and a
-    ``health() -> bool`` for ``/readyz`` (``True`` unless ``degraded``; ``disabled`` is
-    healthy). Neither surface raises -- a readiness probe must not take the service down.
+    ``config.detection_disabled`` (``EREBUS_DISABLE_GLINER``) -> the regex-only detector:
+    core regex spans, never raises. Otherwise -> regex + GLiNER, which raises
+    :class:`DetectionUnavailable` when GLiNER is degraded/unavailable. Both expose a
+    ``posture()`` reporting ``available`` | ``degraded`` | ``regex-only`` and a
+    ``health() -> bool`` for ``/readyz`` (``True`` unless ``degraded``). Neither surface
+    raises -- a readiness probe must not take the service down.
     """
     if getattr(config, "detection_disabled", False):
-        return _RecordedDisabledDetector()
-    return _CoreDetector()
+        return _RegexOnlyDetector()
+    return _CompositeDetector()

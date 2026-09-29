@@ -307,7 +307,7 @@ async def _readyz(deps: GatewayDeps) -> dict:
     Ready only when shared state, key custody, and detection are all healthy. A
     missing probe is treated as "not configured here" and skipped, so the basic 007
     state-only readiness keeps working when the custody/detection probes are absent.
-    Detection ``disabled`` is a deliberate, healthy posture (ready); only ``degraded``
+    Detection ``regex-only`` is a deliberate, healthy posture (ready); only ``degraded``
     is not-ready. Any probe failure -> 503 so a load balancer drains the replica.
     """
     try:

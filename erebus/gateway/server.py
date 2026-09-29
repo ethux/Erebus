@@ -8,8 +8,8 @@ dynamic :class:`~erebus.gateway.tenancy.DbScopeResolver`, the httpx-backed egres
 shutdown closure that drains the pool, the KMS pool, the resolver pool, and the httpx client.
 
 ``main()`` is the ``erebus-gateway`` console script: it loads ``GatewayConfig.from_env()``,
-*probes* the critical dependencies (DB reachable, master key valid, detection reachable
-unless explicitly disabled) and **exits non-zero before binding** on any failure so the
+*probes* the critical dependencies (DB reachable, master key valid, GLiNER reachable
+unless EREBUS_DISABLE_GLINER) and **exits non-zero before binding** on any failure so the
 service never serves half-open (FR-009). Secret hygiene (FR-012): failure messages name the
 faulty setting but never echo its value; the master key is never logged.
 
@@ -173,7 +173,7 @@ def _probe_or_die(config: GatewayConfig) -> None:
     """Probe critical deps; on any failure print a precise message and exit non-zero.
 
     Runs BEFORE binding (FR-009): DB reachable, master key valid (a real KEK wrap round-trip),
-    and detection reachable unless explicitly disabled. Messages name the faulty dependency
+    and GLiNER reachable unless EREBUS_DISABLE_GLINER (regex-only). Messages name the faulty dependency
     but never echo a secret (FR-012).
     """
     import psycopg
@@ -209,9 +209,10 @@ def _probe_or_die(config: GatewayConfig) -> None:
             detector = build_detector(config)
             posture = detector.posture()
         except Exception as exc:
-            _die(f"detection unreachable (set EREBUS_DISABLE_GLINER to run without it): {type(exc).__name__}")
+            _die(f"GLiNER detection unreachable (set EREBUS_DISABLE_GLINER=1 to run regex-only): "
+                 f"{type(exc).__name__}")
         if posture == "degraded":
-            _die("detection unreachable (set EREBUS_DISABLE_GLINER to run without it): degraded")
+            _die("GLiNER detection unreachable (set EREBUS_DISABLE_GLINER=1 to run regex-only): degraded")
 
 
 def _die(message: str) -> None:
