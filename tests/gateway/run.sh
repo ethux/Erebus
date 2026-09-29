@@ -18,6 +18,7 @@ PURE_TESTS=(
   no_antipatterns
   helpers_smoke
   extensions
+  detection_merge
 )
 
 modules_missing() {
