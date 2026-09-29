@@ -30,6 +30,18 @@ class Role(StrEnum):
     AUDITOR = "AUDITOR"
 
 
+class Privilege(StrEnum):
+    """The privilege stored on a credential at issuance (010)."""
+
+    OPERATOR = "operator"
+    TENANT = "tenant"
+
+
+# Plain-str values, what the directory stores.
+OPERATOR: str = Privilege.OPERATOR.value
+TENANT: str = Privilege.TENANT.value
+
+
 class Action(StrEnum):
     """Privileged actions guarded by RBAC."""
 
