@@ -71,6 +71,7 @@ erebus-check-file = "erebus.commands.check_file:main"
 
 [project.entry-points."erebus.sources"]
 postgres = "erebus.cataloging.connectors.postgres:PostgresConnector"
+mysql = "erebus.cataloging.connectors.mysql:MySQLConnector"
 
 [tool.setuptools.packages.find]
 where = ["."]

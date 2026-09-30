@@ -78,8 +78,22 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: mysql-ci-root
+        ports:
+          - "13306:3306"
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql-ci-root"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
     env:
       EREBUS_PG_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+      # The connector contract suite (SC-6) runs against this MySQL and fails without it.
+      EREBUS_TEST_MYSQL_DSN: mysql://root:mysql-ci-root@127.0.0.1:13306
+      EREBUS_REQUIRE_MYSQL: "1"
 
     steps:
       - name: Check out repository

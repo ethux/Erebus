@@ -20,6 +20,8 @@ ROWS = [
     (2, "mila.brandt@acme.example", "Mila Brandt", "Mila", "Brandt", False, "2026-02-03", "vip"),
     (3, "zyx.qorbel@acme.example", "Zyx Qorbel", "Zyx", "Qorbel", True, "2026-03-04", None),
     (4, None, "Anna Visser", "Anna", "Visser", False, "2026-04-05", None),
+    # Case and accent variants: DISTINCT must keep them apart (MySQL's default collations fold both).
+    (5, "Zyx.Qorbel@ACME.example", "Zyx Qorbël", "Zyx", "Qorbël", True, "2026-05-06", None),
 ]
 FIELDS = ["id", "email", "full_name", "first_name", "last_name", "active", "signup", "notes"]
 _CUSTOMERS = ("CREATE TABLE {t} (id INTEGER PRIMARY KEY, email VARCHAR(200), full_name VARCHAR(200) NOT NULL, "
@@ -130,7 +132,8 @@ class PostgresBackend:
         return {**base, **over}
 
     def secrets(self):
-        return {"password": PASSWORD}
+        # The DSN's own password where the server checks one (CI); any text under trust auth.
+        return {"password": self.info.password or PASSWORD}
 
     def collection(self, table):
         return f"crm.{table}"
@@ -145,13 +148,13 @@ class PostgresBackend:
         port = _closed_port()
         return [
             ("an unknown role", self.settings(user="no_such_role_zq"), self.secrets(), "auth",
-             ["no_such_role_zq", PASSWORD]),
+             ["no_such_role_zq", self.secrets()["password"]]),
             ("an unknown database", self.settings(dbname="no_such_db_zq"), self.secrets(), "unreachable",
-             ["no_such_db_zq", PASSWORD]),
+             ["no_such_db_zq", self.secrets()["password"]]),
             ("a closed port", self.settings(port=port), self.secrets(), "unreachable", [str(port), "127.0.0.1"]),
             ("TLS verified by default, and this server has none", {k: v for k, v in self.settings().items()
                                                                    if k != "sslmode"},
-             self.secrets(), "unreachable", ["localhost", PASSWORD]),
+             self.secrets(), "unreachable", ["localhost", self.secrets()["password"]]),
         ]
 
 

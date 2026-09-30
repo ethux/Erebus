@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from connector_backends import BACKENDS, FIELDS, MySQLBackend
+from connector_backends import BACKENDS, FIELDS
 
 from erebus.cataloging import connector_types, sources
 from erebus.cataloging.connector_errors import CONNECTOR_TEXT, ConnectorError
@@ -86,7 +86,7 @@ def _streams(b, src):
     check(f"{b.name}: a record ref names the primary key", {r.record_ref for r in records}
           == {f"{coll}:1", f"{coll}:2"})
     only = list(src.iter_records(coll, fields=["email"]))
-    check(f"{b.name}: reads only the asked fields", len(only) == 4 and all(set(r.values) == {"email"} for r in only))
+    check(f"{b.name}: reads only the asked fields", len(only) == 5 and all(set(r.values) == {"email"} for r in only))
 
 
 def _distinct(b, src):
@@ -94,11 +94,12 @@ def _distinct(b, src):
     if b.name != "sqlite" or hasattr(src, "iter_distinct_values"):
         check(f"{b.name}: has its own iter_distinct_values", callable(getattr(src, "iter_distinct_values", None)))
     emails = list(sources.distinct_values(src, coll, ["email"], 100))
-    check(f"{b.name}: distinct values skip NULLs and duplicates",
-          sorted(emails) == [("mila.brandt@acme.example",), ("zyx.qorbel@acme.example",)])
+    check(f"{b.name}: distinct values skip NULLs and duplicates, keep case variants",
+          sorted(emails) == [("Zyx.Qorbel@ACME.example",), ("mila.brandt@acme.example",),
+                             ("zyx.qorbel@acme.example",)])
     pairs = set(sources.distinct_values(src, coll, ["first_name", "last_name"], 100))
-    check(f"{b.name}: distinct tuples come in field order",
-          pairs == {("Zyx", "Qorbel"), ("Mila", "Brandt"), ("Anna", "Visser")})
+    check(f"{b.name}: distinct tuples come in field order, accent variants kept",
+          pairs == {("Zyx", "Qorbel"), ("Zyx", "Qorbël"), ("Mila", "Brandt"), ("Anna", "Visser")})
     check(f"{b.name}: distinct values honour the limit",
           len(list(sources.distinct_values(src, coll, ["full_name"], 1))) == 1)
 
@@ -241,19 +242,20 @@ def _run(backend_cls):
 
 def _registration():
     eps = {ep.name: ep.value for ep in metadata.entry_points(group=sources.GROUP)}
-    check("postgres registers through erebus.sources",
-          eps.get("postgres") == "erebus.cataloging.connectors.postgres:PostgresConnector")
-    code = "import sys; import erebus.cataloging.connectors.postgres; print('psycopg' in sys.modules)"
+    check("postgres and mysql register through erebus.sources",
+          eps.get("postgres") == "erebus.cataloging.connectors.postgres:PostgresConnector"
+          and eps.get("mysql") == "erebus.cataloging.connectors.mysql:MySQLConnector")
+    code = ("import sys; import erebus.cataloging.connectors.postgres, erebus.cataloging.connectors.mysql;"
+            "print('psycopg' in sys.modules, 'pymysql' in sys.modules)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=_REPO, check=True)
-    check("importing a connector module loads no driver", out.stdout.split() == ["False"])
+    check("importing a connector module loads no driver", out.stdout.split() == ["False", "False"])
 
 
 def main():
     print("\n=== source connector contract (spec 015 SC-6) ===\n")
     _registration()
     for backend in BACKENDS:
-        if backend is not MySQLBackend:
-            _run(backend)
+        _run(backend)
     print(f"\n{_passed}/{_passed} passed\n")
 
 
