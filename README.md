@@ -336,6 +336,40 @@ Scale by running more `erebus-gateway` replicas against the same `EREBUS_PG_DSN`
 token minted by one replica restores on another. Operational telemetry is masked
 (no raw PII or secrets).
 
+### Sync worker
+
+`erebus-sync` reads the systems a tenant connects (SQLite, Postgres, MySQL) and keeps
+that tenant's known values in step with them. It is the only process that contacts
+those systems. It runs from the same image (the `sync-worker` service in the compose
+file) and needs `EREBUS_PG_DSN` and `EREBUS_GATEWAY_MASTER_KEY`, not the provider
+settings. It serves no traffic, but it holds the master key: give it the same secret
+store and host hardening as the gateway.
+
+A sample job maps a source's fields; a full sync stores the distinct values of the
+accepted fields. Values retire only after a full sync reads everything: a sync that
+fails, stops early or hits a cap keeps every value. An unreachable source is retried
+(1, 5 and 15 minutes by default); wrong credentials, a refused host or a cap fail the
+job at once and mark the source for attention. Job rows and logs hold fixed error
+text only, never a credential or value.
+
+Before connecting, the worker resolves the source host once and refuses it when any
+address is on the deny list (by default the gateway's own database host, loopback,
+link-local and cloud metadata addresses) or off the allow list when one is set.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `EREBUS_SYNC_POLL_S` | `5` | Seconds between polls for queued jobs |
+| `EREBUS_SYNC_CONCURRENCY` | `2` | Jobs run at once |
+| `EREBUS_SYNC_HEARTBEAT_S` / `EREBUS_SYNC_LEASE_S` | `30` / `600` | Heartbeat interval; a job silent for the lease is re-queued (the third time it fails) |
+| `EREBUS_SYNC_BACKOFF_S` | `60,300,900` | Retry waits for an unreachable source or failed query |
+| `EREBUS_SYNC_LIMIT_WAIT_S` | `172800` | How long a job may wait on a source's rate limit |
+| `EREBUS_SYNC_TENANT_MAX_VALUES` | `1000000` | Most active known values per tenant |
+| `EREBUS_SYNC_DENIED_HOSTS` | see above | Hosts, addresses and networks never contacted; setting it replaces the default |
+| `EREBUS_SYNC_ALLOWED_HOSTS` | unset | When set, the only hosts, addresses and networks contacted |
+| `EREBUS_SYNC_SQLITE_DIR` | unset (SQLite off) | Directory SQLite sources must resolve inside |
+
+Several workers can run against one database; each job runs on one of them.
+
 ### Run the release gate
 
 Before pointing production traffic at the gateway, run the strict release gate. It

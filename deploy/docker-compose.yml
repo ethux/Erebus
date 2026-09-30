@@ -1,6 +1,7 @@
 # Erebus deployable gateway - local/beta self-hosted stand-up (008 FR-013, research R9).
 #
-# Brings up Postgres (the shared state) and the gateway. Matches quickstart.md Option A:
+# Brings up Postgres (the shared state), the gateway and the sync worker. Matches
+# quickstart.md Option A:
 #
 #   cp deploy/gateway.env.example gateway.env   # fill DSN, master key, provider, etc.
 #   docker compose -f deploy/docker-compose.yml up           # pulls the published image
@@ -59,6 +60,22 @@ services:
       timeout: 5s
       retries: 6
       start_period: 20s
+
+  # The sync worker reads the systems tenants connect and keeps their known values in step.
+  # Same image, `erebus-sync` entrypoint. It needs EREBUS_PG_DSN and EREBUS_GATEWAY_MASTER_KEY
+  # (the gateway's provider settings in gateway.env are ignored), serves no traffic and
+  # publishes no port. It holds the master key: give it the gateway's secret handling.
+  sync-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ${EREBUS_IMAGE:-ghcr.io/ethux/erebus-gateway:beta}
+    entrypoint: ["erebus-sync"]
+    env_file:
+      - ${EREBUS_ENV_FILE:-../gateway.env}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # Placeholder for production GLiNER detection (research R4). The daemon currently binds a
   # Unix socket on the host filesystem, so wiring it cross-container needs a shared socket
