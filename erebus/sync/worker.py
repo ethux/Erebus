@@ -16,6 +16,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
@@ -25,6 +26,7 @@ from ..gateway.connectors import jobs
 from ..gateway.crypto.keyprovider import KeyProvider
 from . import runner
 from .config import SyncConfig
+from .extensions import WorkerHooks
 
 log = logging.getLogger("erebus.sync")
 _DEFAULT: Any = object()
@@ -110,6 +112,11 @@ class Worker:
                     *, not_before=None) -> tuple[jobs.Job, bool]:
         """Queue a job (worker extensions); see ``jobs.enqueue``."""
         return jobs.enqueue(conn, scope_id, source_id, kind, not_before=not_before)
+
+    def hooks(self) -> WorkerHooks:
+        """The hooks worker extensions register with."""
+        return WorkerHooks(state=SimpleNamespace(config=self.config, pool=self.pool, provider=self.provider),
+                           add_periodic=self.add_periodic, enqueue_job=self.enqueue_job)
 
     def _connection(self):
         return self.pool.connection()

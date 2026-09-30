@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from sync_fakes import config
 
+from erebus.gateway.store.scope_context import scoped
 from erebus.sync.extensions import GROUP, WorkerHooks, load_extensions
 from erebus.sync.worker import Worker
 
@@ -81,11 +82,26 @@ def _check_periodic(worker):
     check("a non-positive interval is refused", refused)
 
 
+def _check_worker_hooks(worker):
+    hooks = worker.hooks()
+    check("the worker builds its hooks", isinstance(hooks, WorkerHooks))
+    check("state carries the config, pool and key provider",
+          hooks.state.config is worker.config and hooks.state.pool is worker.pool
+          and hooks.state.provider is worker.provider)
+    check("the hooks queue jobs and add periodic callbacks through the worker",
+          hooks.enqueue_job == worker.enqueue_job and hooks.add_periodic == worker.add_periodic)
+    check("scoped binds a transaction to a tenant (RLS)", hooks.scoped is scoped)
+    check("connector_family names a type's family",
+          hooks.connector_family("mysql") == "database" and hooks.connector_family("sqlite") == "file")
+    check("an unknown type has no family", hooks.connector_family("no-such-type") is None)
+
+
 def main():
     print("\n=== Sync worker extensions (spec 015) ===\n")
     worker = Worker(config("postgresql:///unused"), pool=None, provider=None, connectors=lambda _t: None)
     _check_loading(worker)
     _check_periodic(worker)
+    _check_worker_hooks(worker)
     print(f"\n{_passed}/{_passed} passed\n")
 
 

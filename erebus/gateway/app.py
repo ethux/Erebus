@@ -48,6 +48,7 @@ from .deps import (
     ShutdownHook,
 )
 from .detection import DetectionUnavailable
+from .facade import ErebusFacade
 from .gating import BlockedModality, EdgeRawError, restore_payload, tokenize_payload
 from .known_value_registry import LOADING, MatcherRegistry
 from .known_values import KnownValueMatcher
@@ -235,6 +236,7 @@ def create_app(*, conn=None, key_provider: KeyProvider, detector: Detector,
                        metrics=metrics, metrics_enabled=metrics_enabled, limiter=limiter,
                        known_values=known_values)
     app = FastAPI(title="Erebus Gateway", lifespan=_make_lifespan(on_shutdown))
+    app.state.erebus = ErebusFacade(deps)  # the seams extensions use (spec 015 D6)
 
     @app.get("/healthz")
     async def healthz() -> dict:

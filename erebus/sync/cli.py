@@ -13,7 +13,6 @@ import logging
 import signal
 import sys
 import threading
-from types import SimpleNamespace
 
 import psycopg
 
@@ -22,7 +21,7 @@ from ..gateway.config import ConfigError
 from ..gateway.crypto.keyprovider import MasterKeyKms
 from ..gateway.store import db
 from .config import SyncConfig
-from .extensions import WorkerHooks, load_extensions
+from .extensions import load_extensions
 from .worker import Worker
 
 log = logging.getLogger("erebus.sync")
@@ -74,9 +73,7 @@ def main(argv: list[str] | None = None) -> None:
     pool = ConnectionPool(config.dsn, min_size=1, max_size=config.concurrency + 1, open=True)
     try:
         worker = Worker(config, pool=pool, provider=kms)
-        hooks = WorkerHooks(state=SimpleNamespace(config=config, pool=pool, provider=kms),
-                            add_periodic=worker.add_periodic, enqueue_job=worker.enqueue_job)
-        names = load_extensions(hooks)
+        names = load_extensions(worker.hooks())
         stop = threading.Event()
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_a: stop.set())
