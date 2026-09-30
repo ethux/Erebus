@@ -22,6 +22,7 @@ PURE_TESTS=(
   detection_adapter
   core_boundary
   connector_policy
+  field_rules_laptop
 )
 
 modules_missing() {
