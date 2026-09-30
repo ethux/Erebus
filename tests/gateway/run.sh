@@ -29,6 +29,7 @@ PURE_TESTS=(
   known_value_gate
   known_value_registry
   redact
+  connector_types
 )
 
 modules_missing() {

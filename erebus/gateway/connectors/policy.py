@@ -11,14 +11,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ...cataloging import field_rules
+from ...cataloging.connector_errors import CONNECTOR_TEXT
 
 ERROR_TEXT = {
-    "auth": "authentication failed",
-    "unreachable": "source unreachable",
-    "permission": "permission denied",
-    "query": "query failed",
-    "limit": "source rate limit reached",
-    "incomplete": "sync incomplete",
+    **CONNECTOR_TEXT,
     "license": "requires Erebus Pro",
     "crypto_erased": "tenant keys erased",
     "lease": "worker lease expired",

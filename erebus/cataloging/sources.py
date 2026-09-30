@@ -13,6 +13,9 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Protocol
 
+# Part of the contract: connectors raise these (re-exported for them).
+from .connector_errors import ConnectorError, LicenseRequired  # noqa: F401
+
 
 @dataclass
 class ConnectorMetadata:
