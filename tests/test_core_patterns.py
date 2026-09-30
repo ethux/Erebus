@@ -65,6 +65,18 @@ def test_private_key():
     check("no footer: an escaped PEM in a JSON or .env value is taken to its end",
           _private_key_matches(f'KEY="{head}\\nMIIEvQIBADANBg\\nBKcwggSjAgEA\\n"')
           == [f"{head}\\nMIIEvQIBADANBg\\nBKcwggSjAgEA"])
+    body1 = "\\nMIIEvQIBADANBg\\nBKcwggSjAgEA"
+    for name, text, match in (
+            ("a JSON value ending right after base64", f'{{"stdout":"{head}{body1}"}}', head + body1),
+            ("a .env value with the body on one line", f'KEY="{head}\\nMIIEvQIBADANBgBKcwggSjAgEA"',
+             f"{head}\\nMIIEvQIBADANBgBKcwggSjAgEA"),
+            ("an escaped quote inside a JSON string", f'export KEY=\\"{head}{body1}\\"', head + body1),
+            ("single quotes", f"KEY='{head}{body1}'", head + body1),
+            ("inline code", f"`{head}{body1}`", head + body1),
+            ("a truncated last line ending in ...", f"{head}\nMIIEvQIBADANBg\nBKcw/ggSjAgEA...",
+             f"{head}\nMIIEvQIBADANBg\nBKcw/ggSjAgEA"),
+            ("a last line ending in a comma", f"[{head}\nMIIEvQIBADANBg, 3]", f"{head}\nMIIEvQIBADANBg")):
+        check(f"no footer: {name} keeps the last base64 line", _private_key_matches(text) == [match])
     encrypted = _ENCRYPTED.rsplit("\n", 1)[0]
     check("no footer: an encrypted key keeps its Proc-Type, DEK-Info and body",
           _private_key_matches(f"{encrypted}\n\nthat is all") == [encrypted])
@@ -76,7 +88,8 @@ def test_private_key():
     # (quadratic, GIL held): 4000 took 3.3 s. Linear now takes a few milliseconds.
     for unit in ("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY----- x\n",
                  "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n",
-                 "-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + " x\n\n\n"):
+                 "-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + " x\n\n\n",
+                 '"-----BEGIN PRIVATE KEY-----\\n' + "A" * 64 + '\\"\n'):
         text = unit * 4000
         started = time.perf_counter()
         hits = _private_key_matches(text)
