@@ -97,6 +97,9 @@ jobs:
           python -m pip install -e '.[gateway]'
           python -m pip install -e ./pro
 
+      - name: Core pattern tests
+        run: python tests/test_core_patterns.py
+
       - name: Gateway release gate
         run: bash tests/gateway/run.sh --all
 

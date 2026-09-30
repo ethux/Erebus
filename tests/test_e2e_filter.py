@@ -13,6 +13,8 @@ import sys
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Unmocked calls must not reach (or boot) the real GLiNER daemon: regex only.
+os.environ["EREBUS_DISABLE_GLINER"] = "1"
 
 from erebus.filter import (
     MODES,
