@@ -15,6 +15,12 @@ import psycopg
 
 from ..store.scope_context import scoped
 
+# A known value keeps one token for as long as it is active (spec 015 Tokens).
+_NOT_KNOWN = (
+    "AND NOT EXISTS (SELECT 1 FROM catalog_entries c WHERE c.scope_id = token_maps.scope_id "
+    "AND c.value_blind_index = token_maps.value_blind_index AND c.status = 'active') "
+)
+
 
 def purge_expired(
     conn: psycopg.Connection,
@@ -23,6 +29,8 @@ def purge_expired(
     label: str | None = None,
 ) -> int:
     """Delete this scope's ``token_maps`` rows older than the window; log evidence.
+
+    Tokens of active known values (catalog entries) are kept.
 
     Deletes rows whose ``created_at`` is older than ``now() - older_than_seconds``
     (optionally restricted to a single ``label``), records a non-PII
@@ -36,6 +44,7 @@ def purge_expired(
                 "DELETE FROM token_maps "
                 "WHERE scope_id = %s "
                 "AND created_at < now() - make_interval(secs => %s) "
+                f"{_NOT_KNOWN}"
                 "RETURNING id",
                 (scope_id, older_than_seconds),
             ).fetchall()
@@ -44,6 +53,7 @@ def purge_expired(
                 "DELETE FROM token_maps "
                 "WHERE scope_id = %s AND label = %s "
                 "AND created_at < now() - make_interval(secs => %s) "
+                f"{_NOT_KNOWN}"
                 "RETURNING id",
                 (scope_id, label, older_than_seconds),
             ).fetchall()
