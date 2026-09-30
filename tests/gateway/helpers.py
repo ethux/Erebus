@@ -25,6 +25,7 @@ if a caller forgets it.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -32,6 +33,7 @@ import uuid
 from pathlib import Path
 
 import psycopg
+from psycopg import sql
 
 # Defensive repo-root bootstrap so ``erebus.gateway.*`` imports resolve even when
 # a caller imported this module without first extending sys.path.
@@ -91,6 +93,37 @@ def _apply_all_tolerant(conn: psycopg.Connection) -> None:
                     conn.execute(stmt)
             except _DUPLICATE:
                 pass  # object already exists from a prior run
+
+
+@contextlib.contextmanager
+def restricted_role(dsn: str):
+    """Yield a connection running as a fresh ``NOSUPERUSER NOBYPASSRLS`` role.
+
+    The gate connects as a superuser, which bypasses row-level security, so only a
+    connection like this one proves a policy. The role gets DML on every table in
+    ``public`` of the database behind ``dsn``; roles are cluster-wide, so it is dropped
+    on exit.
+    """
+    role = f"erebus_rls_{uuid.uuid4().hex[:12]}"
+    ident = sql.Identifier(role)
+    admin = psycopg.connect(dsn, autocommit=True)
+    admin.execute(sql.SQL("CREATE ROLE {} NOSUPERUSER NOBYPASSRLS NOLOGIN").format(ident))
+    restricted = None
+    try:
+        admin.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(ident))
+        admin.execute(
+            sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}").format(ident)
+        )
+        restricted = psycopg.connect(dsn, autocommit=True)
+        restricted.execute(sql.SQL("SET ROLE {}").format(ident))
+        restricted.autocommit = False
+        yield restricted
+    finally:
+        if restricted is not None:
+            restricted.close()
+        admin.execute(sql.SQL("DROP OWNED BY {}").format(ident))
+        admin.execute(sql.SQL("DROP ROLE {}").format(ident))
+        admin.close()
 
 
 def provision(conn: psycopg.Connection, kms: KeyProvider, scope_key: str) -> uuid.UUID:
