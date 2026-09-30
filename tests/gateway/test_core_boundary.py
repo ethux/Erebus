@@ -4,7 +4,9 @@ Walks the AST of every ``.py`` file under ``erebus/`` and fails on: an import of
 ``erebus_pro`` (statement or a module-name string such as ``importlib.import_module``
 takes), a read of an ``EREBUS_LICENSE_*`` variable (any string constant naming one),
 and any use of the entitlements Pro attaches to the app (``erebus_entitlements``).
-Pro gates itself; core only offers seams. Pure: parses source, imports nothing.
+Pro gates itself; core only offers seams. The reverse holds too: ``pro/erebus_pro``
+imports no ``erebus`` module and reaches core only through the facade, the worker hooks
+and the schema entry point. Pure: parses source, imports nothing.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import sys
 from pathlib import Path
 
 _CORE = Path(__file__).resolve().parents[2] / "erebus"
+_PRO = Path(__file__).resolve().parents[2] / "pro" / "erebus_pro"
 _passed = 0
 
 
@@ -59,6 +62,34 @@ def violations(source: str) -> list[str]:
     return found
 
 
+def _is_core_module(name: str) -> bool:
+    return name == "erebus" or name.startswith("erebus.")
+
+
+def core_imports(source: str) -> list[str]:
+    """Return every ``erebus`` (core) module ``source`` imports; Pro must use the seams."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found += [a.name for a in node.names if _is_core_module(a.name)]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and _is_core_module(node.module or ""):
+            found.append(node.module)
+    return found
+
+
+def _check_pro_side():
+    check("flags `from erebus.gateway import catalog` in Pro", core_imports("from erebus.gateway import catalog\n"))
+    check("flags `import erebus.sync.worker` in Pro", core_imports("import erebus.sync.worker\n"))
+    check("ignores Pro's own relative imports", not core_imports("from .license import from_env\n"))
+    files = sorted(p for p in _PRO.rglob("*.py") if "__pycache__" not in p.parts)
+    check("the scan covers the Pro package", len(files) >= 5)
+    bad = {str(p.relative_to(_PRO.parent)): core_imports(p.read_text(encoding="utf-8")) for p in files}
+    bad = {k: v for k, v in bad.items() if v}
+    for name, found in bad.items():
+        print(f"  ✗ {name}: imports {', '.join(found)}", file=sys.stderr)
+    check("no Pro module imports a core module (seams only)", not bad)
+
+
 def _check_detector():
     """The guard itself catches each shape it claims to (so a clean tree means something)."""
     check("flags `import erebus_pro`", violations("import erebus_pro\n"))
@@ -85,6 +116,7 @@ def main():
     for name, found in bad.items():
         print(f"  ✗ {name}: {', '.join(found)}", file=sys.stderr)
     check("no core module imports erebus_pro, reads EREBUS_LICENSE_* or checks entitlements", not bad)
+    _check_pro_side()
     print(f"\n{_passed}/{_passed} passed\n")
 
 
