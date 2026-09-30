@@ -12,7 +12,7 @@ no plaintext known value is ever persisted or mirrored (FR-041..043).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Iterator
 from dataclasses import dataclass
 
 import psycopg
@@ -20,8 +20,10 @@ import psycopg
 from ..cataloging.stop_words import STOP_WORDS
 from .connectors.policy import MIN_VALUE_CHARS, clean_value, reject_reason
 from .crypto.envelope import ScopeCrypto
+from .crypto.keyprovider import KeyProvider
+from .known_values import KnownValueMatcher
 from .store import catalog_versions
-from .store.known_value_store import normalize_label
+from .store.known_value_store import normalize_label, open_scope_crypto
 from .store.scope_context import scoped
 
 
@@ -239,6 +241,37 @@ def erase_value(conn: psycopg.Connection, crypto: ScopeCrypto, scope_id: uuid.UU
         )
         catalog_versions.bump(conn, scope_id)
     return ErasedCounts(entries, tokens)
+
+
+def iter_active_values(
+    conn: psycopg.Connection, crypto: ScopeCrypto, scope_id: uuid.UUID, *, batch: int = 5000
+) -> Iterator[tuple[str, str]]:
+    """Yield ``(value, label)`` of every active entry: manual first, then the oldest.
+
+    That order is the label pick when a value has several labels (the matcher keeps the
+    first). One server-side cursor in ``scoped()`` streams ``batch`` rows at a time and
+    one cipher decrypts them all, so a 1M-value tenant is never held as rows.
+    """
+    decrypt = crypto.decryptor()
+    with scoped(conn, scope_id), conn.cursor(name="erebus_known_values") as cur:
+        cur.execute(
+            "SELECT value_nonce, value_ciphertext, label FROM catalog_entries "
+            "WHERE scope_id = %s AND status = 'active' "
+            "ORDER BY (origin <> 'manual'), created_at, id",
+            (scope_id,),
+        )
+        while rows := cur.fetchmany(batch):
+            for nonce, ct, label in rows:
+                yield decrypt(bytes(nonce), bytes(ct)).decode("utf-8"), label
+
+
+def load_matcher(
+    conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.UUID, *, batch: int = 5000
+) -> KnownValueMatcher:
+    """Build the tenant's matcher from its active entries (raises ``CryptoErased`` or
+    ``KeyError`` for an erased or unknown tenant)."""
+    crypto = open_scope_crypto(conn, provider, scope_id)
+    return KnownValueMatcher.build(iter_active_values(conn, crypto, scope_id, batch=batch))
 
 
 def match(

@@ -61,8 +61,8 @@ def provision_scope(conn: psycopg.Connection, provider: KeyProvider, scope_key: 
     return scope_id
 
 
-def open_store(conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.UUID) -> KnownValueStore:
-    """Open the store for a provisioned scope (raises if crypto-erased or unknown)."""
+def open_scope_crypto(conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.UUID) -> ScopeCrypto:
+    """The ``ScopeCrypto`` of a provisioned scope (raises if crypto-erased or unknown)."""
     with scoped(conn, scope_id):
         row = conn.execute(
             "SELECT wrapped_dek, key_version FROM tenant_keys WHERE scope_id = %s",
@@ -70,8 +70,12 @@ def open_store(conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.U
         ).fetchone()
     if not row:
         raise KeyError(f"scope {scope_id} not provisioned")
-    crypto = ScopeCrypto.open(provider, str(scope_id), bytes(row[0]), row[1])
-    return KnownValueStore(conn, scope_id, crypto)
+    return ScopeCrypto.open(provider, str(scope_id), bytes(row[0]), row[1])
+
+
+def open_store(conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.UUID) -> KnownValueStore:
+    """Open the store for a provisioned scope (raises if crypto-erased or unknown)."""
+    return KnownValueStore(conn, scope_id, open_scope_crypto(conn, provider, scope_id))
 
 
 class KnownValueStore:
