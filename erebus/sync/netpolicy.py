@@ -29,16 +29,12 @@ from typing import Any
 from psycopg import conninfo
 
 from ..cataloging.connector_types import ConnectorType
+from ..gateway.connectors.policy import ERROR_TEXT
 
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 Address = ipaddress.IPv4Address | ipaddress.IPv6Address
 Resolver = Callable[..., list]
 
-_TEXT = {
-    "settings": "source settings are not valid",
-    "denied": "source address is not allowed",
-    "unreachable": "source unreachable",
-}
 # Loopback, unspecified, link-local (AWS/GCP/Azure metadata live at 169.254.169.254),
 # AWS's IPv6 metadata address and Alibaba Cloud's metadata address.
 DEFAULT_DENIED_NETWORKS = (
@@ -57,7 +53,7 @@ class PolicyError(Exception):
     """The worker refuses a source's settings or target; ``kind`` classes it."""
 
     def __init__(self, kind: str) -> None:
-        super().__init__(_TEXT[kind])
+        super().__init__(ERROR_TEXT[kind])
         self.kind = kind
 
 

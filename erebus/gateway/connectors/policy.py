@@ -19,10 +19,20 @@ ERROR_TEXT = {
     "crypto_erased": "tenant keys erased",
     "lease": "worker lease expired",
     "internal": "internal error",
+    # Added by the sync worker (its checks run before any connector does).
+    "settings": "source settings are not valid",
+    "denied": "source address is not allowed",
+    "unknown_type": "unknown connector type",
+    "unsupported": "job kind not supported",
+    "model": "model review failed",
+    "paused": "source paused",
 }
 
 # Unretried, and the source is marked needs_attention: a person must act.
-_FATAL = frozenset({"auth", "permission", "incomplete", "license", "crypto_erased"})
+_FATAL = frozenset({"auth", "permission", "incomplete", "license", "crypto_erased", "settings", "denied",
+                    "unknown_type", "unsupported"})
+# Unretried, the source left as it is: an admin paused it.
+_SKIPPED = frozenset({"paused"})
 _LICENSE_TEXT = re.compile(r"requires Erebus Pro \(feature [a-z0-9_.-]{1,64}\)")
 
 # The value rules applied at upsert live with the field rules (spec 015 D2).
@@ -81,6 +91,8 @@ def failure_outcome(
     text = error_text(error_class, license_message)
     if error_class in _FATAL:
         return Outcome("failed", text, attempts + 1, needs_attention=True)
+    if error_class in _SKIPPED:
+        return Outcome("failed", text, attempts)
     if error_class == "limit":
         since = limited_since or now
         deadline = since + timedelta(seconds=timings.limit_wait_s)

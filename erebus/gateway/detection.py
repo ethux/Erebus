@@ -191,3 +191,13 @@ def build_detector(config) -> Detector:
     if getattr(config, "detection_disabled", False):
         return _RegexOnlyDetector()
     return _CompositeDetector()
+
+
+def build_model_reviewer() -> Detector:
+    """GLiNER alone, fail-closed: the sync worker's model review of sampled fields (spec 015).
+
+    Regex is left out on purpose: the field rules already match emails and phone numbers,
+    and "model flagged" must mean a model hit. Raises ``DetectionUnavailable`` while
+    GLiNER is down, which fails the sample job for a retry.
+    """
+    return _CoreDetector()

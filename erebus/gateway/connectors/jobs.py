@@ -116,6 +116,16 @@ def heartbeat(conn: psycopg.Connection, job: Job, *, timings: policy.JobTimings)
     return row is not None
 
 
+def hold_lease(conn: psycopg.Connection, job: Job) -> bool:
+    """Inside the caller's transaction, lock the job row if this worker still holds its lease.
+
+    ``False`` when the lease was lost; the caller must then write nothing. Holding the row
+    lock keeps the lease from expiring under a result being committed.
+    """
+    return conn.execute(f"SELECT 1 FROM sync_jobs WHERE {_FENCE} FOR UPDATE", (job.id, job.lease_token)).fetchone() \
+        is not None
+
+
 def finish(
     conn: psycopg.Connection,
     job: Job,
