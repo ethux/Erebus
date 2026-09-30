@@ -1,9 +1,8 @@
-"""Error redaction shared by the laptop catalog and the sync worker (spec 015 "Architecture").
+"""Error redaction for the laptop catalog, in a pure module (spec 015 "Architecture").
 
 Pure: ``erebus.cataloging.redact`` imports no store or config, masks emails, phones,
 secret assignments, DSNs, conninfo keys, hosts and addresses and Postgres ``DETAIL``
-lines; ``sanitize_log`` also masks every quoted literal (driver messages quote the
-offending value). The laptop store keeps its ``sanitize_error`` name.
+lines. The laptop store keeps its ``sanitize_error`` name.
 """
 import ast
 import os
@@ -53,13 +52,6 @@ def main():
     check("masks a DETAIL line", "Zyx Qorbel" not in out and "DETAIL: [REDACTED]" in out)
     check("caps the length", len(s("x" * 2000)) <= 500)
     check("accepts an exception", s(ValueError("token=abc123")) == "token=[REDACTED]")
-
-    log = redact.sanitize_log
-    out = log('invalid input syntax for type integer: "Zyx Qorbel"')
-    check("sanitize_log masks double-quoted literals", "Zyx Qorbel" not in out and '"[VALUE]"' in out)
-    out = log("(1366, \"Incorrect string value: 'Qorbel' for column 'name'\")")
-    check("sanitize_log masks single-quoted literals", "Qorbel" not in out)
-    check("sanitize_log still applies sanitize_error", "[EMAIL]" in log("mail jan@example.test failed"))
 
     from erebus.cataloging import store
     check("the laptop store re-exports sanitize_error", store.sanitize_error is redact.sanitize_error)

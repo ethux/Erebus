@@ -1,11 +1,10 @@
 """Mask what an error message may carry before it reaches a log or the laptop CLI.
 
-Pure (no store or config import), so the laptop catalog and the sync worker share it.
+Pure (no store or config import), so it serves the laptop catalog and any other process.
 ``sanitize_error`` masks emails, phone numbers, secret assignments, DSNs, conninfo
-values, host names, IP addresses and Postgres ``DETAIL`` lines; ``sanitize_log`` also
-masks every quoted literal, since drivers quote the offending value ("invalid input
-syntax for type integer: "..."). Neither is a licence to store the result: a job row
-keeps fixed text only.
+values, host names, IP addresses and Postgres ``DETAIL`` lines. It is no licence to
+store or log a source's error: a free-form message can still carry a value, so the sync
+worker keeps fixed text in job rows and logs only exception types.
 """
 from __future__ import annotations
 
@@ -25,8 +24,6 @@ _CONNINFO_RE = re.compile(
 # Candidates only; each is checked with ipaddress so times and ratios stay readable.
 _IP_RE = re.compile(r"(?i)(?<![\w:.])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![\w:])|\b\d{1,3}(?:\.\d{1,3}){3}\b")
 _HOST_RE = re.compile(r"(?i)(?<![/\w.\-@])(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,24}\b(?![/\w\-])")
-_DOUBLE_QUOTED = re.compile(r'"[^"\n]*"')
-_SINGLE_QUOTED = re.compile(r"'[^'\n]*'")
 
 
 def _ip(match: re.Match) -> str:
@@ -49,10 +46,3 @@ def sanitize_error(exc: BaseException | str) -> str:
     text = _HOST_RE.sub("[HOST]", text)
     text = _PHONE_RE.sub("[PHONE]", text)
     return text[:_MAX]
-
-
-def sanitize_log(exc: BaseException | str) -> str:
-    """``sanitize_error`` plus every quoted literal masked: for worker logs."""
-    text = _DOUBLE_QUOTED.sub('"[VALUE]"', str(exc))
-    text = _SINGLE_QUOTED.sub("'[VALUE]'", text)
-    return sanitize_error(text)
