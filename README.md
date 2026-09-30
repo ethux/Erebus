@@ -323,6 +323,9 @@ known value. Each replica holds them in memory only and reloads a tenant within
 loading, crypto-erased or not active) gets 503 without using quota. Edge mode refuses a
 payload holding a known value.
 
+Size replicas for about 90 MB of memory per 100,000 known values, summed over all
+tenants, plus the same again for a tenant being reloaded.
+
 ### Health and readiness
 
 | Endpoint | Purpose |
@@ -370,6 +373,34 @@ link-local and cloud metadata addresses) or off the allow list when one is set.
 
 Several workers can run against one database; each job runs on one of them.
 
+### Connecting a database
+
+| Type | Settings | Credentials |
+|------|----------|-------------|
+| `sqlite` | `path` (inside `EREBUS_SYNC_SQLITE_DIR`), `collections` | none |
+| `postgres`, `mysql` | `host`, `port`, `dbname`, `user`, `sslmode`, `schemas`, `collections` | `password` |
+
+`sslmode` is `disable`, `prefer`, `require`, `verify-ca` or `verify-full` (the default,
+checked against the system CAs). Collections are named `schema.table`; without
+`schemas` the worker reads every user schema. A raw DSN, file paths and driver options
+are refused. The worker opens every session read-only with a 10-minute statement
+limit, but the read-only account below is the real guard. Grant only the tables that
+hold customer data:
+
+```sql
+-- Postgres
+CREATE ROLE erebus_sync LOGIN PASSWORD '<password>';
+ALTER ROLE erebus_sync SET default_transaction_read_only = on;
+GRANT CONNECT ON DATABASE crm TO erebus_sync;
+GRANT USAGE ON SCHEMA public TO erebus_sync;
+GRANT SELECT ON public.customers, public.contacts TO erebus_sync;
+
+-- MySQL
+CREATE USER 'erebus_sync'@'%' IDENTIFIED BY '<password>' REQUIRE SSL;
+GRANT SELECT ON crm.customers TO 'erebus_sync'@'%';
+GRANT SELECT ON crm.contacts TO 'erebus_sync'@'%';
+```
+
 ### Run the release gate
 
 Before pointing production traffic at the gateway, run the strict release gate. It
@@ -379,6 +410,10 @@ Postgres:
 ```bash
 EREBUS_PG_DSN=postgresql:///postgres make gateway-test
 ```
+
+The connector contract suite runs against SQLite and Postgres; set
+`EREBUS_TEST_MYSQL_DSN=mysql://root:<password>@127.0.0.1:3306` to include a throwaway
+MySQL (skipped otherwise).
 
 The end-to-end acceptance (real uvicorn + a mock provider + real Postgres) verifies
 token-only egress, correct restoration, per-tenant central-credential egress, and
