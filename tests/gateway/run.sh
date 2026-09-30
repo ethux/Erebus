@@ -26,6 +26,7 @@ PURE_TESTS=(
   field_rules
   known_values
   known_values_bench
+  known_value_gate
 )
 
 modules_missing() {
