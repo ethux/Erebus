@@ -31,6 +31,7 @@ PURE_TESTS=(
   redact
   connector_types
   sync_policy
+  worker_extensions
 )
 
 modules_missing() {

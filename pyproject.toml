@@ -52,6 +52,7 @@ gateway = [
 [project.scripts]
 erebus = "erebus.shim:main"
 erebus-gateway = "erebus.gateway.server:main"
+erebus-sync = "erebus.sync.cli:main"
 erebus-codex = "erebus.codex_shim:main"
 erebus-setup = "erebus.setup:main_install"
 erebus-update = "erebus.setup:main_update"

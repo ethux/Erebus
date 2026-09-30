@@ -166,6 +166,24 @@ class MasterKeyKms(KeyProvider):
         except Exception:
             return False
 
+    def verify(self, conn) -> None:
+        """Unseal one existing scope KEK so a wrong master key aborts before any write (010 D2).
+
+        Raises ``ValueError`` when the key does not unseal them; a fresh database passes.
+        Used by ``create-operator`` and the sync worker's startup.
+        """
+        from cryptography.exceptions import InvalidTag
+
+        if conn.execute("SELECT to_regclass('scope_keks')").fetchone()[0] is None:
+            return  # fresh database: nothing sealed yet, nothing to check against
+        for (sid,) in conn.execute("SELECT id FROM scopes ORDER BY created_at").fetchall():
+            try:
+                keks, _erased = self._load(str(sid))
+            except InvalidTag as exc:
+                raise ValueError("EREBUS_GATEWAY_MASTER_KEY does not unseal the existing scope keys") from exc
+            if keks:
+                return
+
     def _load(self, scope_id: str) -> tuple[list[tuple[int, bytes]], bool]:
         """Return ``([(version, kek) newest-first], erased)`` for the scope."""
         from ..store.scope_context import scoped

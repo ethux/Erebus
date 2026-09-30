@@ -238,21 +238,6 @@ def _die(message: str) -> None:
     raise SystemExit(2)
 
 
-def _verify_master_key(conn, kms: MasterKeyKms) -> None:
-    """Unseal one existing scope KEK so a wrong master key aborts before any write (010 D2)."""
-    from cryptography.exceptions import InvalidTag
-
-    if conn.execute("SELECT to_regclass('scope_keks')").fetchone()[0] is None:
-        return  # fresh database: nothing sealed yet, nothing to check against
-    for (sid,) in conn.execute("SELECT id FROM scopes ORDER BY created_at").fetchall():
-        try:
-            keks, _erased = kms._load(str(sid))
-        except InvalidTag as exc:
-            raise ConfigError("EREBUS_GATEWAY_MASTER_KEY does not unseal the existing scope keys") from exc
-        if keks:
-            return
-
-
 def create_operator(env: dict[str, str] | None = None, *, label: str = "operator") -> tuple[uuid.UUID, str]:
     """Insert an operator credential in the reserved home scope; return ``(id, token)`` (010 D2).
 
@@ -271,7 +256,10 @@ def create_operator(env: dict[str, str] | None = None, *, label: str = "operator
     kms = MasterKeyKms(values["EREBUS_PG_DSN"], values["EREBUS_GATEWAY_MASTER_KEY"])
     try:
         with psycopg.connect(values["EREBUS_PG_DSN"], autocommit=True) as conn:
-            _verify_master_key(conn, kms)
+            try:
+                kms.verify(conn)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
             db.run_migrations(conn)
             home = credentials_directory.OPERATOR_SCOPE_KEY
             row = conn.execute("SELECT id FROM scopes WHERE scope_key = %s", (home,)).fetchone()
