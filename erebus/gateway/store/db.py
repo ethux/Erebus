@@ -12,6 +12,8 @@ import psycopg
 
 _SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema"
 _DEFAULT_DSN = "postgresql:///erebus_gateway"
+# Advisory lock key shared by every process that migrates (arbitrary, fixed).
+_MIGRATION_LOCK = 0x45524542_4D494752
 
 
 def connect(dsn: str | None = None) -> psycopg.Connection:
@@ -33,21 +35,27 @@ def _statements(sql: str) -> list[str]:
 
 
 def run_migrations(conn: psycopg.Connection, schema_dir: Path | None = None) -> list[str]:
-    """Apply un-applied *.sql files in name order; record each in _migrations."""
+    """Apply un-applied *.sql files in name order; record each in _migrations.
+
+    One transaction under a transaction-level advisory lock, so gateway replicas and the
+    sync worker can start together: a second migrator waits for the first to commit, then
+    finds nothing left to apply. On a connection with an open transaction the lock is held
+    until the caller commits.
+    """
     schema_dir = schema_dir or _SCHEMA_DIR
+    applied: list[str] = []
     with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK,))
         conn.execute(
             "CREATE TABLE IF NOT EXISTS _migrations "
             "(name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
         )
-    done = {r[0] for r in conn.execute("SELECT name FROM _migrations").fetchall()}
-    applied: list[str] = []
-    for path in sorted(schema_dir.glob("*.sql")):
-        if path.name in done:
-            continue
-        with conn.transaction():
+        done = {r[0] for r in conn.execute("SELECT name FROM _migrations").fetchall()}
+        for path in sorted(schema_dir.glob("*.sql")):
+            if path.name in done:
+                continue
             for stmt in _statements(path.read_text()):
                 conn.execute(stmt)
             conn.execute("INSERT INTO _migrations (name) VALUES (%s)", (path.name,))
-        applied.append(path.name)
+            applied.append(path.name)
     return applied
