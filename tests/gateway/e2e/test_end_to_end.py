@@ -45,12 +45,13 @@ import uvicorn
 
 from erebus.core import detect as core_detect
 from erebus.core import state as core_state
+from erebus.gateway import catalog
 from erebus.gateway.config import GatewayConfig
 from erebus.gateway.crypto.keyprovider import MasterKeyKms
 from erebus.gateway.providers import credentials, quota
 from erebus.gateway.server import build_app_from_config
 from erebus.gateway.store import credentials_directory, db
-from erebus.gateway.store.known_value_store import open_store, provision_scope
+from erebus.gateway.store.known_value_store import open_scope_crypto, open_store, provision_scope
 
 _DSN = os.environ.get("EREBUS_PG_DSN", "postgresql:///erebus_e2e")
 _KEY = base64.b64encode(os.urandom(32)).decode()
@@ -238,6 +239,24 @@ def _provision_tenant(conn, kms, scope_key: str, provider: str, base_url: str,
     return sid, api_credential
 
 
+def _check_known_value(client, base: str, api_credential: str, provider, conn, kms, sid) -> None:
+    """SC-1 on the running server: a value only the catalog knows is tokenized after the
+    builder thread picks up the version bump (the sync worker's part is faked here)."""
+    known = "Zyx Qorbel"  # a made-up name the seeded detector does not find
+    catalog.add_known_value(conn, open_scope_crypto(conn, kms, sid), sid, known, "PERSON")
+
+    def tokenized() -> bool:
+        provider.requests.clear()
+        resp = client.post(f"{base}/v1/chat/completions", headers={"Authorization": f"Bearer {api_credential}"},
+                           json={"model": "gpt-4o", "messages": [{"role": "user", "content": f"Ask {known}"}]})
+        return resp.status_code == 200 and known not in json.dumps(provider.requests[-1]) \
+            and resp.json()["choices"][0]["message"]["content"].endswith(f"Ask {known}")
+
+    _wait_until(tokenized, "the known value was never tokenized", timeout=15.0)
+    check("a value only the catalog knows reaches the provider as a token and returns restored (SC-1)",
+          bool(_PERSON_TOKEN.search(provider.requests[-1]["body"]["messages"][-1]["content"])))
+
+
 def main():
     print("\n=== Network end-to-end acceptance gate (US6 / T049; FR-014 / SC-002 / SC-007) ===\n")
     try:
@@ -282,6 +301,7 @@ def main():
             "EREBUS_PG_DSN": _DSN,
             "EREBUS_GATEWAY_MASTER_KEY": _KEY,
             "EREBUS_GATEWAY_PROVIDER": "openai",
+            "EREBUS_GATEWAY_CATALOG_POLL_S": "1",
         })
         gateway = _GatewayServer(config)
         gateway.start()
@@ -289,8 +309,11 @@ def main():
         base = gateway.base_url
         with httpx.Client(timeout=30.0) as client:
             # readiness should report ready (state + custody healthy; detection available).
+            # Ready once the known-value builder's first pass has run (spec 015).
+            _wait_until(lambda: client.get(f"{base}/readyz").status_code == 200, "gateway never became ready")
             ready = client.get(f"{base}/readyz")
             check("the running gateway reports ready (FR-008)", ready.status_code == 200)
+            check("readiness reports known values ready", ready.json().get("known_values") == "ready")
 
             # --- SC-002: a request carrying raw PII egresses token-only and restores. ---
             provider.requests.clear()
@@ -349,6 +372,8 @@ def main():
             check("the streaming upstream call recorded ONLY a token, never the raw value (SC-002)",
                   len(provider.requests) == 1
                   and _SEEDED_NAME not in json.dumps(provider.requests[-1]))
+
+            _check_known_value(client, base, api_credential, provider, conn, kms_setup, _sid)
 
             # --- Fail-closed (a): an UNAPPROVED model sends no raw PII and is refused. ---
             provider.requests.clear()

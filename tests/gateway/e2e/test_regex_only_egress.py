@@ -131,6 +131,7 @@ def main():
         gateway.start()
         base = gateway.base_url
         with httpx.Client(timeout=30.0) as client:
+            e2e._wait_until(lambda: client.get(f"{base}/readyz").status_code == 200, "gateway never became ready")
             ready = client.get(f"{base}/readyz")
             check("readyz is 200 and reports detection 'regex-only'",
                   ready.status_code == 200 and ready.json().get("detection") == "regex-only")

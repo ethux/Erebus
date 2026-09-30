@@ -1,7 +1,8 @@
 """Configurable gateway entrypoint: assemble + launch the deployable service (008 R6/R7).
 
 ``build_app_from_config(config)`` is the single assembly path the deploy artifact and the
-acceptance harness share: it builds the connection pool, the restart-safe key custody
+acceptance harness share: it builds the connection pool, the known-value matcher builder
+thread (spec 015), the restart-safe key custody
 (:class:`~erebus.gateway.crypto.keyprovider.MasterKeyKms`), the production detector, the
 dynamic :class:`~erebus.gateway.tenancy.DbScopeResolver`, the httpx-backed egress, runs the
 (idempotent) migrations, and returns a wired :class:`fastapi.FastAPI` app together with a
@@ -39,6 +40,7 @@ from .detection import build_detector
 from .egress import build_egress, build_egress_stream
 from .extensions import load_extensions
 from .http_provider import build_http_post, close_client
+from .known_value_registry import MatcherBuilder, MatcherRegistry
 from .observability import Metrics
 from .overload import Limiter
 from .store import credentials_directory, db
@@ -96,10 +98,17 @@ class _Assembly:
     kms: MasterKeyKms
     resolver: DbScopeResolver
     client: object
+    builder: MatcherBuilder | None = None
 
     async def aclose(self) -> None:
-        """Drain in order: httpx client, then the three connection pools. Never raises."""
+        """Drain in order: the known-value builder and its pool, the httpx client, then the
+        three connection pools. Never raises."""
         import contextlib
+
+        import anyio
+        if self.builder is not None:
+            with contextlib.suppress(Exception):
+                await anyio.to_thread.run_sync(self.builder.close)
         with contextlib.suppress(Exception):
             await close_client(self.client)
         for closer in (self.resolver.close, self.kms.close, self.pool.close):
@@ -142,9 +151,15 @@ def build_app_from_config(config: GatewayConfig):
         limiter = Limiter(max_concurrent=config.concurrency_cap, max_queue=0, retry_after_seconds=1)
         slot_cap = 0
 
+    # Known values (spec 015): one matcher per tenant, built on a dedicated thread with its
+    # own one-connection pool, so a large build never holds a request worker or connection.
+    registry = MatcherRegistry()
+    builder = MatcherBuilder(registry, ConnectionPool(config.dsn, min_size=1, max_size=1, open=True), kms,
+                             poll_s=config.catalog_poll_s, metrics=metrics)
+
     # Build the assembly first so its drain closure (FR-015) can be handed to the
     # FastAPI lifespan via create_app(on_shutdown=...); app is backfilled below.
-    assembly = _Assembly(None, pool, kms, resolver, client)
+    assembly = _Assembly(None, pool, kms, resolver, client, builder)
     app = create_app(
         key_provider=kms,
         detector=detector,
@@ -163,9 +178,11 @@ def build_app_from_config(config: GatewayConfig):
         metrics_enabled=True,
         limiter=limiter,
         on_shutdown=assembly.aclose,  # lifespan drains pool + httpx on shutdown (FR-015)
+        known_values=registry,
     )
     assembly.app = app
     load_extensions(app, config)
+    builder.start()  # /readyz is 503 until its first pass has tried every active scope
     return app, assembly
 
 

@@ -18,9 +18,10 @@ from typing import Any, NamedTuple
 import anyio
 from fastapi import HTTPException
 
-from . import rbac
+from . import catalog, rbac
 from .deps import GatewayDeps
 from .governance import audit
+from .known_values import KnownValueMatcher
 from .observability import Metric
 from .overload import Limiter, Overloaded
 from .providers import quota
@@ -162,6 +163,32 @@ async def _reserve_or_429(deps: GatewayDeps, scope_id: uuid.UUID, event: str) ->
         _record(deps, scope_id, Metric.QUOTA_REJECTIONS)  # masked 429 telemetry (FR-011)
         raise HTTPException(status_code=429, detail="quota exceeded",
                             headers={"Retry-After": "1"}) from exc
+
+
+async def _known_matcher(deps: GatewayDeps, scope_id: uuid.UUID, event: str) -> KnownValueMatcher | None:
+    """The tenant's known-value matcher, or 503 before any quota is spent (spec 015).
+
+    A tenant the builder has not decided on yet (onboarded since its last pass) is served
+    with an empty matcher when its catalog is empty; otherwise the builder is woken and the
+    request refused. Crypto-erased, unprovisioned and inactive tenants have no matcher.
+    """
+    registry = deps.known_values
+    if registry is None:
+        return None
+    matcher = registry.get(scope_id)
+    if matcher is None and not registry.attempted(scope_id):
+        try:
+            empty = not await _db(deps, lambda c: catalog.has_active_values(c, scope_id))
+        except Exception:
+            empty = False
+        matcher = registry.adopt_empty(scope_id) if empty else None
+        if matcher is None:
+            registry.wake()
+    if matcher is None:
+        await _audit(deps, scope_id, event, "fail_closed")
+        _record(deps, scope_id, Metric.BLOCKED_EGRESS)
+        raise HTTPException(status_code=503, detail="known values unavailable")
+    return matcher
 
 
 def _slot(deps: GatewayDeps, scope_key: str):

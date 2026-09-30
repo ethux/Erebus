@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
@@ -20,6 +20,9 @@ from .observability import Metrics
 from .overload import Limiter
 from .tenancy import ScopeResolver
 from .tokenizer import Detector
+
+if TYPE_CHECKING:
+    from .known_value_registry import MatcherRegistry
 
 ProviderCall = Callable[[dict], Awaitable[dict]]
 ProviderStream = Callable[[dict], AsyncIterator[str]]
@@ -67,6 +70,9 @@ class GatewayDeps:
     # Graceful overload admission control (008 T043/FR-047): a per-tenant Limiter
     # registry sheds saturated requests 503 + Retry-After. None => admission is off.
     limiter: Limiter | None = None
+    # Per-tenant known-value matchers (spec 015), built by the server's background thread.
+    # None => no known-value matching (the 007 unit wiring).
+    known_values: MatcherRegistry | None = None
     _sems: dict[str, anyio.Semaphore] = field(default_factory=dict, repr=False)
     # Per-tenant overload limiters, lazily minted from ``limiter`` so one tenant's
     # burst is shed against its own bound and cannot starve another (FR-047/FR-010).

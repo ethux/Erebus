@@ -265,6 +265,15 @@ def iter_active_values(
                 yield decrypt(bytes(nonce), bytes(ct)).decode("utf-8"), label
 
 
+def has_active_values(conn: psycopg.Connection, scope_id: uuid.UUID) -> bool:
+    """Whether the tenant has any active known value (an empty catalog needs no build)."""
+    with scoped(conn, scope_id):
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM catalog_entries WHERE scope_id = %s AND status = 'active')", (scope_id,)
+        ).fetchone()
+    return bool(row[0])
+
+
 def load_matcher(
     conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.UUID, *, batch: int = 5000
 ) -> KnownValueMatcher:

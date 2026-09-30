@@ -239,6 +239,7 @@ required to deploy.
 | `EREBUS_DISABLE_GLINER` | no (off) | Run regex-only detection without GLiNER; `/readyz` reports `regex-only` |
 | `EREBUS_GATEWAY_CONCURRENCY` | no (`0`) | Per-tenant concurrency cap (`0` = unlimited) |
 | `EREBUS_GATEWAY_HTTP_TIMEOUT` | no (`30`) | Upstream HTTP timeout, seconds |
+| `EREBUS_GATEWAY_CATALOG_POLL_S` | no (`5`) | Seconds between checks for changed tenant known values |
 | `EREBUS_LICENSE_KEY` | no | Erebus Pro license key; without one only core features run |
 | `EREBUS_LICENSE_FILE` | no | Path to a file holding the license key (e.g. a mounted secret); used when `EREBUS_LICENSE_KEY` is unset |
 
@@ -314,12 +315,20 @@ route is refused fail-closed. Set `"stream": true` for SSE streaming with restor
 values; a mid-stream failure aborts fail-closed without emitting raw or
 partial-token output.
 
+A tenant's **known values** (names, emails and other values in its catalog) are always
+tokenized, also when detection would miss them. They match whole words, case-insensitive,
+next to detection; where both find overlapping text the longer span wins, a tie goes to the
+known value. Each replica holds them in memory only and reloads a tenant within
+`EREBUS_GATEWAY_CATALOG_POLL_S` of a change. A tenant whose values are not loaded (still
+loading, crypto-erased or not active) gets 503 without using quota. Edge mode refuses a
+payload holding a known value.
+
 ### Health and readiness
 
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /healthz` | Liveness. Returns 200 whenever the process is up. |
-| `GET /readyz` | Readiness. Returns 200 only when shared state, key custody, and detection are all healthy, else 503. The body's `detection` field is `available` (regex + GLiNER) or `regex-only`. |
+| `GET /readyz` | Readiness. Returns 200 only when shared state, key custody, and detection are all healthy, else 503. The body's `detection` field is `available` (regex + GLiNER) or `regex-only`. `known_values` is `loading` (503) until every tenant's known values are loaded at startup, then `ready`, or `degraded` (still 200) when a reload failed and the previous values keep matching. |
 
 Point your load balancer health check at `GET /readyz`: it drains a replica when a
 critical dependency is unhealthy, so requests fail closed rather than leaking PII.

@@ -10,6 +10,8 @@ provisioned tenant resolves with no restart, and ``GatewayConfig.from_env`` fail
 import base64
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
@@ -78,6 +80,32 @@ def _config_checks():
 
     cfg = _config()
     check("valid env parses to a GatewayConfig with detection disabled", cfg.detection_disabled is True)
+    check("the catalog poll defaults to 5 s", cfg.catalog_poll_s == 5)
+
+    bad = False
+    try:
+        GatewayConfig.from_env({
+            "EREBUS_PG_DSN": _DSN,
+            "EREBUS_GATEWAY_MASTER_KEY": _KEY,
+            "EREBUS_GATEWAY_PROVIDER": "openai",
+            "EREBUS_GATEWAY_CATALOG_POLL_S": "0",
+        })
+    except ConfigError:
+        bad = True
+    check("from_env with a catalog poll under 1 s raises ConfigError", bad)
+
+
+def _builder_alive() -> bool:
+    return any(t.name == "erebus-known-values" and t.is_alive() for t in threading.enumerate())
+
+
+def _wait_ready(client, timeout: float = 10.0):
+    deadline = time.monotonic() + timeout
+    r = client.get("/readyz")
+    while r.status_code != 200 and time.monotonic() < deadline:
+        time.sleep(0.05)
+        r = client.get("/readyz")
+    return r
 
 
 def main():
@@ -114,8 +142,11 @@ def main():
 
         check("healthz is up once the app is built", client.get("/healthz").json()["status"] == "ok")
 
-        r = client.get("/readyz")
+        check("the known-value builder thread is running", _builder_alive())
+        r = _wait_ready(client)
         check("readyz is 200 when state + custody are up", r.status_code == 200)
+        check("readyz reports known values ready after the first build pass",
+              r.json().get("known_values") == "ready")
         check("readyz reports detection posture 'regex-only' (recorded, not an outage)",
               r.json().get("detection") == "regex-only")
 
@@ -154,6 +185,7 @@ def main():
             conn = None
             kms_health = staticmethod(lambda: False)
             detector_posture = None
+            known_values = None
 
         denied = False
         try:
@@ -161,6 +193,10 @@ def main():
         except Exception as exc:  # HTTPException(503)
             denied = getattr(exc, "status_code", None) == 503
         check("readyz returns 503 fail-closed when key custody is unhealthy (FR-008)", denied)
+
+        anyio_run_close(assembly)
+        check("closing the assembly stops the known-value builder", not _builder_alive())
+        assembly = None
 
         print(f"\n{_passed}/{_passed} passed\n")
     finally:
