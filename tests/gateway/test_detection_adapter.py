@@ -103,6 +103,9 @@ def _check_regex_only():
     pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----"
     check("regex-only -> the whole PEM block is one PRIVATE_KEY span",
           det(f"k:\n{pem}\n") == [(3, 3 + len(pem), "PRIVATE_KEY")])
+    head = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+    check("regex-only -> a header with no footer takes its base64 body in one span",
+          det(f"key:\n{head}\n") == [(5, 5 + len(head), "PRIVATE_KEY")])
     check("regex-only -> GLiNER was never called", calls == [])
 
 

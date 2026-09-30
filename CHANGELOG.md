@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   organisations and national phone formats still need GLiNER.
 - Private keys: only the `BEGIN ... PRIVATE KEY` line was tokenized, so the key itself went
   out raw, and PKCS#8 `BEGIN PRIVATE KEY` blocks were missed entirely. The whole PEM block is
-  now tokenized, in the gateway and in the editor filter.
+  now tokenized, in the gateway and in the editor filter. A key pasted without its `END`
+  line is tokenized with the base64 lines that follow the header.
 - Gateway: IBANs are detected by regex with a checksum check, so they no longer depend on
   GLiNER.
 - Gateway: tokens in a response's tool-call arguments reached the client unrestored, and a

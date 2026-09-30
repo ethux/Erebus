@@ -1,7 +1,8 @@
 """Core regex patterns: whole PEM private-key blocks and checksum-valid IBANs.
 
 Pure (stdlib only, no GLiNER). ``PRIVATE_KEY`` must cover the header, base64 body and
-footer, including the PKCS#8 ``BEGIN PRIVATE KEY`` header. ``iban_spans`` must return
+footer, including the PKCS#8 ``BEGIN PRIVATE KEY`` header, and the base64 lines after a
+header with no footer. ``iban_spans`` must return
 only mod-97-valid IBANs, compact or grouped in fours.
 """
 import os
@@ -50,13 +51,32 @@ def test_private_key():
     check("header without a footer still matches the header",
           _private_key_matches("-----BEGIN RSA PRIVATE KEY----- is here")
           == ["-----BEGIN RSA PRIVATE KEY-----"])
+    head = "-----BEGIN PRIVATE KEY-----"
+    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nBKcwggSjAgEAAoIBAQC7"
+    check("no footer: the base64 lines after the header are part of the match",
+          _private_key_matches(f"key:\n{head}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n")
+          == [f"{head}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC"])
+    check("no footer: the body stops at the first line that is not base64",
+          _private_key_matches(f"{head}\n{body}\nplease rotate it\nMIIE")
+          == [f"{head}\n{body}"])
+    check("no footer: CRLF and indented lines are taken too",
+          _private_key_matches(f"  {head}\r\n  MIIEvQIBADANBg\r\n  BKcwggSjAgEA\r\nok?")
+          == [f"{head}\r\n  MIIEvQIBADANBg\r\n  BKcwggSjAgEA"])
+    check("no footer: an escaped PEM in a JSON or .env value is taken to its end",
+          _private_key_matches(f'KEY="{head}\\nMIIEvQIBADANBg\\nBKcwggSjAgEA\\n"')
+          == [f"{head}\\nMIIEvQIBADANBg\\nBKcwggSjAgEA"])
+    encrypted = _ENCRYPTED.rsplit("\n", 1)[0]
+    check("no footer: an encrypted key keeps its Proc-Type, DEK-Info and body",
+          _private_key_matches(f"{encrypted}\n\nthat is all") == [encrypted])
     check("two blocks give two matches, the text between them untouched",
           _private_key_matches(f"{_PKCS8}\nand\n{_RSA}") == [_PKCS8, _RSA])
     check("a public key is not a private key",
           _private_key_matches("-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----") == [])
     # Many headers with no footer used to rescan to the end of the text per header
     # (quadratic, GIL held): 4000 took 3.3 s. Linear now takes a few milliseconds.
-    for unit in ("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY----- x\n"):
+    for unit in ("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY----- x\n",
+                 "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n",
+                 "-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + " x\n\n\n"):
         text = unit * 4000
         started = time.perf_counter()
         hits = _private_key_matches(text)

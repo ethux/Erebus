@@ -63,6 +63,9 @@ def _replace_outside_tokens_word(text: str, value: str, token: str) -> str:
 
 # ── Regex: structured PII, secrets, and credentials ───────────────────────────
 
+# A line break in a footerless PEM body: a real one, or the two characters \n in a JSON/.env value.
+_PEM_EOL = r"(?:\r?\n|(?:\\r)?\\n)"
+
 SECRET_PATTERNS = [
     # Structured PII (high confidence, cheap, and should not depend on GLiNER)
     # Trailing lookaheads: reject continuations (word char, hyphen, or a dot
@@ -79,12 +82,15 @@ SECRET_PATTERNS = [
     (r"glpat-[a-zA-Z0-9\-_]{20,}",            "GITLAB_TOKEN"),
     (r"xox[baprs]-[a-zA-Z0-9\-]+",            "SLACK_TOKEN"),
     (r"AKIA[0-9A-Z]{16}",                      "AWS_KEY"),
-    # Whole PEM block (header, base64 body, footer); the header alone when no footer
-    # follows. (?:[A-Z]+ )* also matches PKCS#8 "BEGIN PRIVATE KEY", which [A-Z ]+ never did.
+    # Whole PEM block (header, base64 body, footer). With no footer: the header plus the
+    # whole lines after it that are base64 or Proc-Type/DEK-Info, so a truncated key's
+    # body is not left raw. (?:[A-Z]+ )* also matches PKCS#8 "BEGIN PRIVATE KEY".
     # The body may not cross another "-----": a lazy [\s\S]*? rescanned to the end of
     # the text for every footerless header (quadratic, GIL held).
     (r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"
-     r"(?:(?:(?!-----)[\s\S])*-----END (?:[A-Z]+ )*PRIVATE KEY-----)?",
+     r"(?:(?:(?!-----)[\s\S])*-----END (?:[A-Z]+ )*PRIVATE KEY-----"
+     rf"|(?:{_PEM_EOL}+[ \t]*(?:(?:Proc-Type|DEK-Info):[^\r\n\\]*"
+     rf"|[A-Za-z0-9+/=]+[ \t]*(?={_PEM_EOL}|\Z)))*)",
      "PRIVATE_KEY"),
     # Key=value assignments (only match actual assignments, not mentions)
     (r"(?i)password\s*[:=]\s*['\"]?\S{6,}",   "PASSWORD"),
