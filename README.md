@@ -401,6 +401,37 @@ GRANT SELECT ON crm.customers TO 'erebus_sync'@'%';
 GRANT SELECT ON crm.contacts TO 'erebus_sync'@'%';
 ```
 
+### Managing sources
+
+Source routes live under `/v1/admin/scopes/{scope_id}` (the `scope_id` onboarding
+returned) and need an operator credential. Credentials are write-only: no response
+returns them.
+
+```bash
+curl -sX POST localhost:8080/v1/admin/scopes/<scope_id>/sources \
+  -H 'Authorization: Bearer <operator-credential>' \
+  -d '{"name":"crm","type":"postgres",
+       "settings":{"host":"db.internal","dbname":"crm","user":"erebus_sync"},
+       "credentials":{"password":"..."},
+       "credentials_expire_at":"2027-08-31T00:00:00Z"}'
+# -> {"source":{"id":"...","status":"active",...},"job":{"kind":"sample","status":"queued",...}}
+```
+
+| Method and path | Does |
+|---|---|
+| `POST /sources` | Create a source; queues a sample job |
+| `GET /sources` | List sources with status and credential expiry |
+| `PATCH /sources/{id}` | Change `name`, `settings`, `credentials` (replaced whole), `status` (`active`/`paused`), `credentials_expire_at` or `max_values`; a settings or credentials change queues a sample |
+| `DELETE /sources/{id}` | Remove a source and retire the values only it held; 409 while a job runs |
+| `POST /sources/{id}/sample` | Re-run the sample job |
+| `POST /sources/{id}/sync` | Sync now: queue a full sync, or return the job already queued or running |
+| `GET /sources/{id}/fields` | The field mapping with decisions and reasons |
+| `PATCH /sources/{id}/fields/{field_id}` | `{"decision":"confirmed"}` or `"ignored"`; queues a full sync |
+| `GET /sync-jobs?source_id=&limit=` | Job status and counts, newest first |
+| `POST /known-values/erase` | `{"value":"..."}`: remove a value under every label, with its tokens, and keep syncs from adding it back |
+
+A paused source queues no jobs (409 on sample and sync). Another tenant's source is 404.
+
 ### Run the release gate
 
 Before pointing production traffic at the gateway, run the strict release gate. It
