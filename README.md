@@ -450,6 +450,8 @@ curl -sX POST localhost:8080/v1/admin/scopes/<scope_id>/sources \
 | `POST /known-values/erase` | `{"value":"..."}`: remove a value under every label, with its tokens, and keep syncs from adding it back |
 
 A paused source queues no jobs (409 on sample and sync). Another tenant's source is 404.
+When a job is already running, or the source is paused, the sample or full sync a change
+needs is kept as the source's `pending_job` and queued when that job ends or the source resumes.
 
 ### Scheduled syncs (Pro)
 

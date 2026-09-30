@@ -24,7 +24,7 @@ from helpers import fake_detector, operator_bearer
 
 from erebus.gateway import catalog
 from erebus.gateway.app import create_app
-from erebus.gateway.connectors import fields, sources
+from erebus.gateway.connectors import fields, jobs, sources
 from erebus.gateway.crypto.keyprovider import MasterKeyKms
 from erebus.gateway.governance import audit
 from erebus.gateway.providers import quota
@@ -270,7 +270,30 @@ def _check_update(w, src):
               r.status_code == 409 and r.json() == {"detail": "source is paused"})
     r = w.op_call("PATCH", base, {"status": "paused", "settings": {"host": "db.example", "dbname": "crm"}})
     check("a collections change while paused queues nothing", r.json()["job"] is None)
-    check("resume", w.op_call("PATCH", base, {"status": "active"}).json()["source"]["status"] == "active")
+    r = w.op_call("PATCH", base, {"status": "active"}).json()
+    check("resume", r["source"]["status"] == "active")
+    check("resuming queues the sample the paused change is owed",
+          r["job"]["kind"] == "sample" and r["source"]["pending_job"] is None)
+    w.finish_jobs(src)
+
+
+def _check_owed(w, src, ids):
+    """A field decision or new credentials while a sync runs are queued when it ends."""
+    base = f"{w.base(w.a)}/sources/{src}"
+    job_id = w.op_call("POST", f"{base}/sync").json()["job"]["id"]
+    w.conn.execute("UPDATE sync_jobs SET status = 'running', lease_token = gen_random_uuid() WHERE id = %s",
+                   (job_id,))
+    r = w.op_call("PATCH", f"{base}/fields/{ids['company']}", {"decision": "ignored"}).json()
+    check("a field decision during a running sync is owed as a full sync",
+          r["job"]["id"] == job_id and r["pending_job"] == "full")
+    r = w.op_call("PATCH", base, {"credentials": {"password": _NEW_SECRET}}).json()
+    check("new credentials during a running sync are owed as a sample",
+          r["job"]["id"] == job_id and r["source"]["pending_job"] == "sample")
+    jobs.finish(w.conn, jobs.get_job(w.conn, w.a, uuid.UUID(job_id)))
+    queued = [j for j in jobs.list_jobs(w.conn, w.a, source_id=src) if j.status == "queued"]
+    check("the running sync's end queues the owed sample (it queues the full sync)",
+          [j.kind for j in queued] == ["sample"] and sources.get_source(w.conn, w.a, src).pending_job is None)
+    w.finish_jobs(src)
 
 
 def _check_fields(w, src, ids):
@@ -387,6 +410,7 @@ def main():
         _check_jobs(w, src)
         _check_update(w, src)
         _check_fields(w, src, ids)
+        _check_owed(w, src, ids)
         _check_cross_scope(w, src_b, ids_b["company"])
         _check_delete_and_erase(w, src)
         _check_audit(w, src)

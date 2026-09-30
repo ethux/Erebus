@@ -26,7 +26,7 @@ STATUSES = ("active", "paused", "needs_attention")
 _AAD_PREFIX = b"erebus/source-secrets/v1:"
 _COLUMNS = (
     "id, scope_id, name, connector_type, settings, credentials_expire_at, cursor, status, "
-    "max_values, created_at, updated_at"
+    "max_values, created_at, updated_at, pending_job"
 )
 _UNSET: Any = object()
 
@@ -60,6 +60,7 @@ class SourceInfo:
     max_values: int
     created_at: datetime
     updated_at: datetime
+    pending_job: str | None = None  # owed once the active job ends or the source resumes
 
 
 def _aad(source_id: uuid.UUID) -> bytes:

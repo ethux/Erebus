@@ -38,7 +38,8 @@ def _iso(value: datetime | None) -> str | None:
 def _source_json(s: sources.SourceInfo) -> dict:
     return {"id": str(s.id), "scope_id": str(s.scope_id), "name": s.name, "type": s.connector_type,
             "settings": s.settings, "status": s.status, "credentials_expire_at": _iso(s.credentials_expire_at),
-            "max_values": s.max_values, "created_at": _iso(s.created_at), "updated_at": _iso(s.updated_at)}
+            "max_values": s.max_values, "created_at": _iso(s.created_at), "updated_at": _iso(s.updated_at),
+            "pending_job": s.pending_job}
 
 
 def _job_json(j: jobs.Job | None) -> dict | None:
@@ -153,10 +154,11 @@ async def update_source(deps: GatewayDeps, authorization: str | None, raw_scope:
             sources.update_source(conn, crypto, scope_id, old.id, name=change.name, settings=change.settings,
                                   secrets=change.secrets, status=change.status, max_values=change.max_values,
                                   **extra)
-            new = sources.get_source(conn, scope_id, old.id)
             # A new field map is needed when what the worker reads changed (spec 015 "Sync behaviour").
             resample = change.secrets is not None or (change.settings is not None and change.settings != old.settings)
-            job = _queue(conn, new, "sample")[0] if resample and new.status != "paused" else None
+            # Owed while paused or while a job that read the old state is active; a resume queues it.
+            job = jobs.request(conn, scope_id, old.id, "sample" if resample else None)
+            new = sources.get_source(conn, scope_id, old.id)
             return new, job, sorted(raw)  # field names only; parse_update refused unknown ones
 
     info, job, changed = await _run(deps, _do)
@@ -223,13 +225,13 @@ async def decide_field(deps: GatewayDeps, authorization: str | None, raw_scope: 
                 raise HTTPException(status_code=409, detail="this field cannot be confirmed") from None
             if field is None:
                 raise _not_found("field")
-            job = _queue(conn, info, "full")[0] if info.status != "paused" else None
-            return info, field, job
+            job = jobs.request(conn, scope_id, info.id, "full")  # owed if an active job read the old map
+            return info, field, job, sources.get_source(conn, scope_id, info.id).pending_job
 
-    info, field, job = await _run(deps, _do)
+    info, field, job, pending = await _run(deps, _do)
     await _audit(deps, scope_id, "source_field", field.decision, ident,
                  _audit_meta(info, job, field_id=str(field.id)))
-    return {"field": _field_json(field), "job": _job_json(job)}
+    return {"field": _field_json(field), "job": _job_json(job), "pending_job": pending}
 
 
 async def list_jobs(deps: GatewayDeps, authorization: str | None, raw_scope: str, raw_source: str | None,

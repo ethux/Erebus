@@ -6,6 +6,11 @@ LOCKED, oldest first, once ``not_before`` has passed; each claim mints a lease t
 that fences every later write, so a worker whose lease expired cannot finish or fail
 the job it lost. Retry, wait and failure follow ``policy``. The table has no RLS, so
 every read here filters ``scope_id`` itself; only the sources update is scoped.
+
+A change the active job does not cover is owed (``request``): ``sources.pending_job``
+holds it until that job ends (``finish``, a final ``fail`` or lease expiry queue it in
+the same transaction) or the paused source resumes. Those paths lock the source row
+before they change the job row, the order the admin API takes, so they cannot deadlock.
 """
 from __future__ import annotations
 
@@ -142,6 +147,7 @@ def finish(
     caller already holds a transaction, so value writes can commit with it.
     """
     with conn.transaction():
+        owed = _lock_source(conn, job.scope_id, job.source_id)
         row = conn.execute(
             "UPDATE sync_jobs SET status = 'done', finished_at = now(), rows_seen = %s, values_added = %s, "
             "values_retired = %s, error = NULL, lease_token = NULL, leased_until = NULL "
@@ -150,9 +156,70 @@ def finish(
         ).fetchone()
         if row is None:
             return False
-        if then is not None:
-            enqueue(conn, job.scope_id, job.source_id, then)
+        _settle_owed(conn, job.scope_id, job.source_id, owed, _merge(then, owed[0] if owed else None))
     return True
+
+
+def _merge(a: str | None, b: str | None) -> str | None:
+    """One job for two needs: a sample (it queues the full sync itself) over a full."""
+    return "sample" if "sample" in (a, b) else (a or b)
+
+
+def _lock_source(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UUID
+                 ) -> tuple[str | None, str] | None:
+    """Lock the source row; ``(pending_job, status)``, or ``None`` when it is gone."""
+    with scoped(conn, scope_id):
+        row = conn.execute(
+            "SELECT pending_job, status FROM sources WHERE scope_id = %s AND id = %s FOR UPDATE", (scope_id, source_id)
+        ).fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def _set_owed(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UUID, kind: str | None) -> None:
+    with scoped(conn, scope_id):
+        conn.execute("UPDATE sources SET pending_job = %s WHERE scope_id = %s AND id = %s", (kind, scope_id, source_id))
+
+
+def _settle_owed(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UUID,
+                 locked: tuple[str | None, str] | None, kind: str | None) -> None:
+    """After the active job ended: queue ``kind``, or keep it owed while the source is paused."""
+    if locked is None or kind is None:
+        return
+    if locked[1] == "paused":
+        if kind != locked[0]:
+            _set_owed(conn, scope_id, source_id, kind)
+        return
+    if locked[0] is not None:
+        _set_owed(conn, scope_id, source_id, None)
+    enqueue(conn, scope_id, source_id, kind)
+
+
+def request(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UUID, kind: str | None = None
+            ) -> Job | None:
+    """Queue ``kind`` (``sample`` or ``full``) plus anything owed; return the active job.
+
+    A queued job of that kind covers it. Otherwise, when a job is running or queued for
+    another kind, or the source is paused, the need is owed on the source and queued when
+    that job ends or the source resumes. ``kind=None`` queues only what is owed (a
+    resume). ``None`` when nothing is active. ``KeyError`` when the source is not here.
+    """
+    with conn.transaction():
+        locked = _lock_source(conn, scope_id, source_id)
+        if locked is None:
+            raise KeyError("source not found")
+        owed, status = locked
+        want = _merge(kind, owed)
+        if want is None:
+            return None
+        if status == "paused":
+            if want != owed:
+                _set_owed(conn, scope_id, source_id, want)
+            return None
+        job, created = enqueue(conn, scope_id, source_id, want)
+        left = None if created or (job.status == "queued" and job.kind == want) else want
+        if left != owed:
+            _set_owed(conn, scope_id, source_id, left)
+    return job
 
 
 def _flag_source(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UUID) -> None:
@@ -196,10 +263,20 @@ def fail(
             return None
         out = policy.failure_outcome(error_class, attempts=row[0], limited_since=row[1], now=row[2],
                                      timings=timings, reset_at=reset_at, license_message=license_message)
-        _apply(conn, job.id, out)
-        if out.needs_attention:
-            _flag_source(conn, job.scope_id, job.source_id)
+        _end(conn, job.id, job.scope_id, job.source_id, out)
     return out
+
+
+def _end(conn: psycopg.Connection, job_id: uuid.UUID, scope_id: uuid.UUID, source_id: uuid.UUID,
+         out: policy.Outcome) -> None:
+    """Record a failed attempt; a job that failed for good queues what the source is owed."""
+    final = out.status == "failed"
+    locked = _lock_source(conn, scope_id, source_id) if final or out.needs_attention else None
+    _apply(conn, job_id, out)
+    if out.needs_attention:
+        _flag_source(conn, scope_id, source_id)
+    if final:
+        _settle_owed(conn, scope_id, source_id, locked, locked[0] if locked else None)
 
 
 def expire_leases(conn: psycopg.Connection, *, timings: policy.JobTimings) -> list[tuple[uuid.UUID, str]]:
@@ -216,9 +293,7 @@ def expire_leases(conn: psycopg.Connection, *, timings: policy.JobTimings) -> li
         ).fetchall()
         for job_id, scope_id, source_id, attempts, kind in rows:
             out = policy.lease_outcome(attempts=attempts, timings=timings)
-            _apply(conn, job_id, out)
-            if out.needs_attention:
-                _flag_source(conn, scope_id, source_id)
+            _end(conn, job_id, scope_id, source_id, out)
             if kind in ("full", "incremental"):
                 catalog_versions.bump(conn, scope_id)
             done.append((job_id, out.status))

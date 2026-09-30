@@ -10,6 +10,7 @@ finished sample can queue its full sync in the same transaction; reads filter sc
 import os
 import sys
 import threading
+import uuid
 from datetime import timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -186,6 +187,67 @@ def _check_finish(conn, crypto, a_id, b_id):
     check("list_jobs returns newest first", jobs.list_jobs(conn, a_id, source_id=src)[0].id == full.id)
 
 
+def _active(conn, a_id, src):
+    return [(j.kind, j.status) for j in jobs.list_jobs(conn, a_id, source_id=src) if j.status in ("queued", "running")]
+
+
+def _pause(conn, a_id, src, status):
+    sources.update_source(conn, None, a_id, src, status=status)
+
+
+def _check_owed(conn, crypto, a_id):
+    """A change no active job covers is owed on the source and queued when that job ends."""
+    src = _src(conn, crypto, a_id, "owed")
+    first = jobs.request(conn, a_id, src, "full")
+    check("request queues a job when none is active", first is not None and _active(conn, a_id, src) == [
+        ("full", "queued")])
+    check("a queued job of the same kind covers a request", jobs.request(conn, a_id, src, "full").id == first.id
+          and sources.get_source(conn, a_id, src).pending_job is None)
+    job = jobs.claim(conn, timings=_T)
+    got = jobs.request(conn, a_id, src, "full")
+    check("a running job does not cover a request: it is owed",
+          got.id == job.id and sources.get_source(conn, a_id, src).pending_job == "full")
+    jobs.finish(conn, job)
+    check("finishing the running job queues what was owed", _active(conn, a_id, src) == [("full", "queued")]
+          and sources.get_source(conn, a_id, src).pending_job is None)
+
+    got = jobs.request(conn, a_id, src, "sample")
+    check("a queued job of another kind does not cover a request", got.kind == "full"
+          and sources.get_source(conn, a_id, src).pending_job == "sample")
+    job = jobs.claim(conn, timings=_T)
+    jobs.fail(conn, job, "auth", timings=_T)
+    check("a job that fails for good queues what was owed", _active(conn, a_id, src) == [("sample", "queued")])
+    job = jobs.claim(conn, timings=_T)
+    jobs.request(conn, a_id, src, "sample")
+    jobs.finish(conn, job, then="full")
+    check("an owed sample wins over the follow-up full (the sample queues it)",
+          _active(conn, a_id, src) == [("sample", "queued")])
+    _drain(conn)
+
+    _pause(conn, a_id, src, "paused")
+    check("a paused source queues nothing", jobs.request(conn, a_id, src, "sample") is None
+          and _active(conn, a_id, src) == [] and sources.get_source(conn, a_id, src).pending_job == "sample")
+    _pause(conn, a_id, src, "active")
+    check("resuming queues what was owed", jobs.request(conn, a_id, src).kind == "sample"
+          and sources.get_source(conn, a_id, src).pending_job is None)
+    _drain(conn)
+    check("a request with nothing owed queues nothing", jobs.request(conn, a_id, src) is None)
+
+    jobs.enqueue(conn, a_id, src, "full")
+    job = jobs.claim(conn, timings=_T)
+    jobs.request(conn, a_id, src, "full")
+    for n in range(3):
+        _age(conn, job.id, lease_past=True)
+        jobs.expire_leases(conn, timings=_T)
+        if n < 2:
+            jobs.claim(conn, timings=_T)
+    check("a job whose last lease expired queues what was owed",
+          jobs.get_job(conn, a_id, job.id).status == "failed" and _active(conn, a_id, src) == [("full", "queued")])
+    check("request for another scope's source raises KeyError",
+          _raises(KeyError, lambda: jobs.request(conn, uuid.uuid4(), src, "full")))
+    _drain(conn)
+
+
 def _check_restricted(kms, a_id, b_id):
     """The worker path under a role that does not bypass RLS: claims cross tenants, the
     source flag lands in each job's own scope."""
@@ -227,6 +289,7 @@ def main():
         _check_lease(conn, crypto, a_id)
         _check_failures(conn, crypto, a_id)
         _check_finish(conn, crypto, a_id, b_id)
+        _check_owed(conn, crypto, a_id)
         _check_restricted(kms, a_id, b_id)
         print(f"\n{_passed}/{_passed} passed\n")
     finally:
