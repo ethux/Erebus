@@ -71,13 +71,14 @@ def _sent_args(captured):
 
 
 def _frames(args, content):
-    """OpenAI-style chunks: the arguments split just before the token, then a content delta."""
-    cut = args.index("[")
+    """OpenAI-style chunks with the token itself split across deltas, in the arguments and
+    in the content, as BPE-sized deltas do."""
+    a, c = args.index("[") + 5, content.index("[") + 9
     deltas = [{"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
                                                     "function": {"name": "run", "arguments": ""}}]},
-              {"tool_calls": [{"index": 0, "function": {"arguments": args[:cut]}}]},
-              {"tool_calls": [{"index": 0, "function": {"arguments": args[cut:]}}]},
-              {"content": content}]
+              {"tool_calls": [{"index": 0, "function": {"arguments": args[:a]}}]},
+              {"tool_calls": [{"index": 0, "function": {"arguments": args[a:]}}]},
+              {"content": content[:c]}, {"content": content[c:]}]
     return [json.dumps({"choices": [{"index": 0, "delta": d}]}, separators=(",", ":")) for d in deltas]
 
 
@@ -151,8 +152,8 @@ def _check_restore(client, captured):
     check("streamed: the reassembled arguments are valid JSON", _loads(streamed) is not None)
     check("streamed: the token in the arguments is restored to the original value",
           (_loads(streamed) or {}).get("cmd") == _QUOTED)
-    check("streamed: a token in a content delta is restored too",
-          [d["content"] for d in deltas if "content" in d] == [f"ran {_QUOTED}"])
+    check("streamed: a token split across content deltas is restored too",
+          "".join(d["content"] for d in deltas if "content" in d) == f"ran {_QUOTED}")
 
 
 def main():

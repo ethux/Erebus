@@ -77,18 +77,17 @@ def _restore_tree(value: Any, lookup: Lookup, key: str | None = None) -> Any:
     return value
 
 
-def restore_frame(chunk: str, lookup: Lookup) -> str | None:
-    """Restore one streamed JSON chunk; None when ``chunk`` is not a JSON object.
-
-    Restoring into the parsed chunk and re-encoding it keeps the frame valid JSON
-    whatever the restored value contains.
-    """
+def parse_frame(chunk: str) -> dict | None:
+    """One streamed chunk as a JSON object; None when it is not one."""
     if not chunk.lstrip().startswith("{"):
         return None
     try:
-        frame = json.loads(chunk)
+        return json.loads(chunk)
     except (ValueError, RecursionError):
         return None
-    if not _TOKEN_RE.search(chunk):
-        return chunk
+
+
+def restore_frame(frame: dict, lookup: Lookup) -> str:
+    """Restore a parsed chunk and re-encode it, so it stays valid JSON whatever the
+    restored value contains."""
     return json.dumps(_restore_tree(frame, lookup), ensure_ascii=False, separators=(",", ":"))

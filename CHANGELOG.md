@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gateway: tokens in a response's tool-call arguments reached the client unrestored, and a
   restored value with a quote or backslash could break a streamed JSON chunk. Both now come
   back as valid JSON with the real values.
+- Gateway: a token split across two streamed chunks reached the client unrestored, in the
+  content and in tool-call arguments. It is now held back until it completes.
 
 ### Changed
 - `/readyz` reports `"detection": "regex-only"` instead of `"disabled"` when GLiNER is off.
