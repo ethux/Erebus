@@ -69,6 +69,9 @@ erebus-loc = "erebus.audit.loc:main"
 erebus-catalog = "erebus.commands.catalog:main"
 erebus-check-file = "erebus.commands.check_file:main"
 
+[project.entry-points."erebus.sources"]
+postgres = "erebus.cataloging.connectors.postgres:PostgresConnector"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["erebus*"]
