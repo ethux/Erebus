@@ -7,9 +7,10 @@ from ``ERROR_TEXT`` (SC-4); only a well-formed LicenseRequired message is kept a
 from __future__ import annotations
 
 import re
-from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+
+from ...cataloging import field_rules
 
 ERROR_TEXT = {
     "auth": "authentication failed",
@@ -28,9 +29,10 @@ ERROR_TEXT = {
 _FATAL = frozenset({"auth", "permission", "incomplete", "license", "crypto_erased"})
 _LICENSE_TEXT = re.compile(r"requires Erebus Pro \(feature [a-z0-9_.-]{1,64}\)")
 
-MIN_VALUE_CHARS = 3
-_MIN_NUMERIC_DIGITS = 6
-_NUMERIC = re.compile(r"[0-9]+")
+# The value rules applied at upsert live with the field rules (spec 015 D2).
+MIN_VALUE_CHARS = field_rules.MIN_VALUE_CHARS
+clean_value = field_rules.clean_value
+reject_reason = field_rules.reject_value
 
 
 @dataclass(frozen=True)
@@ -102,26 +104,3 @@ def lease_outcome(*, attempts: int, timings: JobTimings) -> Outcome:
     if tried >= timings.lease_attempts:
         return Outcome("failed", ERROR_TEXT["lease"], tried, needs_attention=True)
     return Outcome("queued", ERROR_TEXT["lease"], tried)
-
-
-def clean_value(value: str) -> str:
-    """The stored form of a known value: whitespace runs collapsed, ends trimmed."""
-    return " ".join(value.split())
-
-
-def reject_reason(value: str, label: str, *, stop_words: Collection[str] = ()) -> str | None:
-    """Why a synced value never becomes a known value, or ``None`` to keep it.
-
-    ``label`` is compared case-insensitively. ``stop_words`` are casefolded single words.
-    """
-    cleaned = clean_value(value)
-    if len(cleaned) < MIN_VALUE_CHARS:
-        return "short"
-    if _NUMERIC.fullmatch(cleaned) and len(cleaned) < _MIN_NUMERIC_DIGITS:
-        return "numeric"
-    single = " " not in cleaned
-    if single and label.upper() == "PERSON":
-        return "single_word"
-    if single and cleaned.casefold() in stop_words:
-        return "stop_word"
-    return None

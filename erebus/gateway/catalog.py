@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import psycopg
 
+from ..cataloging.stop_words import STOP_WORDS
 from .connectors.policy import MIN_VALUE_CHARS, clean_value, reject_reason
 from .crypto.envelope import ScopeCrypto
 from .store import catalog_versions
@@ -100,13 +101,13 @@ def upsert_values(
     sync_id: uuid.UUID,
     items: Iterable[tuple[str, str]],
     *,
-    stop_words: Collection[str] = (),
+    stop_words: Collection[str] = STOP_WORDS,
     tenant_max: int | None = None,
 ) -> UpsertResult:
     """Upsert one batch of ``(value, label)`` seen by a source and link each to ``sync_id``.
 
-    One transaction. Rejects what ``policy.reject_reason`` rejects and every value
-    suppressed by an erasure (label-free). An existing entry keeps its origin (manual
+    One transaction. Rejects what ``policy.reject_reason`` rejects (by default with the
+    bundled stop-list) and every value suppressed by an erasure (label-free). An existing entry keeps its origin (manual
     stays manual) and becomes active again. Rows are written in blind-index order, the
     order ``retire_unseen`` locks in, so concurrent syncs cannot deadlock on entries.
     Raises ``TenantCapExceeded`` (batch rolled back) when active entries pass

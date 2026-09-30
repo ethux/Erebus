@@ -23,6 +23,7 @@ PURE_TESTS=(
   core_boundary
   connector_policy
   field_rules_laptop
+  field_rules
 )
 
 modules_missing() {
