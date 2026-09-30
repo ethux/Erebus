@@ -44,6 +44,20 @@ def _bool(env: dict[str, str], name: str) -> bool:
     return env.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def master_key(env: dict[str, str]) -> str:
+    """``EREBUS_GATEWAY_MASTER_KEY``, shape-checked (base64 of 32 bytes) and never echoed.
+
+    Shared with the sync worker, which holds the same key (spec 015 D1).
+    """
+    value = _require(env, "EREBUS_GATEWAY_MASTER_KEY")
+    try:  # validate shape now (never echo the value); the KMS holds the raw string
+        if len(base64.b64decode(value, validate=True)) != 32:
+            raise ConfigError("EREBUS_GATEWAY_MASTER_KEY must decode to 32 bytes (AES-256)")
+    except (binascii.Error, ValueError) as exc:
+        raise ConfigError("EREBUS_GATEWAY_MASTER_KEY must be valid base64 of 32 bytes") from exc
+    return value
+
+
 @dataclass(frozen=True)
 class GatewayConfig:
     """Validated operator settings; the sole input needed to deploy (FR-001)."""
@@ -67,12 +81,7 @@ class GatewayConfig:
         """Parse + format-validate the environment; raise ConfigError on anything bad."""
         env = dict(os.environ if env is None else env)
 
-        master_key_b64 = _require(env, "EREBUS_GATEWAY_MASTER_KEY")
-        try:  # validate shape now (never echo the value); the KMS holds the raw string
-            if len(base64.b64decode(master_key_b64, validate=True)) != 32:
-                raise ConfigError("EREBUS_GATEWAY_MASTER_KEY must decode to 32 bytes (AES-256)")
-        except (binascii.Error, ValueError) as exc:
-            raise ConfigError("EREBUS_GATEWAY_MASTER_KEY must be valid base64 of 32 bytes") from exc
+        master_key_b64 = master_key(env)
 
         model_map: dict[str, str] = {}
         raw_map = env.get("EREBUS_GATEWAY_MODEL_MAP", "").strip()

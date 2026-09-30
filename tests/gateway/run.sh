@@ -30,6 +30,7 @@ PURE_TESTS=(
   known_value_registry
   redact
   connector_types
+  sync_policy
 )
 
 modules_missing() {
