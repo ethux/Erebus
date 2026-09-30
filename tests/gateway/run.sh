@@ -24,6 +24,8 @@ PURE_TESTS=(
   connector_policy
   field_rules_laptop
   field_rules
+  known_values
+  known_values_bench
 )
 
 modules_missing() {

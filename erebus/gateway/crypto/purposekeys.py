@@ -13,6 +13,8 @@ from __future__ import annotations
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from ..textfold import fold
+
 _ENC_INFO = b"erebus/gateway/enc/v1"
 _TOK_INFO = b"erebus/gateway/tok/v1"
 
@@ -27,8 +29,12 @@ def derive_keys(dek: bytes) -> tuple[bytes, bytes]:
 
 
 def normalize_value(value: str) -> str:
-    """Case/whitespace-folded form so casing and spacing variants share a blind index."""
-    return " ".join(value.split()).casefold()
+    """NFC, casefolded, whitespace-collapsed form so variants share a blind index.
+
+    The known-value matcher folds request text the same way (``textfold.fold``), so a
+    matched span mints the token of the value it matched. Only non-NFC input changed.
+    """
+    return fold(value)[0]
 
 
 def blind_index(k_tok: bytes, value: str, label: str = "") -> bytes:
