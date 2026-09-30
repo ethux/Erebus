@@ -186,9 +186,8 @@ restores real values in the responses your developers see. Users never hold
 provider API keys. The operator holds one central credential per tenant, and the
 gateway injects it on the live request path.
 
-This is a beta (`1.1.0-beta.2`). The 007 framework guarantees (per-scope crypto
-isolation, shared-state tokenization, governance) are unchanged; this milestone
-makes them a service you can run.
+This is a beta. The [changelog](CHANGELOG.md) lists what each release adds, fixes
+and changes; read it before upgrading.
 
 ### Operator prerequisites
 
@@ -323,8 +322,7 @@ known value. Each replica holds them in memory only and reloads a tenant within
 loading, crypto-erased or not active) gets 503 without using quota. Edge mode refuses a
 payload holding a known value.
 
-Size replicas for about 90 MB of memory per 100,000 known values, summed over all
-tenants, plus the same again for a tenant being reloaded.
+Size replicas for known values as described under [Connectors](#connectors).
 
 ### Health and readiness
 
@@ -338,6 +336,27 @@ critical dependency is unhealthy, so requests fail closed rather than leaking PI
 Scale by running more `erebus-gateway` replicas against the same `EREBUS_PG_DSN`; a
 token minted by one replica restores on another. Operational telemetry is masked
 (no raw PII or secrets).
+
+### Connectors
+
+Connect the databases that hold a tenant's customer data, and the names, emails, phone
+numbers and addresses in them become **known values**: the gateway always replaces them
+with a token, also when detection would miss them. A connector only reads.
+
+| | Free | Erebus Pro |
+|---|---|---|
+| Sources | SQLite, Postgres, MySQL | same |
+| Syncs | a sample when a source is added or changed, then a full sync of the accepted fields; "sync now" | also scheduled syncs (feature `sync.schedule`) |
+
+Everything is managed through the admin API below, which only an operator credential
+can use; a tenant credential gets 403 on every source route. When a Pro license lapses,
+values already synced keep matching and "sync now" keeps working; only scheduled syncs
+stop.
+
+Sizing: each gateway replica holds every tenant's known values in memory, about 90 MB per
+100,000 values summed over all tenants, plus the same again for a tenant being reloaded.
+A replica reports ready only after it has loaded every tenant, so keep that load within
+your health check window (about 80 seconds in the compose file).
 
 ### Sync worker
 
@@ -432,6 +451,24 @@ curl -sX POST localhost:8080/v1/admin/scopes/<scope_id>/sources \
 
 A paused source queues no jobs (409 on sample and sync). Another tenant's source is 404.
 
+### Scheduled syncs (Pro)
+
+With a license carrying `sync.schedule` in the environment of both the gateway and the
+sync worker, the worker gives every source a daily full sync. Change or turn it off per source:
+
+```bash
+curl -sX PUT localhost:8080/v1/admin/scopes/<scope_id>/sources/<source_id>/schedule \
+  -H 'Authorization: Bearer <operator-credential>' \
+  -d '{"full_minutes":720}'
+# -> {"schedule":{"source_id":"...","full_minutes":720,"next_full_at":"...",...}}
+```
+
+`full_minutes` is 60 to 43200; `null` turns scheduled syncs off and an empty body
+restores the default. Database sources have no incremental syncs, so
+`incremental_minutes` must stay unset. The first run is one interval after the change. A
+source that is busy waits for the next check (every minute); a paused one is skipped.
+Without the feature the route returns 403 `requires Erebus Pro (feature sync.schedule)`.
+
 ### Run the release gate
 
 Before pointing production traffic at the gateway, run the strict release gate. It
@@ -448,8 +485,10 @@ MySQL (skipped otherwise).
 
 The end-to-end acceptance (real uvicorn + a mock provider + real Postgres) verifies
 token-only egress, correct restoration, per-tenant central-credential egress, and
-fail-closed behavior. It binds localhost, so run it where localhost binds are
-permitted.
+fail-closed behavior. A second one runs `erebus-gateway` and `erebus-sync` as real
+processes: a synced Postgres value is tokenized in a chat, and no log, job row, audit
+event or admin response holds a synced value or a source password. Both bind
+localhost, so run them where localhost binds are permitted.
 
 ---
 

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Gateway connectors: connect a tenant's SQLite, Postgres or MySQL databases and the
+  names, emails, phone numbers and addresses in them are always tokenized, also when
+  detection misses them. A new `erebus-sync` worker (the `sync-worker` compose service)
+  samples each source, maps its fields and syncs their distinct values; fields it cannot
+  place wait for review. Sources, field decisions, "sync now" and erasure are managed
+  through operator-only admin routes under `/v1/admin/scopes/{scope_id}`. Use a
+  read-only database account; the README has the SQL.
+- Erebus Pro: scheduled syncs (feature `sync.schedule`). Every source gets a daily full
+  sync, changed or turned off with `PUT .../sources/{id}/schedule`.
+
 ### Security
 - Gateway: a tenant credential could claim an admin role and use the admin routes (audit,
   keys, reveal, provisioning, onboarding, revocation, `/metrics`). Admin access now comes
