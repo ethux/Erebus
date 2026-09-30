@@ -8,7 +8,7 @@ Privacy-first PII filter for AI code editors. Tokenizes sensitive data before it
 
 ## Project status
 
-Erebus is a v1.0.3 release, but it is still young software. Expect possible
+The current release is v1.1.0-beta.3 (see the [CHANGELOG](CHANGELOG.md)). Erebus is still young software. Expect possible
 bugs, editor-specific edge cases, and cases where unusual payloads need another
 pass. Keep a human review loop around sensitive workflows and please open an
 issue if something looks off.
@@ -186,9 +186,9 @@ restores real values in the responses your developers see. Users never hold
 provider API keys. The operator holds one central credential per tenant, and the
 gateway injects it on the live request path.
 
-This is a beta (`1.1.0-beta.2`). The 007 framework guarantees (per-scope crypto
-isolation, shared-state tokenization, governance) are unchanged; this milestone
-makes them a service you can run.
+The gateway is in beta (`1.1.0-beta.3`): per-scope crypto isolation, shared-state
+tokenization and governance are in place, and admin access comes only from operator
+credentials.
 
 ### Operator prerequisites
 
