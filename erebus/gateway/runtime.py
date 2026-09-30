@@ -38,13 +38,16 @@ class Identity(NamedTuple):
     privilege: str
 
 
-def _event(event_type: str, outcome: str, actor: Identity | None = None) -> dict:
-    """Audit fields; an admin action records the caller's credential id and privilege (010)."""
+def _event(event_type: str, outcome: str, actor: Identity | None = None, metadata: dict | None = None) -> dict:
+    """Audit fields; an admin action records the caller's credential id and privilege (010).
+
+    ``metadata`` carries ids and counts only, never a value or credential (spec 015).
+    """
     return {"event_type": event_type,
             "actor_id": (actor.credential_id or "static") if actor else "gateway",
             "actor_role": actor.privilege if actor else "gateway",
             "request_id": None, "masked_value": None, "category": "request",
-            "outcome": outcome, "metadata": {}}
+            "outcome": outcome, "metadata": dict(metadata or {})}
 
 
 def _resolve_identity(deps: GatewayDeps, cred: str, *, fresh: bool = False) -> Identity | None:
@@ -151,8 +154,8 @@ async def _db(deps: GatewayDeps, fn: Callable[[Any], Any]):
 
 
 async def _audit(deps: GatewayDeps, scope_id: uuid.UUID, event_type: str, outcome: str,
-                 actor: Identity | None = None) -> None:
-    await _db(deps, lambda c: audit.append(c, scope_id, _event(event_type, outcome, actor)))
+                 actor: Identity | None = None, metadata: dict | None = None) -> None:
+    await _db(deps, lambda c: audit.append(c, scope_id, _event(event_type, outcome, actor, metadata)))
 
 
 async def _reserve_or_429(deps: GatewayDeps, scope_id: uuid.UUID, event: str) -> None:

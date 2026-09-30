@@ -6,7 +6,8 @@ concurrency slot -> fail-closed quota reservation -> gate every message part
 forward token-only -> restore (streamed or whole) -> audit. Governed routes (operator
 credential only, 010; handlers in :mod:`.admin`): /v1/reveal (+ grant + rate-limited),
 GET /v1/audit, POST /v1/admin/keys, POST /v1/admin/scopes, POST/DELETE /v1/admin/tenants,
-POST /v1/admin/operators, GET /metrics.
+POST /v1/admin/operators, GET /metrics; source routes under /v1/admin/scopes/{scope_id}
+(:mod:`.sources_api`).
 
 Every database operation runs through :func:`_db`, which checks out its own
 connection (from the pool when one is supplied) so concurrent requests across
@@ -24,6 +25,7 @@ import anyio
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from . import sources_api
 from .admin import (
     _handle_audit_query,
     _handle_issue_operator,
@@ -280,6 +282,8 @@ def create_app(*, conn=None, key_provider: KeyProvider, detector: Detector,
         with contextlib.suppress(Exception):  # the JSON body is optional
             body = await request.json()
         return await _handle_issue_operator(deps, authorization, body if isinstance(body, dict) else {})
+
+    sources_api.register(app, deps)  # /v1/admin/scopes/{scope_id}/... (spec 015)
 
     if metrics_enabled and metrics is not None:
         @app.get("/metrics")

@@ -33,6 +33,7 @@ PURE_TESTS=(
   sync_policy
   worker_extensions
   source_contract
+  sources_body
 )
 
 modules_missing() {
