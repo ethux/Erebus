@@ -20,6 +20,7 @@ PURE_TESTS=(
   extensions
   detection_merge
   detection_adapter
+  core_boundary
 )
 
 modules_missing() {
