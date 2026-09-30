@@ -13,7 +13,8 @@ credentials decrypted (tenant key, AAD = source id).
   stored as the full name), batch-upserted and linked under the job id. Only when every
   field was read, within ``max_values`` and the tenant cap, does one transaction retire
   the links this sync did not see, bump the catalog version and mark the job done.
-  Anything short of that fails the job and retires nothing.
+  Anything short of that fails the job and retires nothing, but bumps the version when
+  it committed values; ``max_values`` counts every distinct row read, value or not.
 
 The worker contract with connectors, beyond ``erebus.sources``: a database connector
 may offer ``iter_distinct_values(collection, fields, limit)`` yielding tuples in
@@ -158,22 +159,50 @@ def _sample(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source
     return counts
 
 
-def _field_values(rows_source: Any, collection: str, field: fields.SourceField, limit: int) -> Iterator[str]:
+def _field_values(rows_source: Any, collection: str, field: fields.SourceField, limit: int
+                  ) -> Iterator[str | None]:
+    """One item per distinct row returned: its value, or ``None`` for a row that gives none."""
     parts = field.field.split("+")
     for row in contract.distinct_values(rows_source, collection, parts, limit):
         if len(parts) > 1:
-            value = field_rules.join_name(row[0], row[1:-1], row[-1])
+            yield field_rules.join_name(row[0], row[1:-1], row[-1])
         else:
-            value = None if row[0] is None else str(row[0])
-        if value:
-            yield value
+            yield None if row[0] is None else str(row[0])
+
+
+def _bump_after_failure(ctx: Context, job: jobs.Job) -> None:
+    """Batches this attempt committed are active: let the replicas load them (retires nothing)."""
+    try:
+        catalog_versions.bump(ctx.conn, job.scope_id)
+    except Exception as exc:  # a retry bumps too (attempts > 0)
+        log.warning("job %s: bumping the catalog version failed (%s)", job.id, type(exc).__name__)
+
+
+def _accepted_rows(ctx: Context, rows_source: Any, by_collection: dict[str, list[fields.SourceField]],
+                   max_values: int) -> Iterator[tuple[str | None, str]]:
+    """``(value or None, label)`` per distinct row of every accepted field; ``incomplete``
+    on a missing collection or column, or past ``max_values`` rows."""
+    present = {c.name for c in rows_source.list_collections()} if by_collection else set()
+    rows = 0
+    for collection, accepted in by_collection.items():
+        ctx.lease.check()
+        if collection not in present:
+            raise JobFailed("incomplete")
+        columns = {f.name for f in rows_source.list_fields(collection)}
+        for f in accepted:
+            if not set(f.field.split("+")) <= columns or f.label is None:
+                raise JobFailed("incomplete")  # a skipped column: the sync is not complete
+            for value in _field_values(rows_source, collection, f, max_values - rows + 1):
+                rows += 1  # every row returned counts, or a capped query would pass as complete
+                if rows > max_values:
+                    raise JobFailed("incomplete")
+                yield value, f.label
 
 
 def _full(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any, crypto) -> dict:
     by_collection: dict[str, list[fields.SourceField]] = {}
     for f in fields.accepted_fields(ctx.conn, job.scope_id, job.source_id):
         by_collection.setdefault(f.collection, []).append(f)
-    present = {c.name for c in rows_source.list_collections()} if by_collection else set()
     seen = added = 0
     batch: list[tuple[str, str]] = []
 
@@ -185,27 +214,24 @@ def _full(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: 
                                            tenant_max=ctx.config.tenant_max_values).added
             batch.clear()
 
-    for collection, accepted in by_collection.items():
-        ctx.lease.check()
-        if collection not in present:
-            raise JobFailed("incomplete")
-        columns = {f.name for f in rows_source.list_fields(collection)}
-        for f in accepted:
-            if not set(f.field.split("+")) <= columns or f.label is None:
-                raise JobFailed("incomplete")  # a skipped column: the sync is not complete
-            for value in _field_values(rows_source, collection, f, source.max_values - seen + 1):
-                seen += 1
-                if seen > source.max_values:
-                    raise JobFailed("incomplete")
-                batch.append((value, f.label))
+    try:
+        for value, label in _accepted_rows(ctx, rows_source, by_collection, source.max_values):
+            seen += 1
+            if value:
+                batch.append((value, label))
                 if len(batch) >= UPSERT_BATCH:
                     flush()
-    flush()
+        flush()
+    except BaseException:
+        if added:
+            _bump_after_failure(ctx, job)
+        raise
     with ctx.conn.transaction():
         if not jobs.hold_lease(ctx.conn, job):
             raise LeaseLost()
         retired = catalog.retire_unseen(ctx.conn, job.scope_id, job.source_id, job.id)
-        if added or retired:
+        # A retry may re-see values an earlier attempt committed: they count as existing here.
+        if added or retired or job.attempts:
             catalog_versions.bump(ctx.conn, job.scope_id)
         counts = {"rows_seen": seen, "values_added": added, "values_retired": retired}
         _succeed(ctx, job, counts)

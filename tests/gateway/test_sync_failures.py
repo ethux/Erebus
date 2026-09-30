@@ -20,14 +20,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from helpers import fresh_db
 from psycopg_pool import ConnectionPool
-from sync_fakes import FakeConnector, Table, config, customers, lookup
+from sync_fakes import FakeConnector, Field, Table, config, customers, lookup
 
 from erebus.cataloging.sources import ConnectorError, LicenseRequired
 from erebus.gateway import catalog
 from erebus.gateway.connectors import jobs, sources
 from erebus.gateway.crypto.keyprovider import LocalKms
+from erebus.gateway.store import catalog_versions
 from erebus.gateway.store.known_value_store import open_scope_crypto, provision_scope
 from erebus.gateway.store.scope_context import scoped
+from erebus.sync import runner
 from erebus.sync.worker import Worker
 
 _DSN = os.environ.get("EREBUS_PG_DSN", "postgresql:///erebus_gw_sync_failures")
@@ -152,6 +154,71 @@ def _check_no_retire(env):
     check("a successful sync clears needs_attention", env.status() == "active")
 
 
+def _check_bump(env):
+    """Values an attempt committed reach the replicas even when that attempt failed (SC-1)."""
+    batch = runner.UPSERT_BATCH
+    runner.UPSERT_BATCH = 1  # commit each value as its own batch
+    rows = env.pg.tables["customers"].rows
+    rows.append({"id": 4, "email": "qyra.novell@acme.example", "full_name": "Qyra Novell"})
+    env.pg.fail[("distinct", "leads")] = ConnectorError("unreachable")
+    try:
+        v0 = catalog_versions.read(env.conn, env.scope)
+        job = env.run()
+        check("setup: the attempt failed after committing a batch",
+              job.status == "queued" and "Qyra Novell" in env.values())
+        check("a failed attempt that added values bumps the catalog version",
+              catalog_versions.read(env.conn, env.scope) > v0)
+        del env.pg.fail[("distinct", "leads")]
+        v1 = catalog_versions.read(env.conn, env.scope)
+        with env.conn.transaction():
+            env.conn.execute("UPDATE sync_jobs SET not_before = now() WHERE id = %s", (job.id,))
+        env.worker().run_once()
+        job = jobs.get_job(env.conn, env.scope, job.id)
+        check("the retry of that job completes", job.status == "done" and job.values_added == 0)
+        check("a retried sync bumps the catalog version though it added nothing new",
+              catalog_versions.read(env.conn, env.scope) > v1)
+
+        job, _ = jobs.enqueue(env.conn, env.scope, env.source, "full")
+        env.conn.commit()
+        claimed = jobs.claim(env.conn, timings=env.worker().config.timings)
+        with env.conn.transaction():
+            env.conn.execute("UPDATE sync_jobs SET leased_until = now() - interval '1 second' WHERE id = %s",
+                             (claimed.id,))
+        v2 = catalog_versions.read(env.conn, env.scope)
+        jobs.expire_leases(env.conn, timings=env.worker().config.timings)
+        check("an expired full sync (worker killed) bumps the catalog version",
+              catalog_versions.read(env.conn, env.scope) > v2)
+        env.settle(job.id)
+    finally:
+        runner.UPSERT_BATCH = batch
+        env.pg.fail.pop(("distinct", "leads"), None)
+        rows.pop()
+
+
+def _check_capped_tuples(env):
+    """A name tuple the query returned but that gives no value still counts toward max_values (SC-3)."""
+    saved = env.pg.tables
+    fields = [Field("id", "integer", True), Field("first_name"), Field("last_name")]
+    people = [{"id": i, "first_name": f, "last_name": last}
+              for i, (f, last) in enumerate([("Ann", "Arbor"), ("Bob", "Baker"), ("Cyd", "Cole")])]
+    env.pg.tables = {"people": Table(fields, people)}
+    try:
+        src = env.new_source({"host": "127.0.0.1", "dbname": "hr"})
+        env.run("sample", source=src)
+        env.worker().run_once()
+        check("setup: the people tuples are known values", {"Ann Arbor", "Bob Baker", "Cyd Cole"} <= env.values())
+        with scoped(env.conn, env.scope):
+            env.conn.execute("UPDATE sources SET max_values = 2 WHERE id = %s", (src,))
+        env.conn.commit()
+        people.insert(0, {"id": 9, "first_name": "Solo", "last_name": None})
+        job = env.run(source=src)
+        check("a capped query with a skipped tuple fails the sync as incomplete",
+              job.status == "failed" and job.error == "sync incomplete")
+        check("a tuple past the limit is not retired", "Cyd Cole" in env.values())
+    finally:
+        env.pg.tables = saved
+
+
 def _check_retries(env):
     env.pg.fail[("connect", "*")] = ConnectorError("unreachable")
     worker = env.worker(EREBUS_SYNC_BACKOFF_S="1,1")
@@ -247,6 +314,8 @@ def main():
         env = _Env(conn, LocalKms(), pool)
         _prime(env)
         _check_no_retire(env)
+        _check_bump(env)
+        _check_capped_tuples(env)
         _check_retries(env)
         _check_policy(env)
     finally:

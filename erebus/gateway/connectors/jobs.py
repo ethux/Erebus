@@ -16,6 +16,7 @@ from datetime import datetime
 import psycopg
 from psycopg import errors as pg_errors
 
+from ..store import catalog_versions
 from ..store.scope_context import scoped
 from . import policy
 
@@ -205,18 +206,21 @@ def expire_leases(conn: psycopg.Connection, *, timings: policy.JobTimings) -> li
     """Re-queue running jobs whose lease ran out (an attempt each); the last one fails.
 
     Returns ``(job id, new status)`` per expired job. Skips rows another sweeper holds.
+    An expired sync may have committed value batches, so it bumps the catalog version.
     """
     done = []
     with conn.transaction():
         rows = conn.execute(
-            "SELECT id, scope_id, source_id, attempts FROM sync_jobs "
+            "SELECT id, scope_id, source_id, attempts, kind FROM sync_jobs "
             "WHERE status = 'running' AND leased_until < now() ORDER BY leased_until FOR UPDATE SKIP LOCKED"
         ).fetchall()
-        for job_id, scope_id, source_id, attempts in rows:
+        for job_id, scope_id, source_id, attempts, kind in rows:
             out = policy.lease_outcome(attempts=attempts, timings=timings)
             _apply(conn, job_id, out)
             if out.needs_attention:
                 _flag_source(conn, scope_id, source_id)
+            if kind in ("full", "incremental"):
+                catalog_versions.bump(conn, scope_id)
             done.append((job_id, out.status))
     return done
 
