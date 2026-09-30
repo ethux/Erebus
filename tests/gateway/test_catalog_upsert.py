@@ -181,6 +181,25 @@ def _check_erase(conn, kms, crypto, a_id, src):
     check("add_known_value bumps the catalog version", catalog_versions.read(conn, a_id) == v1 + 1)
 
 
+def _check_erase_race(dsn, conn, crypto, a_id, src):
+    """An erase during an upsert of the same value waits for it, then removes the entry."""
+    other = psycopg.connect(dsn)
+    result = {}
+    conn.commit()  # the block below must be a real transaction, not a savepoint
+    with conn.transaction():
+        catalog.upsert_values(conn, crypto, a_id, src, uuid.uuid4(), [("Erase Race", "PERSON")])
+        worker = threading.Thread(
+            target=lambda: result.setdefault("n", catalog.erase_value(other, crypto, a_id, "Erase Race")))
+        worker.start()
+        time.sleep(0.5)
+        check("an erase waits for an upsert in flight", worker.is_alive())
+    worker.join(10)
+    other.close()
+    check("the erase removed the entry the upsert committed", result["n"].entries == 1)
+    check("no entry of a value erased mid-sync is left",
+          not [k for k in _entries(conn, crypto, a_id) if k[0] == "Erase Race"])
+
+
 def _check_delete(conn, crypto, a_id):
     src = _source(conn, crypto, a_id, "doomed")
     catalog.upsert_values(conn, crypto, a_id, src, uuid.uuid4(), [("Doomed Person", "PERSON")])
@@ -229,6 +248,7 @@ def main():
         _check_manual_and_retire(conn, crypto, a_id, src, src2, sync1)
         _check_cap_and_race(_DSN, conn, crypto, a_id, src)
         _check_erase(conn, kms, crypto, a_id, src)
+        _check_erase_race(_DSN, conn, crypto, a_id, src)
         _check_delete(conn, crypto, a_id)
         conn.commit()
         _check_rls(_DSN, kms, a_id, b_id)

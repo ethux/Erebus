@@ -51,6 +51,15 @@ class ErasedCounts:
     tokens: int
 
 
+# Erase takes this tenant lock exclusively, upserts share it: an upsert that checked the
+# suppressions before an erase committed could otherwise insert the erased value after it.
+_ERASE_LOCK = "SELECT pg_advisory_xact_lock{}(hashtextextended('erebus.catalog.erase:' || %s, 0))"
+
+
+def _erase_lock(conn: psycopg.Connection, scope_id: uuid.UUID, *, shared: bool) -> None:
+    conn.execute(_ERASE_LOCK.format("_shared" if shared else ""), (str(scope_id),))
+
+
 def _suppressed(conn: psycopg.Connection, scope_id: uuid.UUID, indexes: list[bytes]) -> set[bytes]:
     rows = conn.execute(
         "SELECT value_index FROM catalog_suppressions WHERE scope_id = %s AND value_index = ANY(%s)",
@@ -80,6 +89,7 @@ def add_known_value(
     bidx = crypto.blind_index(cleaned, label)
     nonce, ct = crypto.encrypt(cleaned.encode("utf-8"))
     with scoped(conn, scope_id):
+        _erase_lock(conn, scope_id, shared=True)
         if _suppressed(conn, scope_id, [crypto.blind_index(cleaned, "")]):
             raise ValueError("known value was erased")
         row = conn.execute(
@@ -128,6 +138,7 @@ def upsert_values(
         return UpsertResult(0, 0, rejected)
     free = {bidx: crypto.blind_index(v, "") for bidx, (v, _l) in batch.items()}
     with scoped(conn, scope_id):
+        _erase_lock(conn, scope_id, shared=True)
         erased = _suppressed(conn, scope_id, sorted(set(free.values())))
         keep = sorted(b for b in batch if free[b] not in erased)
         rejected += len(batch) - len(keep)
@@ -220,6 +231,7 @@ def erase_value(conn: psycopg.Connection, crypto: ScopeCrypto, scope_id: uuid.UU
     re-adds it under any label. Bumps the catalog version."""
     cleaned = clean_value(value)
     with scoped(conn, scope_id):
+        _erase_lock(conn, scope_id, shared=False)
         labels = [
             r[0]
             for r in conn.execute(
