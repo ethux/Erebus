@@ -55,7 +55,7 @@ def _race(n):
 
 
 def _check_race(admin):
-    files = sorted(p.name for p in db._SCHEMA_DIR.glob("*.sql"))
+    files = sorted(p.name for p in db.migration_files())  # core plus installed extensions
     errors, applied = _race(6)
     check("six concurrent migrators all succeed", not errors)
     check("exactly one migrator applied the files", sorted(len(a) for a in applied) == [0] * 5 + [len(files)])

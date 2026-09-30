@@ -84,9 +84,8 @@ def fresh_db(name: str) -> psycopg.Connection:
 
 
 def _apply_all_tolerant(conn: psycopg.Connection) -> None:
-    """Apply every gateway migration statement, tolerating already-present objects."""
-    schema_dir = _REPO_ROOT / "erebus" / "gateway" / "schema"
-    for path in sorted(schema_dir.glob("*.sql")):
+    """Apply every gateway migration statement (extensions' too), tolerating already-present objects."""
+    for path in db.migration_files():
         for stmt in db._statements(path.read_text()):
             try:
                 with conn.transaction():
