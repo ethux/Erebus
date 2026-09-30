@@ -110,6 +110,20 @@ def _check_request(client, captured):
           "abcd1234efgh" not in _sent_args(captured) and "[API_KEY_" in _sent_args(captured))
 
 
+def _check_legacy_function_call(client, captured):
+    """The deprecated OpenAI ``function_call`` field is gated like ``tool_calls``."""
+    raw = json.dumps({"cmd": _CMD, "to": _EMAIL})
+    body = {"messages": [{"role": "assistant", "content": None,
+                          "function_call": {"name": "run", "arguments": raw}}]}
+    client.post("/v1/chat/completions", headers=_HDR, json=body)
+    sent = captured[-1]["messages"][0]["function_call"]["arguments"]
+    parsed = _loads(sent) or {}
+    check("legacy function_call arguments reach the provider as valid JSON", bool(parsed))
+    check("legacy function_call: the email is a token", _is_token(parsed.get("to"), "EMAIL_ADDRESS"))
+    check("legacy function_call: no raw value reached the provider",
+          not any(v in sent for v in ("abcd1234efgh", _EMAIL)))
+
+
 def _check_keys(client, captured):
     """Keys used as data (email -> role) are gated too; plain parameter names are not."""
     keyed = json.dumps({"recipients": {_EMAIL: "cc"}, "api_key": "x", "password": "y"})
@@ -193,6 +207,7 @@ def main():
                          scope_ids={"tenT": scope, "tenE": edge}, modes={"tenE": "edge"})
         client = TestClient(app)
         _check_request(client, captured)
+        _check_legacy_function_call(client, captured)
         _check_keys(client, captured)
         _check_restore(client, captured)
         print(f"\n{_passed}/{_passed} passed\n")

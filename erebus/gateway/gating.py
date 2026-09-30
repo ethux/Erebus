@@ -93,6 +93,8 @@ def tokenize_payload(key_provider: KeyProvider, detector: Detector, policy: dict
         for call in msg.get("tool_calls") or []:  # tool-call arguments never bypass the gate
             if isinstance(call, dict):
                 gate_part(tok, detector, call, mode, policy)
+        if isinstance(msg.get("function_call"), dict):  # deprecated OpenAI field, same gate
+            gate_args(tok, detector, msg["function_call"], mode)
     return payload
 
 
