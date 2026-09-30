@@ -8,8 +8,8 @@ dynamic :class:`~erebus.gateway.tenancy.DbScopeResolver`, the httpx-backed egres
 shutdown closure that drains the pool, the KMS pool, the resolver pool, and the httpx client.
 
 ``main()`` is the ``erebus-gateway`` console script: it loads ``GatewayConfig.from_env()``,
-*probes* the critical dependencies (DB reachable, master key valid, detection reachable
-unless explicitly disabled) and **exits non-zero before binding** on any failure so the
+*probes* the critical dependencies (DB reachable, master key valid, GLiNER reachable
+unless EREBUS_DISABLE_GLINER) and **exits non-zero before binding** on any failure so the
 service never serves half-open (FR-009). Secret hygiene (FR-012): failure messages name the
 faulty setting but never echo its value; the master key is never logged.
 
@@ -18,13 +18,20 @@ The scope directory is dynamic: ``DbScopeResolver`` resolves a credential to its
 ``scope_key -> scope_id`` directory -- a freshly onboarded tenant is still servable with no
 restart. :class:`_ScopeIdDirectory` is retained as a standalone live ``scope_key -> scope_id``
 view for callers/tests that want one, but the app no longer wires it.
+
+``erebus-gateway create-operator [--label L]`` bootstraps admin access (010): it inserts an
+operator credential in the reserved home scope and prints the token once on stdout. The
+master key stays in the process; it is only used to seal (or verify) scope keys.
 """
 from __future__ import annotations
 
+import argparse
+import os
 import sys
 import uuid
 from dataclasses import dataclass
 
+from . import rbac
 from .app import create_app
 from .config import ConfigError, GatewayConfig
 from .crypto.keyprovider import MasterKeyKms
@@ -34,7 +41,8 @@ from .extensions import load_extensions
 from .http_provider import build_http_post, close_client
 from .observability import Metrics
 from .overload import Limiter
-from .store import db
+from .store import credentials_directory, db
+from .store.known_value_store import provision_scope
 from .tenancy import DbScopeResolver
 
 
@@ -165,7 +173,7 @@ def _probe_or_die(config: GatewayConfig) -> None:
     """Probe critical deps; on any failure print a precise message and exit non-zero.
 
     Runs BEFORE binding (FR-009): DB reachable, master key valid (a real KEK wrap round-trip),
-    and detection reachable unless explicitly disabled. Messages name the faulty dependency
+    and GLiNER reachable unless EREBUS_DISABLE_GLINER (regex-only). Messages name the faulty dependency
     but never echo a secret (FR-012).
     """
     import psycopg
@@ -183,7 +191,6 @@ def _probe_or_die(config: GatewayConfig) -> None:
         from cryptography.hazmat.primitives.keywrap import aes_key_unwrap, aes_key_wrap
 
         kms = MasterKeyKms(config.dsn, config.master_key_b64)
-        import os
         probe_kek = os.urandom(32)
         wrapped, nonce = kms._wrapper.wrap(probe_kek)
         if kms._wrapper.unwrap(wrapped, nonce) != probe_kek:
@@ -202,9 +209,10 @@ def _probe_or_die(config: GatewayConfig) -> None:
             detector = build_detector(config)
             posture = detector.posture()
         except Exception as exc:
-            _die(f"detection unreachable (set EREBUS_DISABLE_GLINER to run without it): {type(exc).__name__}")
+            _die(f"GLiNER detection unreachable (set EREBUS_DISABLE_GLINER=1 to run regex-only): "
+                 f"{type(exc).__name__}")
         if posture == "degraded":
-            _die("detection unreachable (set EREBUS_DISABLE_GLINER to run without it): degraded")
+            _die("GLiNER detection unreachable (set EREBUS_DISABLE_GLINER=1 to run regex-only): degraded")
 
 
 def _die(message: str) -> None:
@@ -213,14 +221,77 @@ def _die(message: str) -> None:
     raise SystemExit(2)
 
 
-def main() -> None:
+def _verify_master_key(conn, kms: MasterKeyKms) -> None:
+    """Unseal one existing scope KEK so a wrong master key aborts before any write (010 D2)."""
+    from cryptography.exceptions import InvalidTag
+
+    if conn.execute("SELECT to_regclass('scope_keks')").fetchone()[0] is None:
+        return  # fresh database: nothing sealed yet, nothing to check against
+    for (sid,) in conn.execute("SELECT id FROM scopes ORDER BY created_at").fetchall():
+        try:
+            keks, _erased = kms._load(str(sid))
+        except InvalidTag as exc:
+            raise ConfigError("EREBUS_GATEWAY_MASTER_KEY does not unseal the existing scope keys") from exc
+        if keks:
+            return
+
+
+def create_operator(env: dict[str, str] | None = None, *, label: str = "operator") -> tuple[uuid.UUID, str]:
+    """Insert an operator credential in the reserved home scope; return ``(id, token)`` (010 D2).
+
+    Needs only ``EREBUS_PG_DSN`` and ``EREBUS_GATEWAY_MASTER_KEY``. Runs migrations, then
+    reuses the home scope or provisions it (its KEK sealed by the master key). When scope keys
+    already exist the master key must unseal one first, so a wrong key writes nothing.
+    """
+    import psycopg
+
+    env = dict(os.environ if env is None else env)
+    values = {}
+    for name in ("EREBUS_PG_DSN", "EREBUS_GATEWAY_MASTER_KEY"):
+        values[name] = env.get(name, "").strip()
+        if not values[name]:
+            raise ConfigError(f"{name} is required")
+    kms = MasterKeyKms(values["EREBUS_PG_DSN"], values["EREBUS_GATEWAY_MASTER_KEY"])
+    try:
+        with psycopg.connect(values["EREBUS_PG_DSN"], autocommit=True) as conn:
+            _verify_master_key(conn, kms)
+            db.run_migrations(conn)
+            home = credentials_directory.OPERATOR_SCOPE_KEY
+            row = conn.execute("SELECT id FROM scopes WHERE scope_key = %s", (home,)).fetchone()
+            sid = row[0] if row else provision_scope(conn, kms, home)
+            return credentials_directory.issue(conn, sid, home, label=label, privilege=rbac.OPERATOR)
+    finally:
+        kms.close()
+
+
+def _create_operator_main(argv: list[str]) -> None:
+    """``erebus-gateway create-operator``: the token goes to stdout once, the id to stderr."""
+    parser = argparse.ArgumentParser(prog="erebus-gateway create-operator")
+    parser.add_argument("--label", default="operator", help="label stored with the credential")
+    args = parser.parse_args(argv)
+    try:
+        cred_id, token = create_operator(label=args.label)
+    except (ConfigError, ValueError) as exc:
+        _die(str(exc))
+    except Exception as exc:  # psycopg errors can carry DSN parts: name the type only
+        _die(f"could not create operator: {type(exc).__name__}")
+    print(f"erebus-gateway: operator credential {cred_id} created", file=sys.stderr)
+    print(token, flush=True)
+
+
+def main(argv: list[str] | None = None) -> None:
     """``erebus-gateway`` entrypoint: validate + probe, then serve (R6).
 
+    ``create-operator`` as the first argument runs the operator bootstrap instead (010).
     Loads ``GatewayConfig.from_env()`` (format validation, fail-fast on malformed env),
     probes the critical dependencies and exits non-zero before binding on any failure, then
     runs uvicorn on the configured host/port. A FastAPI lifespan drains the pool + httpx
     client on SIGTERM/SIGINT for a graceful shutdown (FR-015).
     """
+    args = sys.argv[1:] if argv is None else argv
+    if args[:1] == ["create-operator"]:
+        _create_operator_main(args[1:])
+        return
     try:
         config = GatewayConfig.from_env()
     except ConfigError as exc:

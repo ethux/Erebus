@@ -39,6 +39,61 @@ def _credential_id(conn, credential):
     ).fetchone()[0]
 
 
+def _privilege_of(conn, credential):
+    digest = credentials_directory.hash_credential(credential)
+    return conn.execute(
+        "SELECT privilege FROM scope_credentials WHERE credential_hash = %s", (digest,)
+    ).fetchone()[0]
+
+
+def _check_privilege(conn, b_id, cred_b):
+    """010: each row carries the privilege it was issued with; only the directory sets it."""
+    default = conn.execute(
+        "SELECT column_default FROM information_schema.columns "
+        "WHERE table_name = 'scope_credentials' AND column_name = 'privilege'"
+    ).fetchone()
+    check("privilege column exists with a 'tenant' default (0020)",
+          default is not None and "tenant" in (default[0] or ""))
+    check("provision() without a privilege stores 'tenant'", _privilege_of(conn, cred_b) == "tenant")
+
+    cred_id, token = credentials_directory.issue(conn, b_id, "org/b", label="ops", privilege="operator")
+    check("issue() returns (credential id, egw_ plaintext)", token.startswith("egw_"))
+    check("issue() id is the stored row id", _credential_id(conn, token) == cred_id)
+    check("issue(privilege='operator') stores 'operator'", _privilege_of(conn, token) == "operator")
+
+    before = conn.execute("SELECT count(*) FROM scope_credentials").fetchone()[0]
+    try:
+        credentials_directory.issue(conn, b_id, "org/b", privilege="root")
+        refused = False
+    except ValueError:
+        refused = True
+    after = conn.execute("SELECT count(*) FROM scope_credentials").fetchone()[0]
+    check("issue() refuses an unknown privilege and inserts nothing", refused and before == after)
+
+    try:
+        conn.execute(
+            "INSERT INTO scope_credentials (credential_hash, credential_salt, scope_id, scope_key, privilege) "
+            "VALUES (%s, %s, %s, 'org/b', 'root')", (b"x" * 32, b"", b_id))
+        rejected = False
+    except psycopg.errors.CheckViolation:
+        rejected = True
+    check("the CHECK constraint rejects a raw 'root' privilege", rejected)
+
+    record = credentials_directory.lookup(conn, token)
+    check("lookup() returns the full record (id, scope, privilege)",
+          record == (cred_id, b_id, "org/b", "operator")
+          and record.credential_id == cred_id and record.privilege == "operator")
+    check("lookup() of a tenant credential reports 'tenant'",
+          credentials_directory.lookup(conn, cred_b).privilege == "tenant")
+    check("lookup() of unknown/empty is None",
+          credentials_directory.lookup(conn, "egw_nope") is None and credentials_directory.lookup(conn, "") is None)
+    credentials_directory.revoke(conn, cred_id)
+    check("lookup() of a revoked credential is None", credentials_directory.lookup(conn, token) is None)
+    check("resolve() keeps its 2-tuple contract", credentials_directory.resolve(conn, cred_b) == (b_id, "org/b"))
+    check("OPERATOR_SCOPE_KEY is the reserved '_operators' home scope",
+          credentials_directory.OPERATOR_SCOPE_KEY == "_operators")
+
+
 def main():
     print("\n=== credentials_directory hashed credential -> scope (T030/T014) ===\n")
     try:
@@ -112,6 +167,8 @@ def main():
               credentials_directory.revoke(conn, b_id) is False)
         check("a sibling tenant's credential still resolves after the revoke",
               credentials_directory.resolve(conn, cred_b) == (b_id, "org/b"))
+
+        _check_privilege(conn, b_id, cred_b)
 
         print(f"\n{_passed}/{_passed} passed\n")
     finally:

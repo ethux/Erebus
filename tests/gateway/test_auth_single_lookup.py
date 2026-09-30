@@ -9,7 +9,7 @@ resolution ran inline on the event loop. After the fix:
 * a tenant removed mid-resolution yields a clean 401, never a 500;
 * the auth resolution runs OFF the event-loop thread (in the threadpool).
 
-Instruments ``credentials_directory.resolve`` to count lookups and capture the thread each ran
+Instruments ``credentials_directory.lookup`` to count lookups and capture the thread each ran
 on. Drives the live app with a ``DbScopeResolver``. Live Postgres; self-skips without it.
 """
 import os
@@ -48,10 +48,10 @@ async def _egress(_scope_id, payload):
 
 
 class _Probe:
-    """Wrap credentials_directory.resolve to count directory lookups + record their thread."""
+    """Wrap credentials_directory.lookup to count directory lookups + record their thread."""
 
     def __init__(self):
-        self._orig = credentials_directory.resolve
+        self._orig = credentials_directory.lookup
         self.calls = 0
         self.threads = []
         self.lock = threading.Lock()
@@ -62,11 +62,11 @@ class _Probe:
                 self.calls += 1
                 self.threads.append(threading.current_thread().name)
             return self._orig(conn, credential, *args, **kwargs)
-        credentials_directory.resolve = wrapped
+        credentials_directory.lookup = wrapped
         return self
 
     def __exit__(self, *exc):
-        credentials_directory.resolve = self._orig
+        credentials_directory.lookup = self._orig
 
     def reset(self):
         with self.lock:

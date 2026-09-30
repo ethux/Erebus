@@ -13,6 +13,8 @@ import sys
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Unmocked calls must not reach (or boot) the real GLiNER daemon: regex only.
+os.environ["EREBUS_DISABLE_GLINER"] = "1"
 
 from erebus.filter import (
     MODES,
@@ -215,6 +217,27 @@ def test_private_key_tokenized_in_all_modes():
     print("  ✓ Private keys tokenized in all modes")
 
 
+def test_private_key_block_tokenized_whole():
+    """The base64 body and the PKCS#8 header must not ride out next to a token."""
+    pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----"
+    for mode in MODES:
+        sanitized, tokens = tokenize(f"key:\n{pem}\nthanks", mode=mode)
+        assert "MIIEvQ" not in sanitized, f"private key body leaked in {mode} mode"
+        assert "PRIVATE KEY" not in sanitized, f"PKCS#8 header leaked in {mode} mode"
+        assert pem in tokens.values(), f"PEM block not one token in {mode} mode"
+    print("  ✓ Whole PEM private-key blocks tokenized in all modes")
+
+
+def test_footerless_private_key_body_tokenized():
+    """A header with no END footer must not leave the base64 body behind it raw."""
+    head = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+    for mode in MODES:
+        sanitized, tokens = tokenize(f"key:\n{head}\n", mode=mode)
+        assert "MIIEvQ" not in sanitized, f"footerless key body leaked in {mode} mode"
+        assert head in tokens.values(), f"footerless header and body not one token in {mode} mode"
+    print("  ✓ Footerless PEM header and body tokenized in all modes")
+
+
 # ── Escape character through the full pipeline ───────────────────────────────
 
 def test_escaped_name_not_tokenized():
@@ -393,6 +416,8 @@ if __name__ == "__main__":
         test_password_tokenized_in_all_modes,
         test_github_token_tokenized_in_all_modes,
         test_private_key_tokenized_in_all_modes,
+        test_private_key_block_tokenized_whole,
+        test_footerless_private_key_body_tokenized,
         test_escaped_name_not_tokenized,
         test_escaped_name_with_punctuation,
         test_partial_escape_mixed,

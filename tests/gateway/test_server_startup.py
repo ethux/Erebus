@@ -1,9 +1,9 @@
 """Config-driven server assembly + readiness (008 T017; R6/R7, FR-001/008/009).
 
 Proves the deployable entrypoint: ``build_app_from_config`` boots a serving app from a
-``GatewayConfig`` (detection disabled so no GLiNER daemon is needed), migrations run
+``GatewayConfig`` (GLiNER disabled so no daemon is needed), migrations run
 idempotently on its own pool, ``/healthz`` is always up and ``/readyz`` reflects live
-dependency health (state + custody up, detection 'disabled' is healthy), a freshly
+dependency health (state + custody up, detection 'regex-only' is healthy), a freshly
 provisioned tenant resolves with no restart, and ``GatewayConfig.from_env`` fails fast with
 ``ConfigError`` on malformed env. Live Postgres; self-skips without it.
 """
@@ -116,8 +116,8 @@ def main():
 
         r = client.get("/readyz")
         check("readyz is 200 when state + custody are up", r.status_code == 200)
-        check("readyz reports detection posture 'disabled' (recorded, not an outage)",
-              r.json().get("detection") == "disabled")
+        check("readyz reports detection posture 'regex-only' (recorded, not an outage)",
+              r.json().get("detection") == "regex-only")
 
         # An unknown credential is rejected (the dynamic resolver returns no scope -> 401).
         unknown = client.post("/v1/chat/completions",

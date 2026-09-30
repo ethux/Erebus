@@ -115,15 +115,15 @@ def main():
         check("no raw PII in the client response during the outage (FR-010)",
               _SECRET not in rc.text)
 
-        # Detection degraded -> not ready; disabled is a deliberate, healthy posture.
+        # Detection degraded -> not ready; regex-only is a deliberate, healthy posture.
         custody["ok"], kms.down = True, False
         detection["posture"] = "degraded"
         check("readyz 503 when detection is degraded (FR-007/FR-008)",
               client.get("/readyz").status_code == 503)
-        detection["posture"] = "disabled"
+        detection["posture"] = "regex-only"
         rd = client.get("/readyz")
-        check("readyz 200 when detection is deliberately disabled (FR-007)",
-              rd.status_code == 200 and rd.json().get("detection") == "disabled")
+        check("readyz 200 when detection is regex-only (FR-007)",
+              rd.status_code == 200 and rd.json().get("detection") == "regex-only")
 
         # Recovery: deps healthy again -> ready, and chat serves once more (SC-005).
         detection["posture"] = "available"

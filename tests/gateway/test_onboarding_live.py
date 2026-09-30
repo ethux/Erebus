@@ -8,7 +8,7 @@ echo egress. Asserts the US3 acceptance:
 * that credential IMMEDIATELY authenticates and serves /v1/chat/completions with NO restart,
 * tenant A's credential never authenticates as tenant B (cross-tenant isolation),
 * DELETE revokes the credential so a later request 401s (within the resolver cache TTL),
-* a non-operator role is denied (403).
+* a tenant credential is denied (403) whatever role it claims (010).
 
 Live Postgres; self-skips without it.
 """
@@ -18,17 +18,17 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 os.environ.setdefault("EREBUS_DISABLE_GLINER", "1")  # no GLiNER daemon in tests
 
 import psycopg
 from fastapi.testclient import TestClient
+from helpers import operator_bearer
 
-from erebus.gateway import rbac
 from erebus.gateway.app import create_app
 from erebus.gateway.crypto.keyprovider import MasterKeyKms
 from erebus.gateway.store import credentials_directory, db
-from erebus.gateway.store.known_value_store import provision_scope
 from erebus.gateway.tenancy import DbScopeResolver
 
 _DSN = os.environ.get("EREBUS_PG_DSN", "postgresql:///erebus_us3_onboard")
@@ -87,9 +87,8 @@ def main():
         conn.execute("TRUNCATE scopes CASCADE")  # clean slate for re-runs
 
         kms = MasterKeyKms(_DSN, _KEY)
-        # The operator is itself a pre-provisioned tenant with its own credential.
-        op_id = provision_scope(conn, kms, "ops/admin")
-        op_cred = credentials_directory.provision(conn, op_id, "ops/admin", label="operator")
+        # The operator credential is bound to its own home scope (010).
+        op_cred = operator_bearer(conn)
 
         captured = {}
 
@@ -108,10 +107,9 @@ def main():
         )
         client = TestClient(app)
 
-        op_role = str(rbac.Role.GATEWAY_OPERATOR)
         op_headers = {"Authorization": "Bearer " + op_cred}
 
-        def onboard(scope_key, role=op_role, headers=None):
+        def onboard(scope_key, headers=None, **extra):
             return client.post(
                 "/v1/admin/tenants",
                 json={
@@ -120,8 +118,8 @@ def main():
                     "central_credential": "CENTRAL-SECRET-" + scope_key,
                     "routes": [{"base_url": "https://api.openai.com", "model_allowlist": ["gpt-4o"]}],
                     "quota": {"rate_limit": 100, "spend_budget": 1000, "window_seconds": 60},
-                    "role": role,
                     "policy": {"images": "block"},  # MUST be ignored (descoped for beta)
+                    **extra,
                 },
                 headers=op_headers if headers is None else headers,
             )
@@ -180,9 +178,10 @@ def main():
         check("tenant A's credential never authenticates as tenant B",
               body_a["scope_id"] != rb.json()["scope_id"])
 
-        # --- A non-operator role is denied (403). ---
-        denied = onboard("org/should-not-exist", role=str(rbac.Role.AUDITOR))
-        check("a non-operator role is denied onboarding 403 (FR-016)", denied.status_code == 403)
+        # --- A tenant credential forging the operator role is denied (403). ---
+        denied = onboard("org/should-not-exist", headers={"Authorization": "Bearer " + cred_a},
+                         role="GATEWAY_OPERATOR")
+        check("a tenant claiming GATEWAY_OPERATOR is denied onboarding 403 (010)", denied.status_code == 403)
         with pool.connection() as c:
             exists = c.execute(
                 "SELECT count(*) FROM scopes WHERE scope_key = 'org/should-not-exist'"
@@ -195,13 +194,10 @@ def main():
             row_id = c.execute(
                 "SELECT id FROM scope_credentials WHERE credential_hash = %s", (cred_a_id,)
             ).fetchone()[0]
-        rev = client.request(
-            "DELETE", f"/v1/admin/tenants/{row_id}", headers={**op_headers, "X-Role": op_role}
-        )
+        check("onboarding returned the credential id to revoke by", body_a.get("credential_id") == str(row_id))
+        rev = client.request("DELETE", f"/v1/admin/tenants/{row_id}", headers=op_headers)
         check("DELETE revokes the credential 200 (T033)", rev.status_code == 200)
-        rev2 = client.request(
-            "DELETE", f"/v1/admin/tenants/{row_id}", headers={**op_headers, "X-Role": op_role}
-        )
+        rev2 = client.request("DELETE", f"/v1/admin/tenants/{row_id}", headers=op_headers)
         check("revoking an already-revoked credential 404s", rev2.status_code == 404)
 
         time.sleep(_TTL + 0.2)  # let the resolver cache expire so the revoke takes effect

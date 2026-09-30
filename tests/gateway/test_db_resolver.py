@@ -43,6 +43,22 @@ def _credential_id(conn, credential):
     ).fetchone()[0]
 
 
+def _check_record(conn, resolver, a_id):
+    """010: the record carries the privilege; fresh=True bypasses (and evicts) the cache."""
+    op_id, op = credentials_directory.issue(conn, a_id, "org1/payments/ci", privilege="operator")
+    record = resolver.resolve_record(op)
+    check("resolve_record returns the credential id and privilege",
+          record is not None and record.credential_id == op_id and record.privilege == "operator"
+          and record.scope_id == a_id and record.scope_key == "org1/payments/ci")
+    check("resolve_full/resolve keep their contracts",
+          resolver.resolve_full(op) == (a_id, "org1/payments/ci") and resolver.resolve(op) == "org1/payments/ci")
+    credentials_directory.revoke(conn, op_id)
+    check("the cached record still serves a revoked credential within the TTL (chat staleness window)",
+          resolver.resolve_record(op) is not None)
+    check("resolve_record(fresh=True) sees the revocation immediately", resolver.resolve_record(op, fresh=True) is None)
+    check("a fresh miss evicts the cached entry for later cached reads", resolver.resolve_record(op) is None)
+
+
 def main():
     print("\n=== DbScopeResolver dynamic credential -> scope (T018/T019/T014) ===\n")
     try:
@@ -117,6 +133,8 @@ def main():
             "OR scope_key = %s OR label = %s", (cred_a, cred_a, cred_a)
         ).fetchone()[0]
         check("plaintext credential appears in no scope_credentials column", leaked == 0)
+
+        _check_record(conn, resolver, a_id)
 
         print(f"\n{_passed}/{_passed} passed\n")
     finally:

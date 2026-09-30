@@ -14,9 +14,11 @@
 # GLiNER detection: the production GLiNER daemon speaks over a Unix domain socket on the
 # local filesystem (~/.erebus/gliner.sock), so it is not wired as a separate TCP service in
 # this compose for a hermetic stand-up. Set EREBUS_DISABLE_GLINER=1 in gateway.env to stand
-# the stack up without GLiNER (an explicit, recorded regex-only posture). To run production
-# detection, run the GLiNER daemon (`erebus-daemon`) on a shared socket and mount it into the
-# gateway container, or co-locate detection in the gateway image; see the placeholder below.
+# the stack up without GLiNER: regex still tokenizes emails, international phones, IBANs and
+# secrets, names and addresses are not detected, and /readyz reports "regex-only". To run
+# production detection, run the GLiNER daemon (`erebus-daemon`) on a shared socket and mount
+# it into the gateway container, or co-locate detection in the gateway image; see the
+# placeholder below.
 
 services:
   postgres:
@@ -61,7 +63,7 @@ services:
   # Placeholder for production GLiNER detection (research R4). The daemon currently binds a
   # Unix socket on the host filesystem, so wiring it cross-container needs a shared socket
   # volume or co-location in the gateway image. Until then, set EREBUS_DISABLE_GLINER=1 in
-  # gateway.env for a hermetic regex-only stand-up.
+  # gateway.env to run regex-only (no names, addresses or organisations).
   #
   # gliner:
   #   image: erebus-gateway

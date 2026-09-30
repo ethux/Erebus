@@ -2,7 +2,7 @@
 
 Exercises the stories that only exist once the services are wired into the routes:
 US10 quota fail-closed, US8 audit recorded + chain intact, US4 hybrid edge-mode
-verify, US6 governed reveal (RBAC + grant), US5 fail-closed on crypto-erase.
+verify, US6 governed reveal (operator credential + grant), US5 fail-closed on crypto-erase.
 Live Postgres; self-skips without it.
 """
 import os
@@ -14,7 +14,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import psycopg
 from fastapi.testclient import TestClient
 
-from erebus.gateway import rbac
 from erebus.gateway.app import create_app
 from erebus.gateway.crypto.keyprovider import LocalKms
 from erebus.gateway.governance import audit, reveal
@@ -61,6 +60,7 @@ def main():
         e = provision_scope(conn, kms, "tenE")    # edge mode
         q = provision_scope(conn, kms, "tenQ")    # tight quota
         f = provision_scope(conn, kms, "tenF")    # crypto-erased
+        o = provision_scope(conn, kms, "ops")     # operator home (no quota: reveal reserves on the target)
         for sid in (a, e, f):
             quota.set_quota(conn, sid, 100, 1000, 60)
         quota.set_quota(conn, q, 2, 1000, 60)     # rate limit = 2
@@ -74,8 +74,9 @@ def main():
 
         app = create_app(
             conn=conn, key_provider=kms, detector=detector, provider_call=provider_call,
-            scopes=ScopeResolver({"cA": "tenA", "cE": "tenE", "cQ": "tenQ", "cF": "tenF"}),
-            scope_ids={"tenA": a, "tenE": e, "tenQ": q, "tenF": f},
+            scopes=ScopeResolver({"cA": "tenA", "cE": "tenE", "cQ": "tenQ", "cF": "tenF", "cOp": "ops"},
+                                 operators={"cOp"}),
+            scope_ids={"tenA": a, "tenE": e, "tenQ": q, "tenF": f, "ops": o},
             modes={"tenE": "edge"},
         )
         client = TestClient(app)
@@ -110,17 +111,18 @@ def main():
         token = _PERSON.findall(captured[-1]["messages"][-1]["content"])[0]
         reveal.grant(conn, a, "alice", reveal.REVEAL_ROLE, "support case 42", [token], ttl_seconds=300)
 
-        def reveal_post(cred, grantee, role, tokens):
+        def reveal_post(cred, grantee, tokens, **extra):
             return client.post("/v1/reveal",
-                               json={"grantee": grantee, "role": role, "tokens": tokens},
+                               json={"grantee": grantee, "scope_key": "tenA", "tokens": tokens, **extra},
                                headers={"Authorization": f"Bearer {cred}"})
 
-        ok = reveal_post("cA", "alice", str(rbac.Role.REVEAL_REVIEWER), [token])
-        check("reveal: authorized + granted returns the real value (US6)",
+        ok = reveal_post("cOp", "alice", [token])
+        check("reveal: operator + granted returns the real value (US6)",
               ok.status_code == 200 and ok.json()["values"][token] == "John Smith")
-        denied_role = reveal_post("cA", "alice", str(rbac.Role.GATEWAY_OPERATOR), [token])
-        check("reveal: wrong RBAC role denied 403 (FR-016)", denied_role.status_code == 403)
-        denied_grant = reveal_post("cA", "bob", str(rbac.Role.REVEAL_REVIEWER), [token])
+        denied_role = reveal_post("cA", "alice", [token], role="REVEAL_REVIEWER")
+        check("reveal: tenant claiming REVEAL_REVIEWER denied 403 (010)",
+              denied_role.status_code == 403 and "John Smith" not in denied_role.text)
+        denied_grant = reveal_post("cOp", "bob", [token])
         check("reveal: no grant for this grantee denied 403 (FR-015)", denied_grant.status_code == 403)
 
         # --- US5: fail-closed on crypto-erase ---

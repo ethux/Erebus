@@ -5,6 +5,43 @@ All notable changes to Erebus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0-beta.3] - 2026-09-30
+
+### Security
+- Gateway: a tenant credential could claim an admin role and use the admin routes (audit,
+  keys, reveal, provisioning, onboarding, revocation, `/metrics`). Admin access now comes
+  only from the credential; a `role` in the body or an `X-Role` header grants nothing.
+  After upgrading, every existing credential is tenant-only: run
+  `erebus-gateway create-operator` once, and stop old replicas before new ones take admin
+  traffic.
+
+### Fixed
+- Gateway: with `EREBUS_DISABLE_GLINER=1` prompts went to the provider with no detection
+  at all. Regex detection now runs on every request and tokenizes emails, international
+  phone numbers, IBANs, API keys, private keys and `key=value` secrets. Names, addresses,
+  organisations and national phone formats still need GLiNER.
+- Private keys: only the `BEGIN ... PRIVATE KEY` line was tokenized, so the key itself went
+  out raw, and PKCS#8 `BEGIN PRIVATE KEY` blocks were missed entirely. The whole PEM block is
+  now tokenized, in the gateway and in the editor filter. A key pasted without its `END`
+  line is tokenized with the base64 lines that follow the header.
+- Gateway: IBANs are detected by regex with a checksum check, so they no longer depend on
+  GLiNER.
+- Gateway: tokens in a response's tool-call arguments reached the client unrestored, and a
+  restored value with a quote or backslash could break a streamed JSON chunk. Both now come
+  back as valid JSON with the real values.
+- Gateway: a token split across two streamed chunks reached the client unrestored, in the
+  content and in tool-call arguments. It is now held back until it completes.
+- Gateway: the deprecated OpenAI `function_call` field on requests was not filtered. It now
+  goes through the same filter as `tool_calls`.
+
+### Changed
+- `/readyz` reports `"detection": "regex-only"` instead of `"disabled"` when GLiNER is off.
+  Update any monitor that matches `disabled`.
+- Operators are created with `erebus-gateway create-operator`, which prints an operator
+  token once. One operator privilege replaces the five admin roles. Operators issue more
+  operator credentials with `POST /v1/admin/operators`, and audit, key and reveal calls name
+  their target with `scope_key`. Onboarding returns the `credential_id` to revoke by.
+
 ## [1.1.0-beta.2] - 2026-09-26
 
 First gateway release from `main`.

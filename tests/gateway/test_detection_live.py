@@ -8,7 +8,10 @@ detector, so the actual fail-closed wiring in ``app._sanitize_or_fail`` is exerc
   no raw PII (the baseline guarantee still holds with the real adapter).
 * degraded   -> the GLiNER daemon is forced to mark the per-call signal degraded
   (exactly as a real outage would). The chat request MUST fail closed with 503 and
-  the upstream MUST have received NOTHING -- no raw PII, no partial-token egress.
+  the upstream MUST have received NOTHING -- no raw PII, no partial-token egress,
+  even when the regex layer found PII in the same request.
+* regex-only -> ``EREBUS_DISABLE_GLINER``: email, phone and IBAN reach the upstream only
+  as tokens, come back restored, and GLiNER is never called.
 
 We do not run a real daemon: ``erebus.core.detect._predict_entities`` is monkeypatched
 (the same seam ``test_detection_adapter`` uses) and the degraded signal is driven via
@@ -48,9 +51,24 @@ def check(name, cond):
 
 class _Cfg:
     """Production-detection config stand-in: ``detection_disabled`` False, so
-    ``build_detector`` returns the fail-closed core adapter (not recorded-disabled)."""
+    ``build_detector`` returns regex + the fail-closed GLiNER adapter (not regex-only)."""
 
     detection_disabled = False
+
+
+_EMAIL = "jan@voorbeeld-bv.test"
+_PHONE = "+31 6 12345678"
+_IBAN = "NL91ABNA0417164300"
+
+
+class _CfgRegexOnly:
+    """``EREBUS_DISABLE_GLINER`` stand-in: ``build_detector`` returns the regex-only detector."""
+
+    detection_disabled = True
+
+
+def _must_not_run(text):
+    raise AssertionError("GLiNER must not run in the regex-only posture")
 
 
 def _healthy_with_pii(text):
@@ -165,6 +183,41 @@ def main():
         )
         check("recovery: chat serves again after detection recovers (no restart)",
               again.status_code == 200 and _SECRET in again.text)
+
+        # --- GLiNER down + a regex hit in the same request: still 503, nothing egressed. ---
+        captured.clear()
+        core_detect._predict_entities = _degraded
+        mixed = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": f"Email {_SECRET} at {_EMAIL}"}]},
+            headers={"Authorization": "Bearer cA"},
+        )
+        check("degraded + regex hit: still fails closed with 503", mixed.status_code == 503)
+        check("degraded + regex hit: the upstream received NOTHING", len(captured) == 0)
+        check("degraded + regex hit: no raw PII in the response",
+              _SECRET not in mixed.text and _EMAIL not in mixed.text)
+
+        # --- regex-only (EREBUS_DISABLE_GLINER): structured PII tokenized, GLiNER never runs. ---
+        core_detect._predict_entities = _must_not_run
+        app_regex = create_app(
+            conn=conn, key_provider=kms, detector=build_detector(_CfgRegexOnly()),
+            provider_call=provider_call,
+            scopes=ScopeResolver({"cA": "tenA"}), scope_ids={"tenA": a},
+        )
+        prompt = f"Mail {_EMAIL}, bel {_PHONE}, IBAN {_IBAN}"
+        ro = TestClient(app_regex).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": prompt}]},
+            headers={"Authorization": "Bearer cA"},
+        )
+        check("regex-only: chat 200 without GLiNER", ro.status_code == 200)
+        egress = captured[-1]["messages"][-1]["content"]
+        check("regex-only: no raw email, phone or IBAN reached the upstream",
+              all(raw not in egress for raw in (_EMAIL, _PHONE, _IBAN)))
+        check("regex-only: the upstream saw EMAIL_ADDRESS, PHONE_NUMBER and IBAN tokens",
+              all(tok in egress for tok in ("[EMAIL_ADDRESS_", "[PHONE_NUMBER_", "[IBAN_")))
+        check("regex-only: the response is restored for the client",
+              ro.json()["choices"][0]["message"]["content"] == "Re: " + prompt)
 
         print(f"\n{_passed}/{_passed} passed\n")
     finally:

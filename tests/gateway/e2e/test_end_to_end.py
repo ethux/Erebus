@@ -275,9 +275,9 @@ def main():
 
         # 3) Assemble + launch the real gateway via the production config path. The default
         #    provider is "openai", so every request's model routes to the mock's approved route.
-        #    Detection is left ENABLED (no EREBUS_DISABLE_GLINER) so build_app_from_config wires
-        #    the production _CoreDetector, which calls our patched predict_entities -- exercising
-        #    the real fail-closed detection path end-to-end rather than a no-op disabled detector.
+        #    GLiNER is left ENABLED (no EREBUS_DISABLE_GLINER) so build_app_from_config wires
+        #    the production regex + GLiNER detector, which calls our patched predict_entities --
+        #    exercising the real fail-closed detection path end-to-end, not the regex-only one.
         config = GatewayConfig.from_env({
             "EREBUS_PG_DSN": _DSN,
             "EREBUS_GATEWAY_MASTER_KEY": _KEY,

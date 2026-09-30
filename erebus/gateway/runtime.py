@@ -1,8 +1,9 @@
 """Per-request runtime plumbing for the gateway app (extracted from app.py).
 
-Authentication off the event loop (009 R5), the pooled-connection offload (:func:`_db`),
-masked telemetry recording, the per-tenant concurrency slot, and the overload-admission gate
-- the shared helpers every route handler builds on. Kept in its own module so ``app.py`` stays
+Authentication off the event loop (009 R5), the operator gate (:func:`require_operator`, 010),
+the pooled-connection offload (:func:`_db`), the fail-closed quota reservation, masked telemetry
+recording, the per-tenant concurrency slot, and the overload-admission gate - the shared helpers
+every route handler builds on. Kept in its own module so ``app.py`` stays
 within the line budget; nothing here imports the handlers or ``create_app``, so there is no
 import cycle.
 """
@@ -12,60 +13,119 @@ import contextlib
 import re
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import anyio
 from fastapi import HTTPException
 
+from . import rbac
 from .deps import GatewayDeps
 from .governance import audit
 from .observability import Metric
 from .overload import Limiter, Overloaded
+from .providers import quota
 
 _DENIED = HTTPException(status_code=401, detail="invalid credential")
 
 
+class Identity(NamedTuple):
+    """The authenticated caller: its scope and the privilege issued with its credential."""
 
-def _event(event_type: str, outcome: str) -> dict:
-    return {"event_type": event_type, "actor_id": "gateway", "actor_role": "gateway",
+    scope_key: str
+    scope_id: uuid.UUID
+    credential_id: str | None  # directory row id (never the token); None on the static resolver
+    privilege: str
+
+
+def _event(event_type: str, outcome: str, actor: Identity | None = None) -> dict:
+    """Audit fields; an admin action records the caller's credential id and privilege (010)."""
+    return {"event_type": event_type,
+            "actor_id": (actor.credential_id or "static") if actor else "gateway",
+            "actor_role": actor.privilege if actor else "gateway",
             "request_id": None, "masked_value": None, "category": "request",
             "outcome": outcome, "metadata": {}}
 
 
-def _resolve_identity(deps: GatewayDeps, cred: str) -> tuple[str, uuid.UUID] | None:
-    """Resolve a credential to ``(scope_key, scope_id)`` in a SINGLE lookup (009 R5).
+def _resolve_identity(deps: GatewayDeps, cred: str, *, fresh: bool = False) -> Identity | None:
+    """Resolve a credential to its :class:`Identity` in a SINGLE lookup (009 R5).
 
-    The dynamic resolver returns the scope id alongside the key in one directory read, so the
-    deployed path no longer runs the scope-id ``SELECT`` twice (no double lookup, no TOCTOU
-    ``KeyError``). The static ``ScopeResolver`` + ``scope_ids`` dict path is kept as a fallback
-    so every 007 test resolves unchanged. Synchronous DB work -- runs off the event loop.
+    The dynamic resolver returns the scope id, key and privilege in one directory read
+    (``fresh`` bypasses its TTL cache). The static ``ScopeResolver`` + ``scope_ids`` dict path
+    is kept as a fallback so every 007 test resolves unchanged. Synchronous DB work -- runs
+    off the event loop.
     """
-    resolve_full = getattr(deps.scopes, "resolve_full", None)
-    if resolve_full is not None:
-        resolved = resolve_full(cred)  # (scope_id, scope_key) | None, one lookup
-        if resolved is None:
+    resolve_record = getattr(deps.scopes, "resolve_record", None)
+    if resolve_record is not None:
+        record = resolve_record(cred, fresh=fresh)
+        if record is None:
             return None
-        scope_id, scope_key = resolved
-        return scope_key, scope_id
+        return Identity(record.scope_key, record.scope_id, str(record.credential_id), record.privilege)
     # Static fallback (007 tests): resolve the key, then the id from the supplied dict.
     scope_key = deps.scopes.resolve(cred)
     if not scope_key or scope_key not in deps.scope_ids:
         return None
-    return scope_key, deps.scope_ids[scope_key]
+    privilege = getattr(deps.scopes, "privilege", lambda _c: rbac.TENANT)(cred)
+    return Identity(scope_key, deps.scope_ids[scope_key], None, privilege)
 
 
-async def _auth(deps: GatewayDeps, authorization: str | None) -> tuple[str, uuid.UUID]:
-    """Authenticate a request to ``(scope_key, scope_id)`` off the event loop (009 R5/FR-003).
+async def _identify(deps: GatewayDeps, authorization: str | None, *, fresh: bool = False) -> Identity:
+    """Authenticate a request to its :class:`Identity` off the event loop (009 R5/FR-003).
 
     The whole resolution (a single directory lookup for the dynamic path) runs in the
     threadpool so the synchronous psycopg work never blocks the loop. A miss -- unknown,
     revoked, or a tenant removed mid-resolution -- raises a clean 401, never a 500.
     """
     cred = re.sub(r"^Bearer ", "", authorization or "").strip()
-    resolved = await anyio.to_thread.run_sync(lambda: _resolve_identity(deps, cred))
-    if resolved is None:
+    ident = await anyio.to_thread.run_sync(lambda: _resolve_identity(deps, cred, fresh=fresh))
+    if ident is None:
         raise _DENIED
-    return resolved
+    return ident
+
+
+async def _auth(deps: GatewayDeps, authorization: str | None) -> tuple[str, uuid.UUID]:
+    """Authenticate a request to ``(scope_key, scope_id)``; the chat paths' contract."""
+    ident = await _identify(deps, authorization)
+    return ident.scope_key, ident.scope_id
+
+
+async def require_operator(deps: GatewayDeps, authorization: str | None, *,
+                           event: str = "admin") -> Identity:
+    """Admit only a credential issued operator privilege (010 FR-001..003).
+
+    Nothing in the body, headers or query is consulted. The directory is read fresh, so a
+    revoked operator is refused at once on every replica. Missing/unknown/revoked -> 401; a
+    tenant -> 403, audited ``forbidden`` on its own scope as ``event``. Neither discloses data.
+    """
+    ident = await _identify(deps, authorization, fresh=True)
+    if rbac.is_operator(ident.privilege):
+        return ident
+    if deps.pool is not None or deps.conn is not None:
+        with contextlib.suppress(Exception):  # the denial stands even if the audit write fails
+            await _audit(deps, ident.scope_id, event, "forbidden", ident)
+    raise HTTPException(status_code=403, detail="forbidden")
+
+
+def _scope_id_for(conn, scope_key: str) -> uuid.UUID | None:
+    with conn.transaction():  # no implicit transaction left open on a shared connection
+        row = conn.execute(
+            "SELECT id FROM scopes WHERE scope_key = %s AND status = 'active'", (scope_key,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+async def _target_scope(deps: GatewayDeps, ident: Identity, scope_key: object, *,
+                        required: bool = False) -> uuid.UUID:
+    """The scope an admin call acts on (010): the named ``scope_key``, else the caller's own."""
+    if scope_key is None or scope_key == "":
+        if required:
+            raise HTTPException(status_code=400, detail="scope_key required")
+        return ident.scope_id
+    if not isinstance(scope_key, str):
+        raise HTTPException(status_code=400, detail="scope_key must be a string")
+    sid = await _db(deps, lambda c: _scope_id_for(c, scope_key))
+    if sid is None:
+        raise HTTPException(status_code=404, detail="scope not found")
+    return sid
 
 
 async def _acquire(deps: GatewayDeps):
@@ -89,8 +149,19 @@ async def _db(deps: GatewayDeps, fn: Callable[[Any], Any]):
         await _release(deps, conn)
 
 
-async def _audit(deps: GatewayDeps, scope_id: uuid.UUID, event_type: str, outcome: str) -> None:
-    await _db(deps, lambda c: audit.append(c, scope_id, _event(event_type, outcome)))
+async def _audit(deps: GatewayDeps, scope_id: uuid.UUID, event_type: str, outcome: str,
+                 actor: Identity | None = None) -> None:
+    await _db(deps, lambda c: audit.append(c, scope_id, _event(event_type, outcome, actor)))
+
+
+async def _reserve_or_429(deps: GatewayDeps, scope_id: uuid.UUID, event: str) -> None:
+    try:
+        await _db(deps, lambda c: quota.check_and_reserve(c, scope_id))
+    except quota.QuotaExceeded as exc:
+        await _audit(deps, scope_id, event, "quota_rejected")
+        _record(deps, scope_id, Metric.QUOTA_REJECTIONS)  # masked 429 telemetry (FR-011)
+        raise HTTPException(status_code=429, detail="quota exceeded",
+                            headers={"Retry-After": "1"}) from exc
 
 
 def _slot(deps: GatewayDeps, scope_key: str):

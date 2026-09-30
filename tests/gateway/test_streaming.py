@@ -3,6 +3,7 @@
 Unit-tests the split-token hold-back, then a route round-trip and a mid-stream
 abort via TestClient. Live Postgres for the route tests; self-skips without it.
 """
+import json
 import os
 import sys
 
@@ -31,6 +32,83 @@ def check(name, cond):
     _passed += 1
 
 
+def _frame(delta, finish=None, index=0):
+    choice = {"index": index, "delta": delta, "finish_reason": finish}
+    return json.dumps({"id": "c1", "model": "m", "choices": [choice]}, separators=(",", ":"))
+
+
+def _run(frames, lookup):
+    """Feed whole SSE JSON frames (as http_stream yields them); return raw emits and parsed frames."""
+    r = StreamRestorer(lookup)
+    raw = [r.feed(f) for f in frames] + [r.flush()]
+    raw = [e for e in raw if e]
+    parsed = []
+    for e in raw:
+        try:
+            parsed.append(json.loads(e))
+        except ValueError:
+            parsed.append(None)
+    return raw, parsed
+
+
+def _joined(parsed, index=0):
+    """Reassemble content and per-call arguments the way an OpenAI client does."""
+    content, args = "", {}
+    for frame in parsed:
+        for choice in frame["choices"]:
+            if choice["index"] != index:
+                continue
+            delta = choice.get("delta") or {}
+            content += delta.get("content") or ""
+            for call in delta.get("tool_calls") or []:
+                args[call["index"]] = args.get(call["index"], "") + call["function"].get("arguments", "")
+    return content, args
+
+
+def _check_frames():
+    """A token split inside itself across JSON frames is held per field and restored."""
+    pw, mail = "[" + "PASSWORD_1_abcdef" + "]", "[" + "EMAIL_ADDRESS_2_a1b2c3" + "]"
+    secret = 'Pa"ss\\word1'
+    lookup = {pw: secret, mail: "jan@voorbeeld.test"}.get
+
+    frames = [_frame({"content": "Mail " + mail[:9]}), _frame({"content": mail[9:] + " now"}),
+              _frame({}, "stop")]
+    raw, parsed = _run(frames, lookup)
+    check("content: every emitted frame is valid JSON", all(p is not None for p in parsed))
+    check("content: no emitted frame carries a partial token", not any(mail[:5] in e for e in raw))
+    check("content: a token split across deltas is restored",
+          _joined(parsed)[0] == "Mail jan@voorbeeld.test now")
+
+    call = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "run", "arguments": ""}}
+    parts = ['{"cmd":"', pw[:5], pw[5:14], pw[14:], '"}']
+    frames = ([_frame({"role": "assistant", "content": None, "tool_calls": [call]})]
+              + [_frame({"tool_calls": [{"index": 0, "function": {"arguments": a}}]}) for a in parts]
+              + [_frame({}, "tool_calls")])
+    raw, parsed = _run(frames, lookup)
+    args = _joined(parsed)[1].get(0, "")
+    check("arguments: every emitted frame is valid JSON", all(p is not None for p in parsed))
+    check("arguments: no emitted frame carries a partial token", not any(pw[:5] in e for e in raw))
+    check("arguments: a token split across BPE-sized deltas is restored",
+          json.loads(args) == {"cmd": secret})
+
+    two = [_frame({"tool_calls": [{"index": i, "function": {"arguments": a}}]})
+           for i, a in ((0, '{"a":"' + pw[:8]), (1, '{"b":"' + mail[:4]), (0, pw[8:] + '"}'),
+                        (1, mail[4:] + '"}'))] + [_frame({}, "tool_calls")]
+    check("arguments: two interleaved calls are held apart",
+          _joined(_run(two, lookup)[1])[1] == {0: json.dumps({"a": secret}, separators=(",", ":")),
+                                                1: '{"b":"jan@voorbeeld.test"}'})
+
+    _raw, parsed = _run([_frame({"content": "see " + pw[:6]}), _frame({}, "stop")], lookup)
+    check("finish_reason flushes a held prefix as text", _joined(parsed)[0] == "see " + pw[:6])
+    _raw, parsed = _run([_frame({"content": "see " + pw[:6]})], lookup)
+    check("stream end flushes a held prefix as a valid frame",
+          _joined(parsed)[0] == "see " + pw[:6] and parsed[-1]["id"] == "c1")
+    raw, _parsed = _run([_frame({"content": "arr[i"})], lookup)
+    check("a bracket that cannot start a token is not held", len(raw) == 1 and "arr[i" in raw[0])
+    plain = _frame({"content": "hello"})
+    check("a frame with nothing to restore keeps its bytes", _run([plain], lookup)[0] == [plain])
+
+
 async def _noop(_payload):
     return {"choices": [{"message": {"content": ""}}]}
 
@@ -47,6 +125,7 @@ def main():
     check("no partial token in any emitted fragment (SC-002)",
           all(tok[:5] not in e for e in emits))
     check("split token restored across chunks", "".join(emits) == "Hi John Smith bye")
+    _check_frames()
 
     try:
         conn = psycopg.connect(_DSN)
