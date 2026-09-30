@@ -5,7 +5,7 @@ All notable changes to Erebus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0-beta.3] - 2026-09-30
 
 ### Security
 - Gateway: a tenant credential could claim an admin role and use the admin routes (audit,
@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back as valid JSON with the real values.
 - Gateway: a token split across two streamed chunks reached the client unrestored, in the
   content and in tool-call arguments. It is now held back until it completes.
+- Gateway: the deprecated OpenAI `function_call` field on requests was not filtered. It now
+  goes through the same filter as `tool_calls`.
 
 ### Changed
 - `/readyz` reports `"detection": "regex-only"` instead of `"disabled"` when GLiNER is off.
