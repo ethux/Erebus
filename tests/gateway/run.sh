@@ -21,6 +21,7 @@ PURE_TESTS=(
   detection_merge
   detection_adapter
   core_boundary
+  connector_policy
 )
 
 modules_missing() {

@@ -30,7 +30,7 @@ from .scope_context import scoped
 _LABEL_NON_CLASS = re.compile(r"[^A-Z_]+")
 
 
-def _normalize_label(label: str) -> str:
+def normalize_label(label: str) -> str:
     """Coerce ``label`` into the restore pattern's ``[A-Z_]+`` character class.
 
     Uppercases, replaces every run of out-of-class characters with a single
@@ -88,7 +88,7 @@ class KnownValueStore:
         # token is always restorable (an out-of-class catalog/detector label would
         # otherwise produce a token restore could never match). In-class labels
         # like PERSON / INTERNAL_ID are unchanged, so existing dedupe is untouched.
-        label = _normalize_label(label)
+        label = normalize_label(label)
         bidx = self._crypto.blind_index(value, label)
         with scoped(self._conn, self._scope_id):
             existing = self._conn.execute(
