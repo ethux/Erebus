@@ -138,6 +138,17 @@ def _schema_filter(b, connector):
           names and all(n.startswith(wanted + ".") for n in names))
 
 
+def _shown(exc):
+    """What a log of ``exc`` would show beyond code: its repr and every message in the
+    printed chain. Frame lines are left out: they hold paths and source, not runtime
+    values, and a path such as ``connectors/postgres.py`` would match a password ``postgres``."""
+    parts = [repr(exc)]
+    while exc is not None:
+        parts += traceback.format_exception_only(exc)
+        exc = exc.__cause__ if exc.__cause__ is not None else (None if exc.__suppress_context__ else exc.__context__)
+    return "".join(parts)
+
+
 def _sanitized(b, connector):
     for case, settings, secrets, kind, hidden in b.bad_cases():
         def attempt(settings=settings, secrets=secrets):
@@ -148,7 +159,7 @@ def _sanitized(b, connector):
                 src.close()
         exc = _error(attempt)
         check(f"{b.name}: {case} fails as '{kind}' with fixed text", _fixed(exc, kind))
-        shown = repr(exc) + "".join(traceback.format_exception(exc))
+        shown = _shown(exc)
         check(f"{b.name}: {case}: no host, DSN, user, password or value shown",
               not any(h in shown for h in hidden) and "Zyx" not in shown)
         check(f"{b.name}: {case}: the driver error is not chained", exc.__cause__ is None and exc.__suppress_context__)

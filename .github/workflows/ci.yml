@@ -70,7 +70,8 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_PASSWORD: postgres
+          # Distinctive, so the leak checks cannot match it in a path or a word.
+          POSTGRES_PASSWORD: pg-ci-Zq9x
         ports:
           - "5432:5432"
         options: >-
@@ -90,7 +91,7 @@ jobs:
           --health-timeout 5s
           --health-retries 30
     env:
-      EREBUS_PG_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+      EREBUS_PG_DSN: postgresql://postgres:pg-ci-Zq9x@localhost:5432/postgres
       # The connector contract suite (SC-6) runs against this MySQL and fails without it.
       EREBUS_TEST_MYSQL_DSN: mysql://root:mysql-ci-root@127.0.0.1:13306
       EREBUS_REQUIRE_MYSQL: "1"
