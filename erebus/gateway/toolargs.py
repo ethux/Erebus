@@ -2,7 +2,7 @@
 
 OpenAI tool calls carry ``function.arguments`` as one JSON string. Gated as plain text,
 a ``key=value`` pattern's ``\\S{n,}`` tail swallows the closing quote and brace, and a
-restored value with a quote or backslash breaks the JSON. So values are gated one JSON
+restored value with a quote or backslash breaks the JSON. So literals are gated one JSON
 string at a time, and a token restored inside JSON is written back JSON-escaped.
 """
 from __future__ import annotations
@@ -16,9 +16,9 @@ from .tokenizer import _TOKEN_RE
 
 Lookup = Callable[[str], "str | None"]
 
-# One JSON string literal, plus a trailing ":" when it is an object key. Only applied to
-# text json.loads accepted, where every '"' outside a literal opens one.
-_STRING_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"(\s*:)?', re.S)
+# One JSON string literal. Only applied to text json.loads accepted, where every '"'
+# outside a literal opens one.
+_STRING_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.S)
 
 
 def _parses(text: str) -> bool:
@@ -30,17 +30,17 @@ def _parses(text: str) -> bool:
 
 
 def map_json_strings(raw: str, fn: Callable[[str], str]) -> str | None:
-    """Apply ``fn`` to every string value in the JSON text ``raw``; None if it is not JSON.
+    """Apply ``fn`` to every string literal in the JSON text ``raw``; None if it is not JSON.
 
-    Keys, numbers and layout keep their exact bytes; only a value ``fn`` changed is
-    re-encoded, ASCII-escaped when the client's literal was.
+    Keys are data too (a map of email to role), so they go through ``fn`` as well; a
+    plain parameter name matches no pattern and is left as it is. Numbers and layout
+    keep their exact bytes; only a literal ``fn`` changed is re-encoded, ASCII-escaped
+    when the client's literal was.
     """
     if not _parses(raw):
         return None
 
     def one(m: re.Match) -> str:
-        if m.group(1):
-            return m.group(0)  # an object key names a tool parameter: never gated
         old = json.loads(m.group(0))
         new = fn(old)
         return m.group(0) if new == old else json.dumps(new, ensure_ascii=m.group(0).isascii())

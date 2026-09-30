@@ -28,6 +28,7 @@ from erebus.gateway.tenancy import ScopeResolver
 
 _DSN = os.environ.get("EREBUS_PG_DSN", "postgresql:///erebus_gateway_test")
 _HDR = {"Authorization": "Bearer cT"}
+_EDGE = {"Authorization": "Bearer cE"}
 _CMD = "export API_KEY=abcd1234efgh"
 _EMAIL = "jan.jansen@voorbeeld-bv.test"
 _IBAN = "NL91ABNA0417164300"
@@ -108,6 +109,26 @@ def _check_request(client, captured):
           "abcd1234efgh" not in _sent_args(captured) and "[API_KEY_" in _sent_args(captured))
 
 
+def _check_keys(client, captured):
+    """Keys used as data (email -> role) are gated too; plain parameter names are not."""
+    keyed = json.dumps({"recipients": {_EMAIL: "cc"}, "api_key": "x", "password": "y"})
+    resp = client.post("/v1/chat/completions", headers=_HDR, json=_body(keyed))
+    sent = _sent_args(captured)
+    parsed = _loads(sent) or {}
+    check("an email used as an object key never reaches the provider", _EMAIL not in sent)
+    check("an email used as an object key goes up as a token",
+          [_is_token(k, "EMAIL_ADDRESS") for k in parsed.get("recipients", {})] == [True])
+    check("plain parameter names keep their bytes", sorted(parsed) == ["api_key", "password", "recipients"])
+    args = resp.json()["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+    check("a tokenized key comes back restored", _loads(args) == _loads(keyed))
+
+    refused = client.post("/v1/chat/completions", headers=_EDGE, json=_body(keyed))
+    check("edge mode refuses an email used as an object key", refused.status_code == 400)
+    clean = client.post("/v1/chat/completions", headers=_EDGE,
+                        json=_body(json.dumps({"api_key": "x", "password": "y"})))
+    check("edge mode passes plain parameter names", clean.status_code == 200)
+
+
 def _check_restore(client, captured):
     raw = json.dumps({"cmd": _QUOTED})
     resp = client.post("/v1/chat/completions", headers=_HDR, json=_body(raw))
@@ -147,7 +168,9 @@ def main():
             conn.execute("TRUNCATE scopes CASCADE")
         kms = LocalKms()
         scope = provision_scope(conn, kms, "tenT")
-        quota.set_quota(conn, scope, 1000, 100000, 60)
+        edge = provision_scope(conn, kms, "tenE")
+        for sid in (scope, edge):
+            quota.set_quota(conn, sid, 1000, 100000, 60)
         captured = []
 
         async def echo(payload):
@@ -165,9 +188,11 @@ def main():
         app = create_app(conn=conn, key_provider=kms,
                          detector=build_detector(SimpleNamespace(detection_disabled=True)),
                          provider_call=echo, provider_stream=echo_stream,
-                         scopes=ScopeResolver({"cT": "tenT"}), scope_ids={"tenT": scope})
+                         scopes=ScopeResolver({"cT": "tenT", "cE": "tenE"}),
+                         scope_ids={"tenT": scope, "tenE": edge}, modes={"tenE": "edge"})
         client = TestClient(app)
         _check_request(client, captured)
+        _check_keys(client, captured)
         _check_restore(client, captured)
         print(f"\n{_passed}/{_passed} passed\n")
     finally:

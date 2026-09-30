@@ -44,7 +44,7 @@ def gate_args(tok: Tokenizer, detector: Detector, value: Any, mode: str) -> Any:
 
     A raw value must not ride to the provider hidden inside a tool-call's JSON
     arguments, so the gate walks the structure and tokenizes each string in place.
-    An ``arguments`` string that is JSON is gated per string value inside it.
+    An ``arguments`` string that is JSON is gated per string literal inside it, keys too.
     """
     if isinstance(value, dict):
         for key, item in value.items():
@@ -61,7 +61,7 @@ def gate_args(tok: Tokenizer, detector: Detector, value: Any, mode: str) -> Any:
 
 
 def _gate_arguments(tok: Tokenizer, detector: Detector, raw: str, mode: str) -> str:
-    """Gate a JSON ``arguments`` string per value so no span swallows its quotes; else whole."""
+    """Gate a JSON ``arguments`` string per literal so no span swallows its quotes; else whole."""
     gated = map_json_strings(raw, lambda text: gate_text(tok, detector, text, mode))
     return gate_text(tok, detector, raw, mode) if gated is None else gated
 
