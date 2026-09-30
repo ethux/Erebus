@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now tokenized, in the gateway and in the editor filter.
 - Gateway: IBANs are detected by regex with a checksum check, so they no longer depend on
   GLiNER.
+- Gateway: tokens in a response's tool-call arguments reached the client unrestored, and a
+  restored value with a quote or backslash could break a streamed JSON chunk. Both now come
+  back as valid JSON with the real values.
 
 ### Changed
 - `/readyz` reports `"detection": "regex-only"` instead of `"disabled"` when GLiNER is off.

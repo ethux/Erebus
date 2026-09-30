@@ -14,6 +14,7 @@ from .crypto.keyprovider import KeyProvider
 from .modalities import Decision, classify_part
 from .store.known_value_store import open_store
 from .tokenizer import Detector, Tokenizer
+from .toolargs import map_json_strings, restore_arguments
 
 # Part types whose natural-language text is tokenized in place.
 _TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
@@ -43,16 +44,26 @@ def gate_args(tok: Tokenizer, detector: Detector, value: Any, mode: str) -> Any:
 
     A raw value must not ride to the provider hidden inside a tool-call's JSON
     arguments, so the gate walks the structure and tokenizes each string in place.
+    An ``arguments`` string that is JSON is gated per string value inside it.
     """
     if isinstance(value, dict):
         for key, item in value.items():
-            value[key] = gate_args(tok, detector, item, mode)
+            if key == "arguments" and isinstance(item, str):
+                value[key] = _gate_arguments(tok, detector, item, mode)
+            else:
+                value[key] = gate_args(tok, detector, item, mode)
         return value
     if isinstance(value, list):
         return [gate_args(tok, detector, item, mode) for item in value]
     if isinstance(value, str):
         return gate_text(tok, detector, value, mode)
     return value
+
+
+def _gate_arguments(tok: Tokenizer, detector: Detector, raw: str, mode: str) -> str:
+    """Gate a JSON ``arguments`` string per value so no span swallows its quotes; else whole."""
+    gated = map_json_strings(raw, lambda text: gate_text(tok, detector, text, mode))
+    return gate_text(tok, detector, raw, mode) if gated is None else gated
 
 
 def gate_part(tok: Tokenizer, detector: Detector, part: dict, mode: str,
@@ -87,8 +98,13 @@ def tokenize_payload(key_provider: KeyProvider, detector: Detector, policy: dict
 
 def restore_payload(key_provider: KeyProvider, detector: Detector,
                     conn, scope_id: uuid.UUID, upstream: dict) -> dict:
-    """Restore tokens in an upstream response back to the real values."""
-    tok = Tokenizer(open_store(conn, key_provider, scope_id), detector)
+    """Restore tokens in an upstream response back to the real values.
+
+    Tool-call ``arguments`` are restored JSON-escaped, so a restored quote or
+    backslash keeps them valid JSON.
+    """
+    store = open_store(conn, key_provider, scope_id)
+    tok = Tokenizer(store, detector)
     for choice in upstream.get("choices", []):
         msg = choice.get("message") or {}
         content = msg.get("content")
@@ -98,4 +114,8 @@ def restore_payload(key_provider: KeyProvider, detector: Detector,
             for part in content:
                 if isinstance(part, dict) and isinstance(part.get("text"), str):
                     part["text"] = tok.restore(part["text"])
+        calls = [c.get("function") for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
+        for fn in [*calls, msg.get("function_call")]:
+            if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                fn["arguments"] = restore_arguments(fn["arguments"], store.lookup)
     return upstream

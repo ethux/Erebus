@@ -4,11 +4,15 @@ A token split across streamed chunks (``[PERS`` / ``ON_1_abcdef]``) is never emi
 partially: the restorer holds back any trailing run starting at an unclosed ``[``
 until it completes. A restore failure mid-stream is fatal: the caller stops the
 stream fail-closed rather than emitting an unresolved token or partial raw value.
+A fragment that is a whole JSON chunk (an OpenAI SSE ``data:`` frame) is restored
+inside the parsed chunk, so a restored quote or backslash cannot break its JSON.
 """
 from __future__ import annotations
 
 import re
 from collections.abc import Callable
+
+from .toolargs import restore_frame
 
 _TOKEN_RE = re.compile(r"\[[A-Z_]+_\d+_[0-9a-f]{6,}\]")
 
@@ -21,6 +25,8 @@ class StreamRestorer:
         self._buf = ""
 
     def feed(self, chunk: str) -> str:
+        if not self._buf and (frame := restore_frame(chunk, self._lookup)) is not None:
+            return frame
         self._buf += chunk
         cut = self._hold_point(self._buf)
         emit, self._buf = self._buf[:cut], self._buf[cut:]
