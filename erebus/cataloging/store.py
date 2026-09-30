@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
+from .redact import sanitize_error
 
 CATALOG_DB_PATH: Path | None = None
 
@@ -46,8 +47,6 @@ POLICY_NAME_DEFAULT = "default"
 MAX_REVEAL_MINUTES = 24 * 60
 
 _EMAIL_RE = re.compile(r"(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
-_PHONE_RE = re.compile(r"\+?[\d\s().-]{7,}")
-_SECRET_ASSIGNMENT_RE = re.compile(r"(?i)(password|secret|token|api[_-]?key)\s*[:=]\s*\S+")
 
 
 @dataclass
@@ -373,14 +372,6 @@ def mask_value(value: str, keep: int = 2) -> str:
     if len(value) <= keep:
         return "*" * len(value)
     return f"{value[:keep]}{'*' * min(8, max(3, len(value) - keep))}"
-
-
-def sanitize_error(exc: BaseException | str) -> str:
-    text = str(exc)
-    text = _EMAIL_RE.sub("[EMAIL]", text)
-    text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
-    text = _PHONE_RE.sub("[PHONE]", text)
-    return text[:500]
 
 
 def generate_catalog_token(category: str) -> str:
