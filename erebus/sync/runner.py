@@ -34,6 +34,7 @@ from typing import Any
 import psycopg
 
 from ..cataloging import connector_types, field_rules
+from ..cataloging import sources as contract
 from ..cataloging.connector_errors import ConnectorError, LicenseRequired
 from ..gateway import catalog
 from ..gateway.connectors import fields, jobs, sources
@@ -157,24 +158,9 @@ def _sample(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source
     return counts
 
 
-def _distinct(rows_source: Any, collection: str, columns: list[str], limit: int) -> Iterator[tuple]:
-    method = getattr(rows_source, "iter_distinct_values", None)
-    if method is not None:
-        yield from method(collection, columns, limit)
-        return
-    seen: set[tuple] = set()
-    for record in rows_source.iter_records(collection, fields=columns):
-        key = tuple(record.values.get(c) for c in columns)
-        if key not in seen:
-            seen.add(key)
-            yield key
-            if len(seen) >= limit:
-                return
-
-
 def _field_values(rows_source: Any, collection: str, field: fields.SourceField, limit: int) -> Iterator[str]:
     parts = field.field.split("+")
-    for row in _distinct(rows_source, collection, parts, limit):
+    for row in contract.distinct_values(rows_source, collection, parts, limit):
         if len(parts) > 1:
             value = field_rules.join_name(row[0], row[1:-1], row[-1])
         else:

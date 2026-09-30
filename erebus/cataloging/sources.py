@@ -2,15 +2,21 @@
 
 Connectors normalize databases and external APIs into collections, fields, and
 records. Erebus owns scanning and catalog decisions after that normalization.
+
+A database or warehouse source may also offer ``iter_distinct_values(collection,
+fields, limit)``: distinct tuples of ``fields`` in that order, rows that are all NULL
+skipped, at most ``limit`` (spec 015 D9). Callers use ``distinct_values``, which falls
+back to de-duplicating ``iter_records`` for a source without it. Connectors raise
+``ConnectorError`` (fixed text) for driver failures. Free connectors live in
+``erebus.cataloging.connectors`` and register through the ``erebus.sources`` group;
+the built-in SQLite one is loaded only when first asked for.
 """
 from __future__ import annotations
 
 import importlib
-import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from importlib import metadata
-from pathlib import Path
 from typing import Any, Protocol
 
 # Part of the contract: connectors raise these (re-exported for them).
@@ -36,10 +42,16 @@ class CollectionInfo:
 
 @dataclass
 class FieldInfo:
+    """A field. ``db_type`` is the type the source reports (``""``: unknown), ``nullable``
+    ``None`` when unknown, ``primary_key`` true for a primary-key column."""
+
     name: str
     label: str = ""
     kind_hint: str = ""
     pii_hint: str = ""
+    db_type: str = ""
+    nullable: bool | None = None
+    primary_key: bool = False
 
 
 @dataclass
@@ -86,104 +98,27 @@ class SourceConnector(Protocol):
 
 _CONNECTORS: dict[str, SourceConnector] = {}
 _ENTRYPOINTS_LOADED = False
+GROUP = "erebus.sources"
 
 
-def _quote_identifier(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
+def distinct_values(row_source: Any, collection: str, fields: list[str], limit: int) -> Iterator[tuple]:
+    """Distinct tuples of ``fields`` in ``collection``, at most ``limit``.
 
-
-def _kind_hint(name: str) -> tuple[str, str]:
-    lower = name.lower()
-    if "email" in lower:
-        return "email", "email"
-    if "phone" in lower or "mobile" in lower:
-        return "phone", "phone"
-    if lower in ("first_name", "last_name", "name", "full_name") or lower.endswith("_name"):
-        return "text", "person"
-    if "address" in lower or "street" in lower or "city" in lower or "zip" in lower:
-        return "text", "address"
-    if "account" in lower or lower.endswith("_id") or lower == "id":
-        return "identifier", "identifier"
-    return "text", ""
-
-
-class SQLiteRowSource:
-    """Read-only SQLite source normalized into RowSource records."""
-
-    def __init__(self, path: str):
-        self.path = Path(path)
-        uri = f"file:{self.path}?mode=ro"
-        self.conn = sqlite3.connect(uri, uri=True)
-        self.conn.row_factory = sqlite3.Row
-
-    def list_collections(self) -> list[CollectionInfo]:
-        rows = self.conn.execute(
-            """
-            SELECT name FROM sqlite_master
-            WHERE type='table' AND name NOT LIKE 'sqlite_%'
-            ORDER BY name
-            """
-        ).fetchall()
-        return [CollectionInfo(row["name"]) for row in rows]
-
-    def list_fields(self, collection: str) -> list[FieldInfo]:
-        rows = self.conn.execute(f"PRAGMA table_info({_quote_identifier(collection)})").fetchall()
-        fields = []
-        for row in rows:
-            kind, pii = _kind_hint(row["name"])
-            fields.append(FieldInfo(row["name"], kind_hint=kind, pii_hint=pii))
-        return fields
-
-    def iter_records(
-        self,
-        collection: str,
-        fields: list[str] | None = None,
-        limit: int | None = None,
-        page_size: int = 500,
-    ) -> Iterator[SourceRecord]:
-        available = {field.name for field in self.list_fields(collection)}
-        selected = fields or sorted(available)
-        missing = [field for field in selected if field not in available]
-        if missing:
-            raise ValueError(f"Unknown field(s) for {collection}: {', '.join(missing)}")
-        select_sql = ", ".join(_quote_identifier(field) for field in selected)
-        pk = "id" if "id" in available else None
-        if pk and pk not in selected:
-            select_sql = f"{_quote_identifier(pk)}, {select_sql}"
-        sql = f"SELECT {select_sql} FROM {_quote_identifier(collection)}"
-        if limit is not None:
-            sql += f" LIMIT {int(limit)}"
-        cur = self.conn.execute(sql)
-        count = 0
-        for row in cur:
-            count += 1  # noqa: SIM113
-            record_ref = str(row[pk]) if pk and pk in row.keys() else str(count)  # noqa: SIM118
-            values = {field: row[field] for field in selected}
-            yield SourceRecord(f"{collection}:{record_ref}", values, {})
-
-    def close(self) -> None:
-        self.conn.close()
-
-
-class SQLiteConnector:
-    def connector_id(self) -> str:
-        return "sqlite"
-
-    def connector_metadata(self) -> ConnectorMetadata:
-        return ConnectorMetadata(
-            id="sqlite",
-            name="SQLite",
-            version="1.0",
-            capabilities=["list_collections", "list_fields", "page_records"],
-            settings_schema={"path": {"required": True}},
-            secrets_schema={},
-        )
-
-    def connect(self, settings: dict[str, Any], secrets: dict[str, str]) -> RowSource:
-        path = settings.get("path") or settings.get("location_ref")
-        if not path:
-            raise ValueError("SQLite connector requires a path")
-        return SQLiteRowSource(str(path))
+    Uses the source's ``iter_distinct_values`` when it has one; otherwise reads only
+    ``fields`` through ``iter_records`` and de-duplicates.
+    """
+    method = getattr(row_source, "iter_distinct_values", None)
+    if method is not None:
+        yield from method(collection, fields, limit)
+        return
+    seen: set[tuple] = set()
+    for record in row_source.iter_records(collection, fields=fields):
+        key = tuple(record.values.get(f) for f in fields)
+        if key not in seen:
+            seen.add(key)
+            yield key
+            if len(seen) >= limit:
+                return
 
 
 def register_connector(connector: SourceConnector, replace: bool = True) -> None:
@@ -193,23 +128,30 @@ def register_connector(connector: SourceConnector, replace: bool = True) -> None
     _CONNECTORS[cid] = connector
 
 
-def _load_entrypoints() -> None:
+def load_connectors(*, strict: bool = False, eps: Iterable[Any] | None = None) -> None:
+    """Register every ``erebus.sources`` entry point (once, unless ``eps`` is given).
+
+    ``strict`` (the sync worker): a plugin that fails to load, or claims an id already
+    registered, raises. Otherwise (the laptop) it is skipped.
+    """
     global _ENTRYPOINTS_LOADED
-    if _ENTRYPOINTS_LOADED:
-        return
-    _ENTRYPOINTS_LOADED = True
-    try:
-        eps = metadata.entry_points()
-        group = eps.select(group="erebus.sources") if hasattr(eps, "select") else eps.get("erebus.sources", [])
-    except Exception:
-        return
-    for ep in group:
+    if eps is None:
+        if _ENTRYPOINTS_LOADED:
+            return
+        _ENTRYPOINTS_LOADED = True
+        try:
+            eps = metadata.entry_points(group=GROUP)
+        except Exception:
+            if strict:
+                raise
+            return
+    for ep in eps:
         try:
             obj = ep.load()
-            connector = obj() if isinstance(obj, type) else obj
-            register_connector(connector, replace=False)
+            register_connector(obj() if isinstance(obj, type) else obj, replace=False)
         except Exception:
-            continue
+            if strict:
+                raise
 
 
 def load_connector_from_import_path(path: str) -> SourceConnector:
@@ -223,12 +165,23 @@ def load_connector_from_import_path(path: str) -> SourceConnector:
 
 def ensure_builtin_connectors() -> None:
     if "sqlite" not in _CONNECTORS:
-        register_connector(SQLiteConnector())
+        from .connectors.sqlite import SQLiteConnector as _SQLite
+
+        register_connector(_SQLite())
+
+
+def __getattr__(name: str) -> Any:
+    # SQLiteConnector and SQLiteRowSource moved to erebus.cataloging.connectors.sqlite.
+    if name in ("SQLiteConnector", "SQLiteRowSource"):
+        from .connectors import sqlite
+
+        return getattr(sqlite, name)
+    raise AttributeError(name)
 
 
 def list_connectors() -> list[ConnectorMetadata]:
     ensure_builtin_connectors()
-    _load_entrypoints()
+    load_connectors()
     return sorted(
         [connector.connector_metadata() for connector in _CONNECTORS.values()],
         key=lambda item: item.id,
@@ -237,7 +190,7 @@ def list_connectors() -> list[ConnectorMetadata]:
 
 def get_connector(connector_id: str) -> SourceConnector | None:
     ensure_builtin_connectors()
-    _load_entrypoints()
+    load_connectors()
     return _CONNECTORS.get(connector_id)
 
 

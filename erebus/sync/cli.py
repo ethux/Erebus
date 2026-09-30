@@ -2,7 +2,8 @@
 
 Reads ``SyncConfig.from_env()`` (no gateway provider settings needed), checks that the
 database answers and that the master key unseals the existing scope keys, runs the
-advisory-locked migrations, loads worker extensions, then polls for jobs until SIGTERM
+advisory-locked migrations, loads the ``erebus.sources`` connectors strictly and the
+worker extensions, then polls for jobs until SIGTERM
 or SIGINT. Startup failures print a fixed message naming the setting and exit 2; they
 never echo a secret.
 """
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 
 import psycopg
 
+from ..cataloging import sources as contract
 from ..gateway.config import ConfigError
 from ..gateway.crypto.keyprovider import MasterKeyKms
 from ..gateway.store import db
@@ -49,6 +51,14 @@ def _prepare(config: SyncConfig) -> MasterKeyKms:
     return kms
 
 
+def _load_connectors() -> None:
+    # Strict: a connector that cannot load stops the worker instead of failing its jobs.
+    try:
+        contract.load_connectors(strict=True)
+    except Exception as exc:  # an import error can quote a path: name the type only
+        _die(f"a source connector failed to load: {type(exc).__name__}")
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the worker until stopped."""
     del argv  # no arguments yet; configuration is the environment
@@ -57,6 +67,7 @@ def main(argv: list[str] | None = None) -> None:
         config = SyncConfig.from_env()
     except ConfigError as exc:
         _die(str(exc))
+    _load_connectors()
     kms = _prepare(config)
     from psycopg_pool import ConnectionPool
 
