@@ -1,10 +1,18 @@
 #!/bin/sh
-# Pre-commit checks: ruff lint, max-file-length ratchet, dead-code scan.
+# Pre-commit checks: secret scan, ruff lint, max-file-length ratchet, dead-code scan.
 # Enable once per clone with:  make hooks
 # Bypass in an emergency with: git commit --no-verify
 set -e
 
 cd "$(git rev-parse --show-toplevel)"
+
+# Secret scan of everything staged (any file type), before the Python-only checks.
+if command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: secret scan (gitleaks)"
+    gitleaks git --staged --no-banner --redact -c .gitleaks.toml
+else
+    echo "pre-commit: gitleaks not found, skipping secret scan (install it: brew install gitleaks)" >&2
+fi
 
 staged_py=$(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
 [ -z "$staged_py" ] && exit 0

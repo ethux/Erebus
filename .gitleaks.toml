@@ -1,0 +1,19 @@
+# Secret scanning for commits (pre-commit hook). Extends the gitleaks default rules.
+# Allowlists name exact fake test values, or one rule in one file, so a real secret
+# anywhere else, tests included, is still caught.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake API keys used as test fixtures"
+regexTarget = "line"
+regexes = [
+  '''sk-live-abc123-SUPERSECRET''',
+  '''sk-live-ROTATED-xyz789''',
+  '''abcd1234efgh''',
+]
+
+[[allowlists]]
+description = "Truncated PEM fixtures for the private-key pattern tests"
+targetRules = ["private-key"]
+paths = ['''^tests/test_core_patterns\.py$''']
