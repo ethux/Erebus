@@ -16,6 +16,8 @@ CONNECTOR_TEXT = {
     "query": "query failed",
     "limit": "source rate limit reached",
     "incomplete": "sync incomplete",
+    # A setting only the connector can check (a malformed warehouse account id, say).
+    "settings": "source settings are not valid",
 }
 _FEATURE = re.compile(r"[a-z0-9_.-]{1,64}")
 
@@ -25,7 +27,8 @@ class ConnectorError(Exception):
 
     ``reset_at`` (``limit`` only) is when the source's limit resets, if it said so: a
     ``datetime`` or an ISO-8601 string. Use ``incomplete`` when a query was capped or
-    values were skipped, so the sync retires nothing.
+    values were skipped, so the sync retires nothing, and ``settings`` for a setting
+    value the connector refuses (fatal: an admin must fix it).
     """
 
     def __init__(self, kind: str, *, reset_at=None) -> None:

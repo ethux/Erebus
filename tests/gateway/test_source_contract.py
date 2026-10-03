@@ -2,7 +2,10 @@
 
 Pure. ``FieldInfo`` gains db type, nullable and primary key without breaking positional
 use; ``distinct_values`` uses a source's optional ``iter_distinct_values`` and otherwise
-de-duplicates ``iter_records`` (so SQLite and third-party connectors keep working); the
+de-duplicates ``iter_records`` (so SQLite and third-party connectors keep working);
+``distinct_groups`` reads several field groups of one collection through a source's
+optional ``iter_distinct_groups`` (one query per table) or group by group, within one
+limit; the
 worker loads entry points strictly (a broken plugin raises) while the laptop skips it;
 the built-in SQLite connector lives in ``erebus.cataloging.connectors`` and loads lazily.
 """
@@ -54,6 +57,13 @@ class _WithDistinct(_RecordsOnly):
         yield ("from-method",)
 
 
+class _WithGroups(_WithDistinct):
+    def iter_distinct_groups(self, collection, groups, limit):
+        self.asked.append(("groups", collection, tuple(map(tuple, groups)), limit))
+        yield (1, ("B",))
+        yield (0, ("a@x.example",))
+
+
 class _EP:
     def __init__(self, name, target):
         self.name = name
@@ -96,6 +106,26 @@ def test_distinct_values():
     check("a source's own iter_distinct_values is used",
           list(sources.distinct_values(method, "people", ["email"], 5)) == [("from-method",)])
     check("it gets the collection, fields and limit", method.asked == [("distinct", "people", ("email",), 5)])
+
+
+def test_distinct_groups():
+    rows = [{"email": "a@x.example", "name": "A"}, {"email": "a@x.example", "name": "A"},
+            {"email": "b@x.example", "name": "B"}]
+    plain = _RecordsOnly(rows)
+    got = list(sources.distinct_groups(plain, "people", [["email"], ["name"]], 10))
+    check("without iter_distinct_groups each group is read in turn, tagged by its index",
+          got == [(0, ("a@x.example",)), (0, ("b@x.example",)), (1, ("A",)), (1, ("B",))])
+    capped = _WithDistinct(rows)
+    got = list(sources.distinct_groups(capped, "people", [["email"], ["name"], ["email", "name"]], 2))
+    check("the limit is shared: a later group gets what is left", got == [(0, ("from-method",)), (1, ("from-method",))])
+    check("... and a group with nothing left is not read",
+          capped.asked == [("distinct", "people", ("email",), 2), ("distinct", "people", ("name",), 1)])
+    grouped = _WithGroups(rows)
+    got = list(sources.distinct_groups(grouped, "people", [["email"], ["name"]], 5))
+    check("a source's own iter_distinct_groups answers every group at once",
+          got == [(1, ("B",)), (0, ("a@x.example",))])
+    check("it is asked once, with every group and the limit",
+          grouped.asked == [("groups", "people", (("email",), ("name",)), 5)])
 
 
 def test_entry_points():
@@ -174,6 +204,7 @@ def main():
     print("source contract")
     test_field_info()
     test_distinct_values()
+    test_distinct_groups()
     test_entry_points()
     test_worker_loads_strictly()
     test_sqlite_lazy()

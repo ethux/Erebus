@@ -8,6 +8,7 @@ PermissionError naming the feature.
 """
 import os
 import sys
+from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
@@ -90,6 +91,10 @@ def _check_errors():
     check("a connector error carries its class", err.kind == "auth")
     check("its text is the fixed text", str(err) == CONNECTOR_TEXT["auth"] == "authentication failed")
     check("an unknown class is refused", _raises(ValueError, lambda: ConnectorError("oops")))
+    check("a connector may refuse its own settings with the worker's fixed text",
+          str(ConnectorError("settings")) == policy.ERROR_TEXT["settings"] == "source settings are not valid"
+          and policy.failure_outcome("settings", attempts=0, limited_since=None, now=datetime.now(UTC),
+                                     timings=policy.JobTimings()).needs_attention)
     limited = ConnectorError("limit", reset_at="2026-10-01T00:00:00Z")
     check("a limit error may carry its reset time", limited.reset_at == "2026-10-01T00:00:00Z")
     check("the connector texts are the job texts",

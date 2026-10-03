@@ -19,8 +19,8 @@ ERROR_TEXT = {
     "crypto_erased": "tenant keys erased",
     "lease": "worker lease expired",
     "internal": "internal error",
-    # Added by the sync worker (its checks run before any connector does).
-    "settings": "source settings are not valid",
+    # Added by the sync worker (its checks run before any connector does); "settings"
+    # comes from CONNECTOR_TEXT, as a connector may refuse a value too.
     "denied": "source address is not allowed",
     "unknown_type": "unknown connector type",
     "unsupported": "job kind not supported",

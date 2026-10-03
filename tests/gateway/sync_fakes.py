@@ -93,11 +93,29 @@ class FakeSource:
         self.owner.closed += 1
 
 
-class FakeConnector:
-    """A connector for ``type_id`` whose sources read ``tables``."""
+class GroupedSource(FakeSource):
+    """A FakeSource billed per query: every field group of a table in one call."""
 
-    def __init__(self, type_id: str, tables: dict[str, Table]) -> None:
+    def iter_distinct_groups(self, collection, groups, limit):
+        self._raise("groups", collection)
+        self.owner.calls.append(("groups", collection, tuple(map(tuple, groups)), limit))
+        out = []
+        for index, group in enumerate(groups):
+            seen = []
+            for row in self.owner.tables[collection].rows:
+                key = tuple(row.get(f) for f in group)
+                if key not in seen:
+                    seen.append(key)
+            out += [(index, key) for key in seen]
+        yield from out[:limit]
+
+
+class FakeConnector:
+    """A connector for ``type_id`` whose sources read ``tables`` (``grouped``: a GroupedSource)."""
+
+    def __init__(self, type_id: str, tables: dict[str, Table], *, grouped: bool = False) -> None:
         self.type_id = type_id
+        self.grouped = grouped
         self.tables = tables
         self.fail: dict[tuple[str, str], BaseException] = {}
         self.connects: list[tuple[dict, dict]] = []
@@ -113,7 +131,7 @@ class FakeConnector:
         exc = self.fail.get(("connect", "*"))
         if exc is not None:
             raise exc
-        return FakeSource(self)
+        return GroupedSource(self) if self.grouped else FakeSource(self)
 
 
 def lookup(*connectors: FakeConnector):

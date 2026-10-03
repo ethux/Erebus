@@ -121,6 +121,27 @@ def distinct_values(row_source: Any, collection: str, fields: list[str], limit: 
                 return
 
 
+def distinct_groups(row_source: Any, collection: str, groups: list[list[str]], limit: int
+                    ) -> Iterator[tuple[int, tuple]]:
+    """``(index into groups, distinct tuple)`` for each field group of ``collection``, at
+    most ``limit`` in total.
+
+    Uses the source's ``iter_distinct_groups`` (one query per table) when it has one;
+    otherwise reads each group through ``distinct_values`` with what is left of ``limit``.
+    """
+    method = getattr(row_source, "iter_distinct_groups", None)
+    if method is not None:
+        yield from method(collection, groups, limit)
+        return
+    left = limit
+    for index, group in enumerate(groups):
+        if left <= 0:
+            return
+        for row in distinct_values(row_source, collection, group, left):
+            left -= 1
+            yield index, row
+
+
 def register_connector(connector: SourceConnector, replace: bool = True) -> None:
     cid = connector.connector_id()
     if not replace and cid in _CONNECTORS:

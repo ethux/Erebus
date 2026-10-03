@@ -18,7 +18,8 @@ credentials decrypted (tenant key, AAD = source id).
 
 The worker contract with connectors, beyond ``erebus.sources``: a database connector
 may offer ``iter_distinct_values(collection, fields, limit)`` yielding tuples in
-``fields`` order (without it the worker de-duplicates ``iter_records``), connects to the
+``fields`` order (without it the worker de-duplicates ``iter_records``) and a warehouse
+``iter_distinct_groups`` (all accepted fields of a table in one query), connects to the
 ``hostaddr`` it is handed, and raises ``ConnectorError`` (``incomplete`` for a capped
 query or skipped values). Every write is fenced by the job's lease: a worker that lost
 it writes nothing.
@@ -159,15 +160,11 @@ def _sample(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source
     return counts
 
 
-def _field_values(rows_source: Any, collection: str, field: fields.SourceField, limit: int
-                  ) -> Iterator[str | None]:
-    """One item per distinct row returned: its value, or ``None`` for a row that gives none."""
-    parts = field.field.split("+")
-    for row in contract.distinct_values(rows_source, collection, parts, limit):
-        if len(parts) > 1:
-            yield field_rules.join_name(row[0], row[1:-1], row[-1])
-        else:
-            yield None if row[0] is None else str(row[0])
+def _value(field: fields.SourceField, row: tuple) -> str | None:
+    """A distinct row of ``field`` as one value (a name tuple joined), or ``None``."""
+    if "+" in field.field:
+        return field_rules.join_name(row[0], row[1:-1], row[-1])
+    return None if row[0] is None else str(row[0])
 
 
 def _bump_after_failure(ctx: Context, job: jobs.Job) -> None:
@@ -181,7 +178,8 @@ def _bump_after_failure(ctx: Context, job: jobs.Job) -> None:
 def _accepted_rows(ctx: Context, rows_source: Any, by_collection: dict[str, list[fields.SourceField]],
                    max_values: int) -> Iterator[tuple[str | None, str]]:
     """``(value or None, label)`` per distinct row of every accepted field; ``incomplete``
-    on a missing collection or column, or past ``max_values`` rows."""
+    on a missing collection or column, or past ``max_values`` rows. All accepted fields
+    of a collection are asked for at once (one query per table where the source can)."""
     present = {c.name for c in rows_source.list_collections()} if by_collection else set()
     rows = 0
     for collection, accepted in by_collection.items():
@@ -192,11 +190,12 @@ def _accepted_rows(ctx: Context, rows_source: Any, by_collection: dict[str, list
         for f in accepted:
             if not set(f.field.split("+")) <= columns or f.label is None:
                 raise JobFailed("incomplete")  # a skipped column: the sync is not complete
-            for value in _field_values(rows_source, collection, f, max_values - rows + 1):
-                rows += 1  # every row returned counts, or a capped query would pass as complete
-                if rows > max_values:
-                    raise JobFailed("incomplete")
-                yield value, f.label
+        groups = [f.field.split("+") for f in accepted]
+        for index, row in contract.distinct_groups(rows_source, collection, groups, max_values - rows + 1):
+            rows += 1  # every row returned counts, or a capped query would pass as complete
+            if rows > max_values:
+                raise JobFailed("incomplete")
+            yield _value(accepted[index], row), accepted[index].label
 
 
 def _full(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any, crypto) -> dict:

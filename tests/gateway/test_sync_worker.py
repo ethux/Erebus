@@ -5,7 +5,8 @@ several tenants are claimed oldest first and each runs under its own tenant's ke
 sample reads at most 1,000 rows per collection and writes the field decisions, then
 queues the full sync; a full sync reads distinct values per accepted field (name tuples
 joined), upserts and links them under the job id, retires what a complete sync no
-longer saw and bumps the catalog version; the loop heartbeats a long job and stops
+longer saw and bumps the catalog version; a source billed per query reads all
+accepted fields of a table in one call; the loop heartbeats a long job and stops
 cleanly. No value reaches a job row or an audit event.
 """
 import os
@@ -142,6 +143,26 @@ def _check_retire(conn, kms, worker, scope_id, source_id, pg):
     check("every remaining link carries this sync's id", stale == 0)
 
 
+def _check_grouped(conn, kms, pool):
+    scope_id = provision_scope(conn, kms, "tenant-grouped")
+    source_id = _source(conn, kms, scope_id, "warehouse")
+    wh = FakeConnector("postgres", {"customers": customers()}, grouped=True)
+    worker = Worker(config(_DSN), pool=pool, provider=kms, connectors=lookup(wh))
+    jobs.enqueue(conn, scope_id, source_id, "sample")
+    conn.commit()
+    _drain(worker)
+    grouped = [c for c in wh.calls if c[0] == "groups"]
+    check("a source billed per query reads every accepted field of a table in one call",
+          len(grouped) == 1 and not any(c[0] == "distinct" for c in wh.calls))
+    check("... with each field and name tuple as a group, under the source's cap",
+          set(grouped[0][2]) == {("email",), ("full_name",), ("first_name", "tussenvoegsel", "last_name")}
+          and grouped[0][3] == 1_000_001)
+    values = _values(conn, kms, scope_id)
+    check("grouped values are stored by their own field's label",
+          {"Zyx Qorbel", "zyx.qorbel@acme.example", "Jan de Vries", "Mila Brandt"} <= values
+          and "Jan" not in values and "Widget" not in values)
+
+
 def _check_heartbeat_and_loop(conn, kms, pool, pg):
     cfg = config(_DSN, EREBUS_SYNC_HEARTBEAT_S=1, EREBUS_SYNC_LEASE_S=3, EREBUS_SYNC_POLL_S=1)
     scope_id = provision_scope(conn, kms, "tenant-slow")
@@ -186,6 +207,7 @@ def main():
         _check_sample(conn, kms, a, sa, pg_a)
         _check_full(conn, kms, a, sa, pg_a)
         _check_retire(conn, kms, worker, a, sa, pg_a)
+        _check_grouped(conn, kms, pool)
         _check_heartbeat_and_loop(conn, kms, pool, FakeConnector("postgres", {"customers": customers()}))
     finally:
         pool.close()
