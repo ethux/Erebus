@@ -18,6 +18,7 @@ Key material is generated at run time; nothing here is a real credential.
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 import tomllib
 from importlib import metadata
@@ -180,4 +181,156 @@ class SnowflakeBackend:
             ("an account that cannot be reached", self.settings(), self.secrets(), "unreachable", [host],
              _Raising(snowflake.connector, "connect", errors.OperationalError(
                  msg=f"Could not connect to Snowflake backend after 2 attempt(s): {host}:443", errno=250001))),
+        ]
+
+
+_BQ_PROJECT = "erebus-test"
+_BQ_CRM = "erebus_contract_crm"
+_BQ_OTHER = "erebus_contract_other"
+_BQ_CAP = 10**9
+
+
+def service_account_key(**over) -> str:
+    """A made-up service-account key file (JSON text) with a fresh RSA key."""
+    import json
+    info = {"type": "service_account", "project_id": _BQ_PROJECT, "private_key_id": "zq-key-id",
+            "private_key": rsa_pem(), "client_email": f"erebus-sync@{_BQ_PROJECT}.iam.gserviceaccount.com",
+            "client_id": "1000000000000000000001", "token_uri": "https://oauth2.googleapis.com/token"}
+    return json.dumps({**info, **over})
+
+
+class BigQueryBackend:
+    """The goccy BigQuery emulator at ``EREBUS_TEST_BIGQUERY_EMULATOR`` (project ``erebus-test``).
+
+    The connector parses the credentials as in production; the client factory then talks
+    to the emulator anonymously and records the credentials it was handed.
+    """
+
+    name = "bigquery"
+    tier = "pro"
+    schemas = True
+    primary_key = False  # keys are unenforced metadata; INFORMATION_SCHEMA.COLUMNS names none
+    nullability = False  # the emulator reports every column nullable
+
+    def connector_type(self):
+        return declared_type(self.name)
+
+    def unavailable(self):
+        self.endpoint = os.environ.get("EREBUS_TEST_BIGQUERY_EMULATOR", "").rstrip("/")
+        if not self.endpoint:
+            return "EREBUS_TEST_BIGQUERY_EMULATOR is not set"
+        try:
+            self._client().list_datasets(timeout=5, retry=None, max_results=1)
+        except Exception as exc:
+            return f"no BigQuery emulator at EREBUS_TEST_BIGQUERY_EMULATOR ({type(exc).__name__})"
+        return None
+
+    def _client(self, endpoint=None):
+        from google.api_core.client_options import ClientOptions
+        from google.auth.credentials import AnonymousCredentials
+        from google.cloud import bigquery
+        return bigquery.Client(project=_BQ_PROJECT, credentials=AnonymousCredentials(),
+                               client_options=ClientOptions(api_endpoint=endpoint or self.endpoint))
+
+    def make_client(self, project, credentials, location, endpoint=None):
+        from google.api_core.client_options import ClientOptions
+        from google.auth.credentials import AnonymousCredentials
+        from google.cloud import bigquery
+        self.handed.append((project, credentials, location))
+        return bigquery.Client(project=project, location=location, credentials=AnonymousCredentials(),
+                               client_options=ClientOptions(api_endpoint=endpoint or self.endpoint))
+
+    def setup(self):
+        from google.cloud import bigquery
+
+        admin = self._client()
+        string = lambda n, mode="NULLABLE": bigquery.SchemaField(n, "STRING", mode=mode)
+        customers = [bigquery.SchemaField("id", "INT64", mode="REQUIRED"), string("email"),
+                     string("full_name", "REQUIRED"), string("first_name"), string("last_name"),
+                     bigquery.SchemaField("active", "BOOL"), bigquery.SchemaField("signup", "DATE"), string("notes")]
+        orders = [bigquery.SchemaField("id", "INT64"), string("product_name")]
+        for ds in (_BQ_CRM, _BQ_OTHER):
+            admin.delete_dataset(ds, delete_contents=True, not_found_ok=True)
+            admin.create_dataset(ds)
+            admin.create_table(bigquery.Table(f"{_BQ_PROJECT}.{ds}.orders", schema=orders))
+        admin.create_table(bigquery.Table(f"{_BQ_PROJECT}.{_BQ_CRM}.customers", schema=customers))
+        errors = admin.insert_rows_json(f"{_BQ_PROJECT}.{_BQ_CRM}.customers", [dict(zip(FIELDS, r, strict=True))
+                                                                               for r in ROWS])
+        errors += admin.insert_rows_json(f"{_BQ_PROJECT}.{_BQ_CRM}.orders", [{"id": 1, "product_name": "Widget"}])
+        if errors:
+            raise RuntimeError("could not load the BigQuery fixture")
+        self.admin = admin
+        self.handed = []
+        self.sent = []  # (sql, job config) per query the connector ran
+        self._stack = contextlib.ExitStack()
+        real = bigquery.Client.query
+        sent = self.sent
+
+        def recording(client, query, job_config=None, *args, **kwargs):
+            sent.append((query, job_config))
+            return real(client, query, job_config, *args, **kwargs)
+        bigquery.Client.query = recording
+        self._stack.callback(setattr, bigquery.Client, "query", real)
+        self.key = service_account_key()
+
+    def teardown(self):
+        self._stack.close()
+        for ds in (_BQ_CRM, _BQ_OTHER):
+            self.admin.delete_dataset(ds, delete_contents=True, not_found_ok=True)
+
+    def connector(self, entitlements=None, endpoint=None):
+        from erebus_pro.connectors.bigquery import BigQueryConnector
+        connector = BigQueryConnector(entitlements or licensed(["connectors.bigquery"]),
+                                      client_factory=lambda p, c, loc: self.make_client(p, c, loc, endpoint))
+        connector.retry_s = 2  # the emulator answers at once; a closed port should fail fast
+        return connector
+
+    def unlicensed(self):
+        return unlicensed_cases("connectors.bigquery")
+
+    def settings(self, **over):
+        # Named datasets: the emulator is shared, and it cannot read an empty dataset's INFORMATION_SCHEMA.
+        return {"project": _BQ_PROJECT, "max_bytes_billed": _BQ_CAP, "schemas": [_BQ_CRM, _BQ_OTHER], **over}
+
+    def secrets(self):
+        return {"service_account_key": self.key}
+
+    def collection(self, table):
+        return f"{_BQ_CRM}.{table}"
+
+    def statements(self, _source):
+        return [sql for sql, _config in self.sent]
+
+    def bad_cases(self):
+        import google.auth.exceptions
+        from google.api_core import exceptions
+        from google.cloud import bigquery
+
+        email = f"erebus-sync@{_BQ_PROJECT}.iam.gserviceaccount.com"
+        capped = exceptions.BadRequest(f"Query exceeded limit for bytes billed: {_BQ_CAP}. Zyx Qorbel",
+                                       errors=[{"reason": "bytesBilledLimitExceeded", "message": email}])
+        limited = exceptions.Forbidden(f"Exceeded rate limits for {email}",
+                                       errors=[{"reason": "rateLimitExceeded", "message": email}])
+        denied = exceptions.Forbidden(f"Access Denied: Project {_BQ_PROJECT}: User does not have permission {email}",
+                                      errors=[{"reason": "accessDenied", "message": email}])
+        rejected = google.auth.exceptions.RefreshError(f"invalid_grant: Invalid JWT Signature. {email}")
+        external = service_account_key(type="external_account")
+        return [
+            ("a malformed project id", self.settings(project="acme/evil.example"), self.secrets(), "settings",
+             ["evil.example", self.key]),
+            ("a byte cap that is not a positive number", self.settings(max_bytes_billed=0), self.secrets(),
+             "settings", [self.key]),
+            ("no credentials", self.settings(), {}, "auth", [email]),
+            ("a key that is not JSON", self.settings(), {"service_account_key": "not-json-Zq-77"}, "auth",
+             ["not-json-Zq-77"]),
+            ("an external account file instead of a service-account key", self.settings(),
+             {"service_account_key": external}, "auth", [email, external]),
+            ("a key Google rejects", self.settings(), self.secrets(), "auth", [email, self.key],
+             _Raising(bigquery.Client, "query", rejected)),
+            ("a project the account may not read", self.settings(), self.secrets(), "permission", [email, _BQ_PROJECT],
+             _Raising(bigquery.Client, "list_datasets", denied)),
+            ("a query over the byte cap", self.settings(), self.secrets(), "incomplete", [email, "Zyx", str(_BQ_CAP)],
+             _Raising(bigquery.Client, "query", capped)),
+            ("a rate limit", self.settings(), self.secrets(), "limit", [email], _Raising(bigquery.Client, "query",
+                                                                                         limited)),
         ]

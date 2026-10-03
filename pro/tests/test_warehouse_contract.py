@@ -23,11 +23,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import connector_contract
 from connector_contract import check
-from warehouse_backends import SnowflakeBackend, declared_entry_points
+from warehouse_backends import BigQueryBackend, SnowflakeBackend, declared_entry_points
 
 from erebus.cataloging import sources
 
-_CONNECTORS = {"snowflake": ("erebus_pro.connectors.snowflake:SnowflakeConnector", "snowflake.connector")}
+_CONNECTORS = {"snowflake": ("erebus_pro.connectors.snowflake:SnowflakeConnector", "snowflake.connector"),
+               "bigquery": ("erebus_pro.connectors.bigquery:BigQueryConnector", "google.cloud.bigquery")}
 
 
 def _registration():
@@ -45,7 +46,7 @@ def _registration():
 def main():
     print("\n=== Pro warehouse connector contract (spec 015 SC-6) ===\n")
     _registration()
-    for backend in (SnowflakeBackend,):
+    for backend in (SnowflakeBackend, BigQueryBackend):
         connector_contract.run(backend)
     print(f"\n{connector_contract.passed}/{connector_contract.passed} passed\n")
 
