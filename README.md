@@ -464,7 +464,10 @@ lists apply and `sslmode` works the same, except that there is no `prefer`. `hos
 DNS name or an IPv4 address; reach an IPv6-only server through its DNS name. The default
 `verify-full` checks the certificate against the system CAs and the name against `host`
 before the password is sent; add a private CA through `SSL_CERT_FILE` on the worker, or
-use `require` for a server with a self-signed certificate (SQL Server's default). With
+use `require` for a server with a self-signed certificate (SQL Server's default). On
+Azure SQL `verify-full` accepts the zone's wildcard certificate (`*.database.windows.net`,
+or its US Government or China cloud counterpart); elsewhere a SQL login needs a
+certificate that names the host, as wildcard certificates fail the check. With
 `disable` only the login packet is encrypted, and only if the server supports it.
 
 - SQL logins (`auth: sql`, the default) work out of the box: the driver, pymssql, ships
@@ -474,15 +477,17 @@ use `require` for a server with a self-signed certificate (SQL Server's default)
   Microsoft's mssql-python, which bundles the Microsoft ODBC Driver 18 under Microsoft's
   license terms; whoever installs it accepts them. Without it the source's syncs fail
   with `requires the erebus-pro[mssql-entra] extra`. Entra takes `sslmode` `verify-full`
-  or `require` only.
+  or `require` only. The connection names `host` as the server and dials the address
+  the worker checked through the ODBC driver's `Addr` keyword.
 
 Fields come from `INFORMATION_SCHEMA.COLUMNS` of `database` without system schemas;
 collections are `schema.table`. Each table is read in one query. SQL Server has no
 read-only session: the connector sends only reads and asks for read-only intent, so the
 read-only login is the guard. `text`, `ntext` and `(n)varchar(max)` values over 4,000
 characters are skipped. On Azure SQL, set the server's connection policy to Proxy so the
-session stays on the address the worker checked: with Redirect, Azure hands the client
-another node's address after sign-in.
+session stays on the address the worker checked: with Redirect (what the Default policy
+uses for clients inside Azure), Azure hands the client another node's address after
+sign-in, and both drivers follow it.
 
 Grant only the tables that hold customer data. On a warehouse the read-only role is the
 only guard:

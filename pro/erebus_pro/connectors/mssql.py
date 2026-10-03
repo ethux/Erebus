@@ -12,13 +12,14 @@ Like the free database connectors it dials the ``hostaddr`` the sync worker chec
 against its host lists, never a name it resolves itself, and keeps ``host`` for TLS.
 ``sslmode`` defaults to ``verify-full``: TLS required, the certificate verified against
 the system CAs (``SSL_CERT_FILE`` adds a private CA) and its name matched against
-``host`` before the password is sent. ``verify-ca`` skips the name, ``require`` the
-certificate; ``disable`` asks for no TLS (SQL Server still encrypts the login packet
-when it can). There is no ``prefer``. An Entra source takes only ``verify-full`` or
-``require``: the ODBC driver checks both chain and name, or neither. Azure SQL's
-``Redirect`` connection policy hands the client another node's address after sign-in,
-which the ODBC driver follows; the ``Proxy`` policy keeps the session on the address the
-worker checked.
+``host`` (on Azure SQL, against its zone's wildcard) before the password is sent.
+``verify-ca`` skips the name, ``require`` the certificate; ``disable`` asks for no TLS
+(SQL Server still encrypts the login packet when it can). There is no ``prefer``. An
+Entra source takes only ``verify-full`` or ``require``: the ODBC driver checks both chain
+and name, or neither. Azure SQL's ``Redirect`` connection policy (the default for
+clients inside Azure) hands the client another node's address after sign-in, and both
+drivers follow it (FreeTDS follows one such redirect); the ``Proxy`` policy keeps the
+session on the address the worker checked.
 
 Fields come from ``INFORMATION_SCHEMA.COLUMNS`` of ``database``, without the system and
 fixed-role schemas; collections are ``schema.table``. SQL Server has no read-only
