@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""Shared pieces of the Pro warehouse connectors.
+"""Shared pieces of the Pro warehouse connectors (and Oracle's).
 
 Collections are named ``schema.table`` (a BigQuery dataset is its schema). A connector
-reads the columns of every table it may see from INFORMATION_SCHEMA once, and only ever
+reads the columns of every table it may see from the catalog once, and only ever
 queries a table and columns that listing named, so every identifier it quotes came from
 the warehouse's own catalog. Settings that are identifiers are checked against a plain
 pattern before they reach the driver; nothing a setting holds is put into SQL.

@@ -345,7 +345,7 @@ with a token, also when detection would miss them. A connector only reads.
 
 | | Free | Erebus Pro |
 |---|---|---|
-| Sources | SQLite, Postgres, MySQL | also Snowflake and BigQuery (features `connectors.snowflake`, `connectors.bigquery`) |
+| Sources | SQLite, Postgres, MySQL | also Snowflake, BigQuery, Databricks and Oracle (features `connectors.snowflake`, `connectors.bigquery`, `connectors.databricks`, `connectors.oracle`) |
 | Syncs | a sample when a source is added or changed, then a full sync of the accepted fields; "sync now" | also scheduled syncs (feature `sync.schedule`) |
 
 Everything is managed through the admin API below, which only an operator credential
@@ -361,7 +361,7 @@ your health check window (about 80 seconds in the compose file).
 ### Sync worker
 
 `erebus-sync` reads the systems a tenant connects (SQLite, Postgres, MySQL; with Pro also
-Snowflake and BigQuery) and keeps
+Snowflake, BigQuery, Databricks and Oracle) and keeps
 that tenant's known values in step with them. It is the only process that contacts
 those systems. It runs from the same image (the `sync-worker` service in the compose
 file) and needs `EREBUS_PG_DSN` and `EREBUS_GATEWAY_MASTER_KEY`, not the provider
@@ -421,27 +421,45 @@ GRANT SELECT ON crm.customers TO 'erebus_sync'@'%';
 GRANT SELECT ON crm.contacts TO 'erebus_sync'@'%';
 ```
 
-### Connecting a warehouse (Pro)
+### Connecting a warehouse or Oracle (Pro)
 
-Needs erebus-pro (in the published image) and a license with `connectors.snowflake` or
-`connectors.bigquery` in the sync worker's environment. Without the feature the source's
-syncs fail with `requires Erebus Pro (feature connectors.<type>)`; its values keep matching.
+Needs erebus-pro (in the published image) and a license with `connectors.<type>`
+(`snowflake`, `bigquery`, `databricks` or `oracle`) in the sync worker's environment.
+Without the feature the source's syncs fail with
+`requires Erebus Pro (feature connectors.<type>)`; its values keep matching.
 
 | Type | Settings | Credentials |
 |------|----------|-------------|
 | `snowflake` | `account` (`orgname-account`), `user`, `database`, `warehouse`, `role`, `schemas`, `collections` | `private_key` (PEM), `private_key_passphrase` if it is encrypted |
 | `bigquery` | `project`, `location`, `max_bytes_billed`, `auth` (`key` or `attached`), `schemas` (datasets), `collections` | `service_account_key` (the JSON key file); none with `auth: attached` |
+| `databricks` | `server_hostname` (the workspace host), `http_path` (the SQL warehouse's, `/sql/1.0/warehouses/<id>`), `catalog`, `client_id` (the service principal's application id), `schemas`, `collections` | `client_secret` (an OAuth secret of the service principal) |
+| `oracle` | `host`, `port` (`1521`), `service_name`, `user`, `sslmode`, `auth` (`password` or `wallet`), `schemas`, `collections` | `password`; for mutual TLS also `wallet_pem` (the wallet's `ewallet.pem`) and `wallet_password`; only `wallet_pem` with `auth: wallet` |
 
-Neither takes a host: the driver derives it from the account or project, so the
-worker's host lists do not apply to them. Collections are `SCHEMA.TABLE` and
-`dataset.table`. Costs:
+Snowflake and BigQuery take no host: the driver derives it from the account or project.
+Databricks takes the workspace host, accepted only on Databricks' own domains
+(`cloud.databricks.com`, `azuredatabricks.net`, `gcp.databricks.com` and their
+government and China clouds), and only a SQL warehouse path. The worker's host lists do
+not apply to these three. Collections are `SCHEMA.TABLE`, `dataset.table` and
+`schema.table` (in `catalog`). Costs:
 
 - Snowflake: a sync resumes the warehouse, billed at least 60 seconds per resume.
 - BigQuery: each table is read in one query, billed at least 10 MB. `max_bytes_billed`
   caps every query on on-demand pricing (slot pricing ignores it); a capped query fails
   the sync and keeps every value. Sample rows come from the free table-read API.
+- Databricks: a sync wakes the SQL warehouse; Pro and classic warehouses bill at least
+  10 minutes per start. Each table is read in one query.
 
-The read-only role is the only guard on a warehouse:
+Oracle is a database the worker dials like Postgres: its host lists apply, and `sslmode`
+works the same (the default `verify-full` checks the certificate against the system CAs,
+or the wallet's, and the name against `host`), except that there is no `prefer`: Oracle
+serves TLS on its own port. With `disable` only the password exchange is protected. The
+driver runs in thin mode, so no Oracle Client is needed; it needs Oracle Database 12.1
+or later and does not support native network encryption or Kerberos. Fields come from
+`ALL_TAB_COLUMNS` without Oracle-maintained schemas; collections are `OWNER.TABLE`. Every
+read runs in a read-only transaction; CLOB values over 1,000 characters are skipped.
+
+Grant only the tables that hold customer data. On a warehouse the read-only role is the
+only guard:
 
 ```sql
 -- Snowflake: a service user with a key pair (openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt)
@@ -452,11 +470,24 @@ GRANT USAGE ON SCHEMA crm.public TO ROLE erebus_reader;
 GRANT SELECT ON TABLE crm.public.customers TO ROLE erebus_reader;
 CREATE USER erebus_sync TYPE = SERVICE DEFAULT_ROLE = erebus_reader RSA_PUBLIC_KEY = '<public key>';
 GRANT ROLE erebus_reader TO USER erebus_sync;
+
+-- Databricks (Unity Catalog), for the service principal's application id
+GRANT USE CATALOG ON CATALOG crm TO `<application-id>`;
+GRANT USE SCHEMA ON SCHEMA crm.sales TO `<application-id>`;
+GRANT SELECT ON TABLE crm.sales.customers TO `<application-id>`;
+
+-- Oracle
+CREATE USER erebus_sync IDENTIFIED BY "<password>";
+GRANT CREATE SESSION TO erebus_sync;
+GRANT SELECT ON crm.customers TO erebus_sync;
 ```
 
 BigQuery: give the service account BigQuery Job User on the project and BigQuery Data
 Viewer only on the datasets that hold customer data. `auth: attached` uses the identity
 attached to the worker (on GCP); workload identity federation is not supported yet.
+
+Databricks: give the service principal `CAN USE` on the SQL warehouse and create an
+OAuth secret for it (machine-to-machine); personal access tokens are not supported.
 
 ### Managing sources
 

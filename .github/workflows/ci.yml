@@ -90,6 +90,17 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 30
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart
+        env:
+          ORACLE_PASSWORD: oracle-ci-Zq7x
+        ports:
+          - "15210:1521"
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
     env:
       EREBUS_PG_DSN: postgresql://postgres:pg-ci-Zq9x@localhost:5432/postgres
       # The connector contract suite (SC-6) runs against this MySQL and fails without it.
@@ -99,6 +110,10 @@ jobs:
       EREBUS_TEST_BIGQUERY_EMULATOR: http://127.0.0.1:9050
       EREBUS_REQUIRE_BIGQUERY: "1"
       EREBUS_REQUIRE_SNOWFLAKE: "1"
+      # Oracle runs on this throwaway database; Databricks at the driver boundary (no emulator exists).
+      EREBUS_TEST_ORACLE_DSN: oracle://system:oracle-ci-Zq7x@127.0.0.1:15210/FREEPDB1
+      EREBUS_REQUIRE_ORACLE: "1"
+      EREBUS_REQUIRE_DATABRICKS: "1"
 
     steps:
       - name: Check out repository
