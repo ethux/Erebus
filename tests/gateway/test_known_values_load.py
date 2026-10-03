@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import psycopg
-from helpers import fresh_db, restricted_role
+from helpers import conn_dsn, fresh_db, restricted_role
 
 from erebus.gateway import catalog
 from erebus.gateway.connectors import sources
@@ -99,7 +99,7 @@ def main():
     except psycopg.OperationalError as exc:
         print(f"  (skipped: no Postgres: {exc})")
         return
-    dsn = conn.info.dsn
+    dsn = conn_dsn(conn)
     kms = LocalKms()
     try:
         a_id = provision_scope(conn, kms, "tenant-a")

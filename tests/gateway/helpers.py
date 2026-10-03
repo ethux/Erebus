@@ -33,7 +33,7 @@ import uuid
 from pathlib import Path
 
 import psycopg
-from psycopg import sql
+from psycopg import conninfo, sql
 
 # Defensive repo-root bootstrap so ``erebus.gateway.*`` imports resolve even when
 # a caller imported this module without first extending sys.path.
@@ -92,6 +92,16 @@ def _apply_all_tolerant(conn: psycopg.Connection) -> None:
                     conn.execute(stmt)
             except _DUPLICATE:
                 pass  # object already exists from a prior run
+
+
+def conn_dsn(conn: psycopg.Connection) -> str:
+    """The connection string of ``conn``, password included.
+
+    ``conn.info.dsn`` leaves the password out on purpose, so a pool or a second
+    connection built from it fails wherever the server requires one (CI does).
+    """
+    password = conn.info.password
+    return conninfo.make_conninfo(conn.info.dsn, password=password) if password else conn.info.dsn
 
 
 @contextlib.contextmanager

@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import psycopg
 from fastapi.testclient import TestClient
-from helpers import fresh_db
+from helpers import conn_dsn, fresh_db
 from psycopg_pool import ConnectionPool
 
 from erebus.core.patterns import TOKEN_RE
@@ -209,7 +209,7 @@ def main():
     except psycopg.OperationalError as exc:
         print(f"  (skipped: no Postgres: {exc})")
         return
-    dsn = conn.info.dsn
+    dsn = conn_dsn(conn)
     kms = LocalKms()
     pool = ConnectionPool(dsn, min_size=1, max_size=4, open=True)
     world = World(conn, kms)
