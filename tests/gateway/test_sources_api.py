@@ -40,9 +40,12 @@ _SECRET = "Zq-hunter2-secret"
 _NEW_SECRET = "Zq-rotated-secret"
 _ERASED = "Zyx Qorbel"
 _CONNECTOR_MODULES = ("erebus.cataloging.connectors", "erebus_pro.connectors", "pymysql", "psycopg2", "snowflake",
-                      "google.cloud", "google.auth", "fakesnow", "duckdb")
+                      "google.cloud", "google.auth", "fakesnow", "duckdb", "oracledb", "databricks")
 # Settings per type a Pro install adds (the gateway checks keys only).
-_PRO_SETTINGS = {"snowflake": {"account": "acme-zq", "database": "CRM"}, "bigquery": {"project": "acme-zq"}}
+_PRO_SETTINGS = {"snowflake": {"account": "acme-zq", "database": "CRM"}, "bigquery": {"project": "acme-zq"},
+                 "databricks": {"server_hostname": "dbc-zq.cloud.databricks.com", "catalog": "crm",
+                                "http_path": "/sql/1.0/warehouses/0123456789abcdef"},
+                 "oracle": {"host": "db.example", "service_name": "CRMPDB", "user": "reader"}}
 _passed = 0
 
 
