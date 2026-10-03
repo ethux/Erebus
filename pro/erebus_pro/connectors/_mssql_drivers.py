@@ -13,7 +13,11 @@ DNS names and IPv4 addresses of up to 230 characters. TLS: ``encryption = requir
 ``verify-*`` a copy of the system CA bundle as ``ca file``; for ``verify-full`` the
 certificate's name checked against ``host`` (``certificate hostname``, FreeTDS's
 ``HostNameInCertificate``). FreeTDS checks the name after the handshake and before it
-sends the login, so a wrong name never gets the password. ``FREETDSCONF`` points at that
+sends the login, so a wrong name never gets the password. The FreeTDS bundled with
+pymssql matches no wildcard certificate against a host name, and Azure SQL presents its
+zone's wildcard (``*.database.windows.net``), so for a host in one of Azure SQL's zones
+the name checked is that wildcard, as Microsoft recommends for ``HostNameInCertificate``;
+any other wildcard certificate fails the check. ``FREETDSCONF`` points at that
 file and ``TDSHOST``, ``TDSPORT``, ``TDSVER``, ``TDSDUMP``, ``TDSDUMPCONFIG`` and
 ``FREETDS`` are dropped from the environment, since FreeTDS reads them during ``dbopen``;
 connects are serialized and the file is emptied afterwards. Before it drops the port,
@@ -49,6 +53,7 @@ from . import _warehouse
 ENTRA_EXTRA = "erebus-pro[mssql-entra]"
 _TDS_ENV = ("TDSHOST", "TDSPORT", "TDSVER", "TDSDUMP", "TDSDUMPCONFIG", "FREETDS")
 _CA_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem")
+_AZURE_ZONES = ("database.windows.net", "database.usgovcloudapi.net", "database.chinacloudapi.cn")
 _LOCK = threading.Lock()
 _DIR: list[str] = []
 
@@ -94,6 +99,15 @@ def entra_kind(exc: BaseException, *, connecting: bool) -> str:
     return "query"
 
 
+def certificate_name(host: str) -> str:
+    """The name the server's certificate must carry: ``host``, or for a host in one of
+    Azure SQL's zones the zone's wildcard, which is what Azure SQL presents."""
+    for zone in _AZURE_ZONES:
+        if host.endswith("." + zone):
+            return "*." + zone
+    return host
+
+
 def _system_cas() -> str | None:
     """The system CA bundle (``SSL_CERT_FILE`` first, as OpenSSL reads it)."""
     paths = ssl.get_default_verify_paths()
@@ -132,7 +146,7 @@ def _configure(p: dict[str, Any]) -> str:
         lines.append(f"ca file = {os.path.join(where, 'ca.pem')}")
     lines.append(f"check certificate hostname = {'yes' if p['sslmode'] == 'verify-full' else 'no'}")
     if p["sslmode"] == "verify-full":
-        lines.append(f"certificate hostname = {p['host']}")
+        lines.append(f"certificate hostname = {certificate_name(p['host'])}")
     conf = os.path.join(where, "freetds.conf")
     _write(conf, "\n".join(lines) + "\n")
     for name in _TDS_ENV:

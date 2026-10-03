@@ -164,6 +164,60 @@ def _check_approved_path(ca):
         tmp.cleanup()
 
 
+def _certificate_hostname(settings):
+    """The ``certificate hostname`` FreeTDS would get for ``settings`` (None without one)."""
+    import pymssql
+    real, seen = pymssql.connect, []
+
+    def capture(**_kw):
+        text = Path(os.environ["FREETDSCONF"]).read_text(encoding="utf-8")
+        seen.append(dict(line.split(" = ", 1) for line in text.splitlines() if " = " in line))
+        raise pymssql.OperationalError((20009, b"DB-Lib error message 20009, severity 9:\nUnable to connect\n"))
+    pymssql.connect = capture
+    try:
+        _connect({"hostaddr": "127.0.0.1", **settings})
+    finally:
+        pymssql.connect = real
+    return seen[0].get("certificate hostname")
+
+
+def _check_azure_zones(ca):
+    """FreeTDS (as bundled with pymssql) matches no wildcard certificate against a host name,
+    and Azure SQL presents ``*.database.windows.net``: for Azure SQL's zones the name checked
+    is the zone's wildcard, as Microsoft recommends for HostNameInCertificate."""
+    for zone in ("database.windows.net", "database.usgovcloudapi.net", "database.chinacloudapi.cn"):
+        check(f"verify-full on a host under {zone} checks the certificate against *.{zone}",
+              _certificate_hostname({"host": f"zqserver.{zone}"}) == f"*.{zone}")
+    check("... only under the zone: the zone itself or a look-alike is checked as given",
+          _certificate_hostname({"host": "database.windows.net"}) == "database.windows.net"
+          and _certificate_hostname({"host": "zq.database.windows.net.zq.test"}) == "zq.database.windows.net.zq.test"
+          and _certificate_hostname({"host": "zqdatabase.windows.net"}) == "zqdatabase.windows.net")
+    check("... and verify-ca checks no name", _certificate_hostname({"host": "zqserver.database.windows.net",
+                                                                     "sslmode": "verify-ca"}) is None)
+    tmp = tempfile.TemporaryDirectory()
+    ca_file = os.path.join(tmp.name, "ca.pem")
+    Path(ca_file).write_text(ca.pem, encoding="utf-8")
+    cases = [("zqserver.database.windows.net", "*.database.windows.net", True),
+             ("zqmi.zq123.database.windows.net", "*.zq123.database.windows.net", True),
+             ("zqserver.database.windows.net", "zqserver.database.windows.net", True),
+             ("zqserver.database.windows.net", "*.windows.net", False),
+             ("zqserver.database.windows.net", "zqserver.database.windows.net.zq.test", False),
+             ("zqserver.database.windows.net", "db.zq.test", False),
+             ("db.zq.test", "*.zq.test", False)]
+    try:
+        with _env(SSL_CERT_FILE=ca_file):
+            for host, name, accepted in cases:
+                with tds_listener(ca, name) as (port, events):
+                    kind = _connect({"host": host, "hostaddr": "127.0.0.1", "port": port})
+                    logins = [d for e, d in _seen(events, True) if e == "login"]
+                check(f"verify-full, host {host}, certificate {name}: "
+                      + ("the password is sent, the login naming the host" if accepted else "no password"),
+                      kind == "unreachable" and (logins == [] if not accepted
+                                                 else len(logins) == 1 and logins[0]["server"] == host))
+    finally:
+        tmp.cleanup()
+
+
 def main():
     print("\n=== MSSQL hosts and the address pymssql dials (spec 015) ===\n")
     try:
@@ -178,6 +232,7 @@ def main():
     _check_unapproved_addresses(ca)
     _check_freetds_directory(ca)
     _check_approved_path(ca)
+    _check_azure_zones(ca)
     print(f"\n{_passed}/{_passed} passed\n")
 
 
