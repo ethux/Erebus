@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Erebus Pro: scheduled syncs (feature `sync.schedule`). Every source gets a daily full
   sync, changed or turned off with `PUT .../sources/{id}/schedule`.
 
+### Fixed
+- Fresh installs pulled `transformers` 5, which cannot load the GLiNER model's tokenizer,
+  so names went undetected. `transformers` is now pinned below 5 and `protobuf` is a
+  dependency. If you installed or updated since 30 September, run `erebus-update`.
+
+## [1.1.0-beta.3] - 2026-09-30
+
 ### Security
 - Gateway: a tenant credential could claim an admin role and use the admin routes (audit,
   keys, reveal, provisioning, onboarding, revocation, `/metrics`). Admin access now comes
@@ -42,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back as valid JSON with the real values.
 - Gateway: a token split across two streamed chunks reached the client unrestored, in the
   content and in tool-call arguments. It is now held back until it completes.
+- Gateway: the deprecated OpenAI `function_call` field on requests was not filtered. It now
+  goes through the same filter as `tool_calls`.
 
 ### Changed
 - `/readyz` reports `"detection": "regex-only"` instead of `"disabled"` when GLiNER is off.

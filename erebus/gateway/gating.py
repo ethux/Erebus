@@ -109,6 +109,9 @@ def _gate_messages(tok: Tokenizer, policy: dict[str, Decision], mode: str, paylo
         for call in msg.get("tool_calls") or []:  # tool-call arguments never bypass the gate
             if isinstance(call, dict):
                 gate_part(tok, call, mode, policy)
+        fc = msg.get("function_call")
+        if isinstance(fc, dict):  # deprecated OpenAI field: same gate, its name stays verbatim
+            _gate_call(tok, {"function": fc}, mode)
 
 
 def tokenize_payload(key_provider: KeyProvider, detector: Detector, policy: dict[str, Decision],
