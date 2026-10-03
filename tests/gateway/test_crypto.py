@@ -44,6 +44,12 @@ def main() -> None:
     # Round trip within a scope.
     nonce, ct = a.encrypt(b"Jan Modaal")
     check("round-trip decrypt returns plaintext", a.decrypt(nonce, ct) == b"Jan Modaal")
+    dec = a.decryptor()
+    check("the bulk decryptor returns the plaintext", dec(nonce, ct) == b"Jan Modaal")
+    n2, ct2 = a.encrypt(b"Zyx Qorbel", b"aad")
+    check("the bulk decryptor honours the AAD", dec(n2, ct2, b"aad") == b"Zyx Qorbel")
+    check("the bulk decryptor rejects a wrong AAD", raises(lambda: dec(n2, ct2, b"other")))
+    check("the bulk decryptor of another scope fails", raises(lambda: b.decryptor()(nonce, ct)))
 
     # SC-004: another scope cannot decrypt scope A's ciphertext.
     check("cross-scope decrypt fails (SC-004)", raises(lambda: b.decrypt(nonce, ct)))

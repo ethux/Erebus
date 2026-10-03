@@ -35,6 +35,8 @@ EXPOSE 8080
 RUN useradd --create-home --uid 10001 erebus
 USER erebus
 
+# The same image runs the sync worker with `--entrypoint erebus-sync` (see docker-compose.yml);
+# it needs EREBUS_PG_DSN and EREBUS_GATEWAY_MASTER_KEY only.
 # `erebus-gateway` -> erebus.gateway.server:main (config validation + dependency probe,
 # idempotent migrations, then uvicorn). Required env must be supplied at run time.
 ENTRYPOINT ["erebus-gateway"]

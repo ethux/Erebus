@@ -16,6 +16,16 @@ dependencies = ["cryptography>=43"]
 [project.entry-points."erebus.gateway.extensions"]
 pro = "erebus_pro.gateway:register"
 
+[project.entry-points."erebus.worker.extensions"]
+pro = "erebus_pro.scheduler:register"
+
+[project.entry-points."erebus.schema"]
+pro = "erebus_pro.schema:SCHEMA_DIR"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["erebus_pro*"]
+
+[tool.setuptools.package-data]
+# Core reads the Pro migrations from the installed package.
+"erebus_pro.schema" = ["*.sql"]

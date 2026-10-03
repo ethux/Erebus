@@ -5,6 +5,24 @@ All notable changes to Erebus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Gateway connectors: connect a tenant's SQLite, Postgres or MySQL databases and the
+  names, emails, phone numbers and addresses in them are always tokenized, also when
+  detection misses them. A new `erebus-sync` worker (the `sync-worker` compose service)
+  samples each source, maps its fields and syncs their distinct values; fields it cannot
+  place wait for review. Sources, field decisions, "sync now" and erasure are managed
+  through operator-only admin routes under `/v1/admin/scopes/{scope_id}`. Use a
+  read-only database account; the README has the SQL.
+- Erebus Pro: scheduled syncs (feature `sync.schedule`). Every source gets a daily full
+  sync, changed or turned off with `PUT .../sources/{id}/schedule`.
+
+### Fixed
+- Fresh installs pulled `transformers` 5, which cannot load the GLiNER model's tokenizer,
+  so names went undetected. `transformers` is now pinned below 5 and `protobuf` is a
+  dependency. If you installed or updated since 30 September, run `erebus-update`.
+
 ## [1.1.0-beta.3] - 2026-09-30
 
 ### Security

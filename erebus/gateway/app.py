@@ -6,7 +6,8 @@ concurrency slot -> fail-closed quota reservation -> gate every message part
 forward token-only -> restore (streamed or whole) -> audit. Governed routes (operator
 credential only, 010; handlers in :mod:`.admin`): /v1/reveal (+ grant + rate-limited),
 GET /v1/audit, POST /v1/admin/keys, POST /v1/admin/scopes, POST/DELETE /v1/admin/tenants,
-POST /v1/admin/operators, GET /metrics.
+POST /v1/admin/operators, GET /metrics; source routes under /v1/admin/scopes/{scope_id}
+(:mod:`.sources_api`).
 
 Every database operation runs through :func:`_db`, which checks out its own
 connection (from the pool when one is supplied) so concurrent requests across
@@ -24,6 +25,7 @@ import anyio
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from . import sources_api
 from .admin import (
     _handle_audit_query,
     _handle_issue_operator,
@@ -46,7 +48,10 @@ from .deps import (
     ShutdownHook,
 )
 from .detection import DetectionUnavailable
+from .facade import ErebusFacade
 from .gating import BlockedModality, EdgeRawError, restore_payload, tokenize_payload
+from .known_value_registry import LOADING, MatcherRegistry
+from .known_values import KnownValueMatcher
 from .modalities import Decision
 from .observability import Metric, Metrics
 from .overload import Limiter
@@ -56,6 +61,7 @@ from .runtime import (
     _audit,
     _auth,
     _db,
+    _known_matcher,
     _record,
     _release,
     _reserve_or_429,
@@ -68,10 +74,15 @@ from .tokenizer import Detector
 from .transport import EgressDenied
 
 
-async def _sanitize_or_fail(deps: GatewayDeps, scope_id: uuid.UUID, mode: str, payload: dict) -> dict:
+async def _sanitize_or_fail(deps: GatewayDeps, scope_id: uuid.UUID, mode: str, payload: dict,
+                            matcher: KnownValueMatcher | None = None) -> dict:
+    def on_known(n: int) -> None:
+        _record(deps, scope_id, Metric.KNOWN_VALUE_MATCHES, n)
+
     try:
         return await _db(deps, lambda c: tokenize_payload(
-            deps.key_provider, deps.detector, deps.modality_policy, c, scope_id, mode, payload))
+            deps.key_provider, deps.detector, deps.modality_policy, c, scope_id, mode, payload,
+            matcher=matcher, on_known=on_known))
     except EdgeRawError as exc:
         await _audit(deps, scope_id, "chat", "edge_raw_blocked")
         raise HTTPException(status_code=400, detail="edge payload contains raw PII") from exc
@@ -112,8 +123,10 @@ async def _handle_chat(deps: GatewayDeps, authorization: str | None, payload: di
     scope_key, scope_id = await _auth(deps, authorization)
     with _admit(deps, scope_key):  # per-tenant graceful-overload admission (FR-047/FR-010)
         async with _slot(deps, scope_key):
+            matcher = await _known_matcher(deps, scope_id, "chat")  # 503 before quota (spec 015)
             await _reserve_or_429(deps, scope_id, "chat")
-            sanitized = await _sanitize_or_fail(deps, scope_id, deps.modes.get(scope_key, "gateway"), payload)
+            sanitized = await _sanitize_or_fail(deps, scope_id, deps.modes.get(scope_key, "gateway"), payload,
+                                                matcher)
             upstream = await _egress(deps, scope_id, sanitized)  # token-only egress (FR-001/003)
             try:
                 restored = await _db(deps, lambda c: restore_payload(
@@ -131,8 +144,10 @@ async def _handle_chat_stream(deps: GatewayDeps, authorization: str | None, payl
     admission = _admit(deps, scope_key)  # shed 503 before any work if the tenant is saturated
     admission.__enter__()
     try:
+        matcher = await _known_matcher(deps, scope_id, "chat_stream")
         await _reserve_or_429(deps, scope_id, "chat_stream")
-        sanitized = await _sanitize_or_fail(deps, scope_id, deps.modes.get(scope_key, "gateway"), payload)
+        sanitized = await _sanitize_or_fail(deps, scope_id, deps.modes.get(scope_key, "gateway"), payload,
+                                            matcher)
         conn = await _acquire(deps)  # held for the stream: store.lookup runs on it
     except BaseException:
         admission.__exit__(None, None, None)
@@ -188,7 +203,8 @@ def create_app(*, conn=None, key_provider: KeyProvider, detector: Detector,
                detector_posture: DetectorPosture | None = None,
                metrics: Metrics | None = None, metrics_enabled: bool = False,
                limiter: Limiter | None = None,
-               on_shutdown: ShutdownHook | None = None) -> FastAPI:
+               on_shutdown: ShutdownHook | None = None,
+               known_values: MatcherRegistry | None = None) -> FastAPI:
     """Build the gateway app; route handlers live at module level for clarity.
 
     Supply ``pool`` (a psycopg_pool ConnectionPool) for real concurrency: each
@@ -206,6 +222,10 @@ def create_app(*, conn=None, key_provider: KeyProvider, detector: Detector,
     fairness. ``on_shutdown`` is an async hook run by the FastAPI lifespan after the
     service stops accepting new work, so the server can drain its pool + httpx client
     (FR-015). All four are optional and opt-in, so 007/US1-3 wiring is unchanged.
+
+    ``known_values`` (a :class:`~erebus.gateway.known_value_registry.MatcherRegistry`)
+    turns on known-value matching (spec 015): a tenant without a matcher gets 503, and
+    ``/readyz`` waits for the builder's first pass.
     """
     deps = GatewayDeps(conn, key_provider, detector,
                        provider_call if provider_call is not None else _no_provider_call,
@@ -213,8 +233,10 @@ def create_app(*, conn=None, key_provider: KeyProvider, detector: Detector,
                        pool, modality_policy or {},
                        egress=egress, egress_stream=egress_stream,
                        kms_health=kms_health, detector_posture=detector_posture,
-                       metrics=metrics, metrics_enabled=metrics_enabled, limiter=limiter)
+                       metrics=metrics, metrics_enabled=metrics_enabled, limiter=limiter,
+                       known_values=known_values)
     app = FastAPI(title="Erebus Gateway", lifespan=_make_lifespan(on_shutdown))
+    app.state.erebus = ErebusFacade(deps)  # the seams extensions use (spec 015 D6)
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -263,6 +285,8 @@ def create_app(*, conn=None, key_provider: KeyProvider, detector: Detector,
             body = await request.json()
         return await _handle_issue_operator(deps, authorization, body if isinstance(body, dict) else {})
 
+    sources_api.register(app, deps)  # /v1/admin/scopes/{scope_id}/... (spec 015)
+
     if metrics_enabled and metrics is not None:
         @app.get("/metrics")
         async def metrics_route(authorization: str | None = Header(default=None)) -> dict:
@@ -295,7 +319,8 @@ def _make_lifespan(on_shutdown: ShutdownHook | None):
 
 def _state_ready(conn) -> bool:
     try:
-        conn.execute("SELECT 1")
+        with conn.transaction():  # a pooled connection goes back idle, not INTRANS
+            conn.execute("SELECT 1")
         return True
     except Exception:
         return False
@@ -309,6 +334,10 @@ async def _readyz(deps: GatewayDeps) -> dict:
     state-only readiness keeps working when the custody/detection probes are absent.
     Detection ``regex-only`` is a deliberate, healthy posture (ready); only ``degraded``
     is not-ready. Any probe failure -> 503 so a load balancer drains the replica.
+
+    Known values (spec 015) add ``known_values``: 503 only while ``loading`` (before the
+    builder's first pass); a failed rebuild is ``degraded`` but ready, since the old
+    matcher keeps serving and every replica would fail the same way.
     """
     try:
         state_ok = await _db(deps, _state_ready)
@@ -333,4 +362,9 @@ async def _readyz(deps: GatewayDeps) -> dict:
             posture = "degraded"
         if posture == "degraded":
             raise HTTPException(status_code=503, detail="detection unavailable")
-    return {"status": "ready", "detection": posture}
+    body = {"status": "ready", "detection": posture}
+    if deps.known_values is not None:
+        body["known_values"] = deps.known_values.state()
+        if body["known_values"] == LOADING:
+            raise HTTPException(status_code=503, detail="known values loading")
+    return body

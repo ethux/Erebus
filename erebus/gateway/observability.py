@@ -36,6 +36,9 @@ class Metric(StrEnum):
     OVER_TOKENIZATIONS = "over_tokenizations"
     ESCAPES = "escapes"
     QUOTA_REJECTIONS = "quota_rejections"
+    KNOWN_VALUE_MATCHES = "known_value_matches"
+    KNOWN_VALUE_REBUILDS = "known_value_rebuilds"
+    KNOWN_VALUE_REBUILD_FAILURES = "known_value_rebuild_failures"
 
 
 # Fixed order used for every snapshot so each scope's telemetry has a stable,

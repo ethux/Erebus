@@ -1,31 +1,29 @@
 """Retention purge with deletion evidence tests (FR-033).
 
-Self-contained: creates its own database, applies ONLY 0001_core + 0013_retention
-(reading both files directly so it does not race concurrently-written migrations),
+Self-contained: creates its own database, applies every gateway migration,
 provisions scopes, inserts aged + fresh token_maps rows, and verifies purge_expired
-removes only the aged rows, leaves fresh ones, writes a correct non-PII evidence
-row (no token text / plaintext), and respects per-tenant isolation (FR-005/033/041..043).
+removes only the aged rows, leaves fresh ones and the tokens of active known values
+(spec 015: a known value keeps its token), writes a correct non-PII evidence row (no
+token text / plaintext), and respects per-tenant isolation (FR-005/033/041..043).
 """
 import os
 import subprocess
 import sys
 import uuid
-from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 import psycopg
-from psycopg import errors as pg_errors
 
+from erebus.gateway.catalog import add_known_value
 from erebus.gateway.crypto.keyprovider import LocalKms
 from erebus.gateway.governance.retention import purge_expired
-from erebus.gateway.store.db import _statements
+from erebus.gateway.store import db
 from erebus.gateway.store.known_value_store import open_store, provision_scope
 from erebus.gateway.store.scope_context import scoped
 
 _DBNAME = "erebus_gw_retention"
 _DSN = os.environ.get("EREBUS_PG_DSN", f"postgresql:///{_DBNAME}")
-_SCHEMA = Path(__file__).resolve().parents[2] / "erebus" / "gateway" / "schema"
 _passed = 0
 
 
@@ -35,20 +33,6 @@ def check(name, cond):
         raise AssertionError(name)
     print(f"  ✓ {name}")
     _passed += 1
-
-
-def _apply(conn, filename):
-    """Apply a schema file statement-by-statement, idempotently for re-runs.
-
-    CREATE POLICY/ENABLE RLS are not ``IF NOT EXISTS``-guarded in 0001_core, so on
-    a second run we swallow the duplicate-object/table errors via a savepoint.
-    """
-    for stmt in _statements((_SCHEMA / filename).read_text()):
-        try:
-            with conn.transaction():
-                conn.execute(stmt)
-        except (pg_errors.DuplicateObject, pg_errors.DuplicateTable):
-            pass
 
 
 def _insert_aged(conn, store, scope_id, value, label, age_seconds):
@@ -78,8 +62,7 @@ def main():
         return
     conn.autocommit = False
     try:
-        _apply(conn, "0001_core.sql")
-        _apply(conn, "0013_retention.sql")
+        db.run_migrations(conn)
         with conn.transaction():
             conn.execute("TRUNCATE scopes CASCADE")
 
@@ -146,6 +129,17 @@ def main():
                 (a_id,),
             ).fetchone()[0]
         check("label-scoped evidence records the category", cat == "EMAIL")
+
+        # Known values keep their token: an aged token of an active catalog entry
+        # survives; once the entry is retired it ages out like any other.
+        kept = _insert_aged(conn, store_a, a_id, "Zyx Qorbel", "PERSON", 90 * 24 * 3600)
+        entry = add_known_value(conn, store_a._crypto, a_id, "Zyx Qorbel", "PERSON")
+        purge_expired(conn, a_id, older_than_seconds=3600)
+        check("an active known value's token survives the purge", store_a.lookup(kept) == "Zyx Qorbel")
+        with scoped(conn, a_id):
+            conn.execute("UPDATE catalog_entries SET status = 'retired' WHERE id = %s", (entry,))
+        purge_expired(conn, a_id, older_than_seconds=3600)
+        check("a retired known value's token ages out", store_a.lookup(kept) is None)
 
         print(f"\n{_passed}/{_passed} passed\n")
     finally:

@@ -20,6 +20,20 @@ PURE_TESTS=(
   extensions
   detection_merge
   detection_adapter
+  core_boundary
+  connector_policy
+  field_rules_laptop
+  field_rules
+  known_values
+  known_values_bench
+  known_value_gate
+  known_value_registry
+  redact
+  connector_types
+  sync_policy
+  worker_extensions
+  source_contract
+  sources_body
 )
 
 modules_missing() {

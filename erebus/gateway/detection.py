@@ -26,7 +26,6 @@ clean text is never mistaken for a degraded one.
 """
 from __future__ import annotations
 
-import bisect
 import re
 from collections.abc import Callable
 
@@ -34,8 +33,9 @@ from erebus.core import detect as core_detect
 from erebus.core import patterns as core_patterns
 from erebus.core import state as core_state
 
+from .spans import Span, merge_spans
+
 Detector = Callable[[str], "list[tuple[int, int, str]]"]  # (start, end, label)
-Span = tuple[int, int, str]
 
 # Posture values surfaced in readiness/telemetry (FR-007).
 AVAILABLE = "available"
@@ -79,23 +79,11 @@ def _normalize_label(label: str) -> str:
 def _merge(regex: list[Span], ner: list[Span], text: str) -> list[Span]:
     """Resolve overlaps once: longest span first, ties to regex, never over an existing token.
 
-    Existing tokens are pre-placed as blockers, so a span touching one is dropped (core's
-    ``_overlaps_token_region`` rule). Every span comes from the original text, unlike
-    core's sequential ``re.sub``, so no token is ever minted around another token: the
-    gateway's single-pass restore could not unwrap it. Returns disjoint spans by start.
+    Every span comes from the original text, unlike core's sequential ``re.sub``, so no
+    token is ever minted around another token: the gateway's single-pass restore could not
+    unwrap it. Returns disjoint spans by start.
     """
-    kept: list[tuple[int, int, str | None]] = [
-        (m.start(), m.end(), None) for m in core_patterns.TOKEN_RE.finditer(text)]
-    starts = [start for start, _end, _label in kept]
-    ranked = sorted([(span, 0) for span in regex] + [(span, 1) for span in ner],
-                    key=lambda item: (item[0][0] - item[0][1], item[1], item[0][0]))
-    for (start, end, label), _source in ranked:
-        i = bisect.bisect_left(starts, start)
-        if end <= start or (i and kept[i - 1][1] > start) or (i < len(kept) and kept[i][0] < end):
-            continue
-        starts.insert(i, start)
-        kept.insert(i, (start, end, label))
-    return [(start, end, label) for start, end, label in kept if label is not None]
+    return merge_spans(regex, ner, text)
 
 
 def _regex_spans(text: str) -> list[Span]:
@@ -203,3 +191,13 @@ def build_detector(config) -> Detector:
     if getattr(config, "detection_disabled", False):
         return _RegexOnlyDetector()
     return _CompositeDetector()
+
+
+def build_model_reviewer() -> Detector:
+    """GLiNER alone, fail-closed: the sync worker's model review of sampled fields (spec 015).
+
+    Regex is left out on purpose: the field rules already match emails and phone numbers,
+    and "model flagged" must mean a model hit. Raises ``DetectionUnavailable`` while
+    GLiNER is down, which fails the sample job for a retry.
+    """
+    return _CoreDetector()

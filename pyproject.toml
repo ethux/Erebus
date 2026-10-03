@@ -48,11 +48,14 @@ gateway = [
     "psycopg-pool>=3.2",
     "httpx>=0.27",
     "cryptography>=43",
+    "pyahocorasick>=2.1",
+    "PyMySQL>=1.1",
 ]
 
 [project.scripts]
 erebus = "erebus.shim:main"
 erebus-gateway = "erebus.gateway.server:main"
+erebus-sync = "erebus.sync.cli:main"
 erebus-codex = "erebus.codex_shim:main"
 erebus-setup = "erebus.setup:main_install"
 erebus-update = "erebus.setup:main_update"
@@ -68,6 +71,10 @@ erebus-benchmark = "erebus.commands.benchmark:main"
 erebus-loc = "erebus.audit.loc:main"
 erebus-catalog = "erebus.commands.catalog:main"
 erebus-check-file = "erebus.commands.check_file:main"
+
+[project.entry-points."erebus.sources"]
+postgres = "erebus.cataloging.connectors.postgres:PostgresConnector"
+mysql = "erebus.cataloging.connectors.mysql:MySQLConnector"
 
 [tool.setuptools.packages.find]
 where = ["."]

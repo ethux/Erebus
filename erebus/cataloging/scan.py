@@ -1,72 +1,17 @@
 """Source scanning and PII discovery for the local catalog."""
 from __future__ import annotations
 
-import re
 from typing import Any
 
+from . import field_rules
 from . import sources as source_plugins
 from . import store as catalog
 
-_EMAIL_RE = re.compile(r"(?i)^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$")
-_PHONE_RE = re.compile(r"^\+?[\d\s().-]{7,}$")
-
-_ROLE_TO_CATEGORY = {
-    "email": "EMAIL_ADDRESS",
-    "phone": "PHONE_NUMBER",
-    "mobile": "PHONE_NUMBER",
-    "person": "PERSON",
-    "name": "PERSON",
-    "first_name": "PERSON",
-    "last_name": "PERSON",
-    "address": "ADDRESS",
-    "identifier": "IDENTIFIER",
-}
-
-_LABEL_TO_CATEGORY = {
-    "PERSON": "PERSON",
-    "EMAIL_ADDRESS": "EMAIL_ADDRESS",
-    "PHONE_NUMBER": "PHONE_NUMBER",
-    "ADDRESS": "ADDRESS",
-    "ORGANIZATION": "ORGANIZATION",
-    "USERNAME": "USERNAME",
-    "DATE_OF_BIRTH": "DATE_OF_BIRTH",
-    "BANK_ACCOUNT_NUMBER": "BANK_ACCOUNT_NUMBER",
-    "PASSPORT_NUMBER": "PASSPORT_NUMBER",
-    "SOCIAL_SECURITY_NUMBER": "SOCIAL_SECURITY_NUMBER",
-    "IBAN": "IBAN",
-}
-
-
-def _category_from_field(field_name: str, pii_hint: str = "") -> tuple[str | None, str]:
-    hint = pii_hint.lower().strip()
-    if hint in _ROLE_TO_CATEGORY:
-        return _ROLE_TO_CATEGORY[hint], f"connector hint: {hint}"
-    lower = field_name.lower()
-    if "email" in lower:
-        return "EMAIL_ADDRESS", "field name"
-    if "phone" in lower or "mobile" in lower:
-        return "PHONE_NUMBER", "field name"
-    if lower in ("name", "first_name", "last_name", "full_name") or lower.endswith("_name"):
-        return "PERSON", "field name"
-    if "address" in lower or "street" in lower:
-        return "ADDRESS", "field name"
-    if "account" in lower or lower.endswith("_id"):
-        return "IDENTIFIER", "field name"
-    return None, ""
-
-
-def classify_value(field_name: str, value: Any, pii_hint: str = "") -> tuple[str | None, str, str]:
-    text = "" if value is None else str(value).strip()
-    if not text:
-        return None, "low", ""
-    if _EMAIL_RE.match(text):
-        return "EMAIL_ADDRESS", "deterministic", "email pattern"
-    if _PHONE_RE.match(text) and len(re.sub(r"\D", "", text)) >= 7:
-        return "PHONE_NUMBER", "deterministic", "phone pattern"
-    category, reason = _category_from_field(field_name, pii_hint)
-    if category:
-        return category, "deterministic", reason
-    return None, "low", ""
+# The laptop rule set lives in the pure field_rules module; these names keep the
+# editor scan's entry points.
+_LABEL_TO_CATEGORY = field_rules.LAPTOP_LABEL_TO_CATEGORY
+_category_from_field = field_rules.laptop_category_from_field
+classify_value = field_rules.laptop_classify_value
 
 
 def model_assisted_findings(value: Any) -> list[tuple[str, str, str]]:

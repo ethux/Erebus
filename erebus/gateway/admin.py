@@ -20,7 +20,7 @@ from .deps import GatewayDeps
 from .governance import audit, reveal
 from .providers import credentials, quota
 from .runtime import _audit, _db, _reserve_or_429, _target_scope, require_operator
-from .store import credentials_directory
+from .store import catalog_versions, credentials_directory
 from .store.known_value_store import open_store, provision_scope
 
 
@@ -71,6 +71,11 @@ async def _handle_key_op(deps: GatewayDeps, authorization: str | None, body: dic
         await anyio.to_thread.run_sync(lambda: deps.key_provider.rotate_kek(str(scope_id)))
     else:
         await anyio.to_thread.run_sync(lambda: deps.key_provider.destroy_kek(str(scope_id)))
+        # Drop the decrypted values here now; the bump makes every other replica rebuild,
+        # fail with CryptoErased and evict too (spec 015).
+        if deps.known_values is not None:
+            deps.known_values.evict(scope_id)
+        await _db(deps, lambda c: catalog_versions.bump(c, scope_id))
     await _audit(deps, scope_id, "key_op", op, ident)
     return {"op": op, "status": "done"}
 

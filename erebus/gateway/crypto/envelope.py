@@ -8,6 +8,7 @@ KeyProvider, the HKDF purpose keys, and AES-GCM together for one scope.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -56,6 +57,19 @@ class ScopeCrypto:
 
     def decrypt(self, nonce: bytes, ciphertext: bytes, aad: bytes = b"") -> bytes:
         return decrypt(self._k_enc, nonce, ciphertext, aad)
+
+    def decryptor(self) -> Callable[..., bytes]:
+        """``(nonce, ciphertext, aad=b"") -> plaintext`` over one cipher, for bulk reads.
+
+        ``decrypt`` builds a cipher per call; a matcher build decrypts every active
+        known value of a tenant, so it reuses one.
+        """
+        aes = AESGCM(self._k_enc)
+
+        def _decrypt(nonce: bytes, ciphertext: bytes, aad: bytes = b"") -> bytes:
+            return aes.decrypt(nonce, ciphertext, aad)
+
+        return _decrypt
 
     def blind_index(self, value: str, label: str = "") -> bytes:
         return blind_index(self._k_tok, value, label)

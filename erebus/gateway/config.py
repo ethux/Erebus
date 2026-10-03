@@ -44,6 +44,20 @@ def _bool(env: dict[str, str], name: str) -> bool:
     return env.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def master_key(env: dict[str, str]) -> str:
+    """``EREBUS_GATEWAY_MASTER_KEY``, shape-checked (base64 of 32 bytes) and never echoed.
+
+    Shared with the sync worker, which holds the same key (spec 015 D1).
+    """
+    value = _require(env, "EREBUS_GATEWAY_MASTER_KEY")
+    try:  # validate shape now (never echo the value); the KMS holds the raw string
+        if len(base64.b64decode(value, validate=True)) != 32:
+            raise ConfigError("EREBUS_GATEWAY_MASTER_KEY must decode to 32 bytes (AES-256)")
+    except (binascii.Error, ValueError) as exc:
+        raise ConfigError("EREBUS_GATEWAY_MASTER_KEY must be valid base64 of 32 bytes") from exc
+    return value
+
+
 @dataclass(frozen=True)
 class GatewayConfig:
     """Validated operator settings; the sole input needed to deploy (FR-001)."""
@@ -60,18 +74,14 @@ class GatewayConfig:
     http_timeout_s: int = 30
     concurrency_cap: int = 0  # 0 = unlimited
     shutdown_timeout_s: int = 30  # drain window before in-flight work aborts fail-closed
+    catalog_poll_s: int = 5  # how often replicas check catalog_versions (spec 015)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> GatewayConfig:
         """Parse + format-validate the environment; raise ConfigError on anything bad."""
         env = dict(os.environ if env is None else env)
 
-        master_key_b64 = _require(env, "EREBUS_GATEWAY_MASTER_KEY")
-        try:  # validate shape now (never echo the value); the KMS holds the raw string
-            if len(base64.b64decode(master_key_b64, validate=True)) != 32:
-                raise ConfigError("EREBUS_GATEWAY_MASTER_KEY must decode to 32 bytes (AES-256)")
-        except (binascii.Error, ValueError) as exc:
-            raise ConfigError("EREBUS_GATEWAY_MASTER_KEY must be valid base64 of 32 bytes") from exc
+        master_key_b64 = master_key(env)
 
         model_map: dict[str, str] = {}
         raw_map = env.get("EREBUS_GATEWAY_MODEL_MAP", "").strip()
@@ -90,6 +100,7 @@ class GatewayConfig:
         http_timeout_s = _int(env, "EREBUS_GATEWAY_HTTP_TIMEOUT", 30)
         concurrency_cap = _int(env, "EREBUS_GATEWAY_CONCURRENCY", 0)
         shutdown_timeout_s = _int(env, "EREBUS_GATEWAY_SHUTDOWN_TIMEOUT_S", 30)
+        catalog_poll_s = _int(env, "EREBUS_GATEWAY_CATALOG_POLL_S", 5)
 
         if not 1 <= port <= 65535:
             raise ConfigError("EREBUS_GATEWAY_PORT must be in 1..65535")
@@ -101,6 +112,8 @@ class GatewayConfig:
             raise ConfigError("EREBUS_GATEWAY_CONCURRENCY must be >= 0")
         if shutdown_timeout_s <= 0:
             raise ConfigError("EREBUS_GATEWAY_SHUTDOWN_TIMEOUT_S must be > 0")
+        if catalog_poll_s <= 0:
+            raise ConfigError("EREBUS_GATEWAY_CATALOG_POLL_S must be > 0")
 
         return cls(
             dsn=_require(env, "EREBUS_PG_DSN"),
@@ -115,6 +128,7 @@ class GatewayConfig:
             http_timeout_s=http_timeout_s,
             concurrency_cap=concurrency_cap,
             shutdown_timeout_s=shutdown_timeout_s,
+            catalog_poll_s=catalog_poll_s,
         )
 
     def provider_for(self, model: str | None) -> str:

@@ -1,8 +1,7 @@
 """Per-scope known-value catalog tests (T009; FR-009).
 
-Self-contained: creates its own database, applies ONLY 0001_core + 0017_catalog
-(reading both files directly so it does not race concurrently-written
-migrations), provisions scopes, and verifies the catalog guarantees:
+Self-contained: creates its own database, applies every gateway migration (the
+catalog needs 0021's origin, suppressions and catalog versions), provisions scopes, and verifies the catalog guarantees:
 add_known_value registers org-known values encrypted at rest; match finds their
 spans in a sentence (case-insensitive, longest-first, non-overlapping); a
 cross-scope match never surfaces another scope's values (RLS + crypto); the
@@ -11,24 +10,21 @@ blind index (FR-005/009/036/041..043).
 """
 import os
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 import subprocess
 
 import psycopg
-from psycopg import errors as pg_errors
 
 from erebus.gateway.catalog import add_known_value, match
 from erebus.gateway.crypto.keyprovider import LocalKms
-from erebus.gateway.store.db import _statements
+from erebus.gateway.store import db
 from erebus.gateway.store.known_value_store import open_store, provision_scope
 from erebus.gateway.store.scope_context import scoped
 
 _DBNAME = "erebus_gw_catalog"
 _DSN = os.environ.get("EREBUS_PG_DSN", f"postgresql:///{_DBNAME}")
-_SCHEMA = Path(__file__).resolve().parents[2] / "erebus" / "gateway" / "schema"
 _passed = 0
 
 
@@ -38,20 +34,6 @@ def check(name, cond):
         raise AssertionError(name)
     print(f"  ✓ {name}")
     _passed += 1
-
-
-def _apply(conn, filename):
-    """Apply a schema file statement-by-statement, idempotently for re-runs.
-
-    CREATE POLICY/ENABLE RLS are not ``IF NOT EXISTS``-guarded, so on a second
-    run we swallow the duplicate-object/table errors via a per-statement savepoint.
-    """
-    for stmt in _statements((_SCHEMA / filename).read_text()):
-        try:
-            with conn.transaction():
-                conn.execute(stmt)
-        except (pg_errors.DuplicateObject, pg_errors.DuplicateTable):
-            pass
 
 
 def main():
@@ -64,8 +46,7 @@ def main():
         return
     conn.autocommit = False
     try:
-        _apply(conn, "0001_core.sql")
-        _apply(conn, "0017_catalog.sql")
+        db.run_migrations(conn)
         with conn.transaction():
             conn.execute("TRUNCATE scopes CASCADE")
 

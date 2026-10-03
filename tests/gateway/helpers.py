@@ -25,6 +25,7 @@ if a caller forgets it.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -32,6 +33,7 @@ import uuid
 from pathlib import Path
 
 import psycopg
+from psycopg import conninfo, sql
 
 # Defensive repo-root bootstrap so ``erebus.gateway.*`` imports resolve even when
 # a caller imported this module without first extending sys.path.
@@ -82,15 +84,55 @@ def fresh_db(name: str) -> psycopg.Connection:
 
 
 def _apply_all_tolerant(conn: psycopg.Connection) -> None:
-    """Apply every gateway migration statement, tolerating already-present objects."""
-    schema_dir = _REPO_ROOT / "erebus" / "gateway" / "schema"
-    for path in sorted(schema_dir.glob("*.sql")):
+    """Apply every gateway migration statement (extensions' too), tolerating already-present objects."""
+    for path in db.migration_files():
         for stmt in db._statements(path.read_text()):
             try:
                 with conn.transaction():
                     conn.execute(stmt)
             except _DUPLICATE:
                 pass  # object already exists from a prior run
+
+
+def conn_dsn(conn: psycopg.Connection) -> str:
+    """The connection string of ``conn``, password included.
+
+    ``conn.info.dsn`` leaves the password out on purpose, so a pool or a second
+    connection built from it fails wherever the server requires one (CI does).
+    """
+    password = conn.info.password
+    return conninfo.make_conninfo(conn.info.dsn, password=password) if password else conn.info.dsn
+
+
+@contextlib.contextmanager
+def restricted_role(dsn: str):
+    """Yield a connection running as a fresh ``NOSUPERUSER NOBYPASSRLS`` role.
+
+    The gate connects as a superuser, which bypasses row-level security, so only a
+    connection like this one proves a policy. The role gets DML on every table in
+    ``public`` of the database behind ``dsn``; roles are cluster-wide, so it is dropped
+    on exit.
+    """
+    role = f"erebus_rls_{uuid.uuid4().hex[:12]}"
+    ident = sql.Identifier(role)
+    admin = psycopg.connect(dsn, autocommit=True)
+    admin.execute(sql.SQL("CREATE ROLE {} NOSUPERUSER NOBYPASSRLS NOLOGIN").format(ident))
+    restricted = None
+    try:
+        admin.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(ident))
+        admin.execute(
+            sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}").format(ident)
+        )
+        restricted = psycopg.connect(dsn, autocommit=True)
+        restricted.execute(sql.SQL("SET ROLE {}").format(ident))
+        restricted.autocommit = False
+        yield restricted
+    finally:
+        if restricted is not None:
+            restricted.close()
+        admin.execute(sql.SQL("DROP OWNED BY {}").format(ident))
+        admin.execute(sql.SQL("DROP ROLE {}").format(ident))
+        admin.close()
 
 
 def provision(conn: psycopg.Connection, kms: KeyProvider, scope_key: str) -> uuid.UUID:

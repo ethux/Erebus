@@ -30,7 +30,7 @@ from .scope_context import scoped
 _LABEL_NON_CLASS = re.compile(r"[^A-Z_]+")
 
 
-def _normalize_label(label: str) -> str:
+def normalize_label(label: str) -> str:
     """Coerce ``label`` into the restore pattern's ``[A-Z_]+`` character class.
 
     Uppercases, replaces every run of out-of-class characters with a single
@@ -61,8 +61,8 @@ def provision_scope(conn: psycopg.Connection, provider: KeyProvider, scope_key: 
     return scope_id
 
 
-def open_store(conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.UUID) -> KnownValueStore:
-    """Open the store for a provisioned scope (raises if crypto-erased or unknown)."""
+def open_scope_crypto(conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.UUID) -> ScopeCrypto:
+    """The ``ScopeCrypto`` of a provisioned scope (raises if crypto-erased or unknown)."""
     with scoped(conn, scope_id):
         row = conn.execute(
             "SELECT wrapped_dek, key_version FROM tenant_keys WHERE scope_id = %s",
@@ -70,8 +70,12 @@ def open_store(conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.U
         ).fetchone()
     if not row:
         raise KeyError(f"scope {scope_id} not provisioned")
-    crypto = ScopeCrypto.open(provider, str(scope_id), bytes(row[0]), row[1])
-    return KnownValueStore(conn, scope_id, crypto)
+    return ScopeCrypto.open(provider, str(scope_id), bytes(row[0]), row[1])
+
+
+def open_store(conn: psycopg.Connection, provider: KeyProvider, scope_id: uuid.UUID) -> KnownValueStore:
+    """Open the store for a provisioned scope (raises if crypto-erased or unknown)."""
+    return KnownValueStore(conn, scope_id, open_scope_crypto(conn, provider, scope_id))
 
 
 class KnownValueStore:
@@ -84,32 +88,86 @@ class KnownValueStore:
 
     def mint(self, value: str, label: str = "PERSON") -> str:
         """Return a stable placeholder for ``value`` in this scope, minting if new."""
-        # Normalize the label into the restore regex's [A-Z_]+ class so the minted
-        # token is always restorable (an out-of-class catalog/detector label would
-        # otherwise produce a token restore could never match). In-class labels
-        # like PERSON / INTERNAL_ID are unchanged, so existing dedupe is untouched.
-        label = _normalize_label(label)
-        bidx = self._crypto.blind_index(value, label)
+        return self.mint_many([(value, label)])[(value, label)]
+
+    def mint_many(self, items) -> dict[tuple[str, str], str]:
+        """Return a token per ``(value, label)``, minting the missing ones in one go.
+
+        One query when every value has a token; otherwise at most four: the select,
+        advisory locks on the misses' blind indexes in sorted order (no deadlock),
+        one re-read of the misses plus per-label counts, one insert. The locks make
+        concurrent mints of one new value agree on a single row; where duplicates
+        predate them, the oldest row wins. Labels are normalized into the restore
+        regex's ``[A-Z_]+`` class so every token stays restorable.
+        """
+        wanted: dict[tuple[str, str], bytes] = {}
+        fresh: dict[bytes, tuple[str, str]] = {}
+        for value, label in items:
+            norm = normalize_label(label)
+            bidx = self._crypto.blind_index(value, norm)
+            wanted[(value, label)] = bidx
+            fresh.setdefault(bidx, (value, norm))
+        if not wanted:
+            return {}
+        indexes = sorted(fresh)
         with scoped(self._conn, self._scope_id):
-            existing = self._conn.execute(
-                "SELECT token FROM token_maps WHERE scope_id = %s AND value_blind_index = %s",
-                (self._scope_id, bidx),
-            ).fetchone()
-            if existing:
-                return existing[0]
-            n = self._conn.execute(
-                "SELECT count(*) + 1 FROM token_maps WHERE scope_id = %s AND label = %s",
-                (self._scope_id, label),
-            ).fetchone()[0]
-            token = f"[{label}_{n}_{secrets.token_hex(3)}]"
+            found = self._oldest_tokens(indexes)
+            misses = [b for b in indexes if b not in found]
+            if misses:
+                self._conn.execute(
+                    "SELECT pg_advisory_xact_lock(h) FROM unnest(%s::bigint[]) AS h",
+                    (sorted({int.from_bytes(b[:8], "big", signed=True) for b in misses}),),
+                )
+                counts = self._reread(misses, sorted({fresh[b][1] for b in misses}), found)
+                self._insert_new([b for b in misses if b not in found], fresh, counts, found)
+        return {key: found[bidx] for key, bidx in wanted.items()}
+
+    _OLDEST = (
+        "SELECT DISTINCT ON (value_blind_index) value_blind_index, token FROM token_maps "
+        "WHERE scope_id = %s AND value_blind_index = ANY(%s) ORDER BY value_blind_index, created_at, id"
+    )
+
+    def _oldest_tokens(self, indexes: list[bytes]) -> dict[bytes, str]:
+        rows = self._conn.execute(self._OLDEST, (self._scope_id, indexes)).fetchall()
+        return {bytes(b): tok for b, tok in rows}
+
+    def _reread(self, misses: list[bytes], labels: list[str], found: dict[bytes, str]) -> dict[str, int]:
+        """Under the locks: tokens a concurrent mint added meanwhile, and per-label counts."""
+        rows = self._conn.execute(
+            f"SELECT h.value_blind_index, h.token, NULL::bigint FROM ({self._OLDEST}) h "
+            "UNION ALL SELECT NULL, label, count(*) FROM token_maps "
+            "WHERE scope_id = %s AND label = ANY(%s) GROUP BY label",
+            (self._scope_id, misses, self._scope_id, labels),
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for bidx, text, n in rows:
+            if bidx is None:
+                counts[text] = n
+            else:
+                found[bytes(bidx)] = text
+        return counts
+
+    def _insert_new(self, new: list[bytes], fresh: dict, counts: dict[str, int], found: dict[bytes, str]) -> None:
+        if not new:
+            return
+        tokens, labels, nonces, cts = [], [], [], []
+        for bidx in new:
+            value, label = fresh[bidx]
+            counts[label] = counts.get(label, 0) + 1
+            token = f"[{label}_{counts[label]}_{secrets.token_hex(3)}]"
             nonce, ct = self._crypto.encrypt(value.encode("utf-8"))
-            self._conn.execute(
-                "INSERT INTO token_maps "
-                "(scope_id, token, label, value_nonce, value_ciphertext, value_blind_index, key_version) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (self._scope_id, token, label, nonce, ct, bidx, self._crypto.key_version),
-            )
-            return token
+            tokens.append(token)
+            labels.append(label)
+            nonces.append(nonce)
+            cts.append(ct)
+            found[bidx] = token
+        self._conn.execute(
+            "INSERT INTO token_maps "
+            "(scope_id, token, label, value_nonce, value_ciphertext, value_blind_index, key_version) "
+            "SELECT %s, t.tok, t.l, t.n, t.c, t.b, %s "
+            "FROM unnest(%s::text[], %s::text[], %s::bytea[], %s::bytea[], %s::bytea[]) AS t(tok, l, n, c, b)",
+            (self._scope_id, self._crypto.key_version, tokens, labels, nonces, cts, new),
+        )
 
     def lookup(self, token: str) -> str | None:
         """Resolve a token to its value within this scope, or None (incl. cross-scope)."""

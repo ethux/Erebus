@@ -186,9 +186,8 @@ restores real values in the responses your developers see. Users never hold
 provider API keys. The operator holds one central credential per tenant, and the
 gateway injects it on the live request path.
 
-The gateway is in beta (`1.1.0-beta.3`): per-scope crypto isolation, shared-state
-tokenization and governance are in place, and admin access comes only from operator
-credentials.
+This is a beta. The [changelog](CHANGELOG.md) lists what each release adds, fixes
+and changes; read it before upgrading.
 
 ### Operator prerequisites
 
@@ -239,6 +238,7 @@ required to deploy.
 | `EREBUS_DISABLE_GLINER` | no (off) | Run regex-only detection without GLiNER; `/readyz` reports `regex-only` |
 | `EREBUS_GATEWAY_CONCURRENCY` | no (`0`) | Per-tenant concurrency cap (`0` = unlimited) |
 | `EREBUS_GATEWAY_HTTP_TIMEOUT` | no (`30`) | Upstream HTTP timeout, seconds |
+| `EREBUS_GATEWAY_CATALOG_POLL_S` | no (`5`) | Seconds between checks for changed tenant known values |
 | `EREBUS_LICENSE_KEY` | no | Erebus Pro license key; without one only core features run |
 | `EREBUS_LICENSE_FILE` | no | Path to a file holding the license key (e.g. a mounted secret); used when `EREBUS_LICENSE_KEY` is unset |
 
@@ -314,18 +314,162 @@ route is refused fail-closed. Set `"stream": true` for SSE streaming with restor
 values; a mid-stream failure aborts fail-closed without emitting raw or
 partial-token output.
 
+A tenant's **known values** (names, emails and other values in its catalog) are always
+tokenized, also when detection would miss them. They match whole words, case-insensitive,
+next to detection; where both find overlapping text the longer span wins, a tie goes to the
+known value. Each replica holds them in memory only and reloads a tenant within
+`EREBUS_GATEWAY_CATALOG_POLL_S` of a change. A tenant whose values are not loaded (still
+loading, crypto-erased or not active) gets 503 without using quota. Edge mode refuses a
+payload holding a known value.
+
+Size replicas for known values as described under [Connectors](#connectors).
+
 ### Health and readiness
 
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /healthz` | Liveness. Returns 200 whenever the process is up. |
-| `GET /readyz` | Readiness. Returns 200 only when shared state, key custody, and detection are all healthy, else 503. The body's `detection` field is `available` (regex + GLiNER) or `regex-only`. |
+| `GET /readyz` | Readiness. Returns 200 only when shared state, key custody, and detection are all healthy, else 503. The body's `detection` field is `available` (regex + GLiNER) or `regex-only`. `known_values` is `loading` (503) until every tenant's known values are loaded at startup, then `ready`, or `degraded` (still 200) when a reload failed and the previous values keep matching. |
 
 Point your load balancer health check at `GET /readyz`: it drains a replica when a
 critical dependency is unhealthy, so requests fail closed rather than leaking PII.
 Scale by running more `erebus-gateway` replicas against the same `EREBUS_PG_DSN`; a
 token minted by one replica restores on another. Operational telemetry is masked
 (no raw PII or secrets).
+
+### Connectors
+
+Connect the databases that hold a tenant's customer data, and the names, emails, phone
+numbers and addresses in them become **known values**: the gateway always replaces them
+with a token, also when detection would miss them. A connector only reads.
+
+| | Free | Erebus Pro |
+|---|---|---|
+| Sources | SQLite, Postgres, MySQL | same |
+| Syncs | a sample when a source is added or changed, then a full sync of the accepted fields; "sync now" | also scheduled syncs (feature `sync.schedule`) |
+
+Everything is managed through the admin API below, which only an operator credential
+can use; a tenant credential gets 403 on every source route. When a Pro license lapses,
+values already synced keep matching and "sync now" keeps working; only scheduled syncs
+stop.
+
+Sizing: each gateway replica holds every tenant's known values in memory, about 90 MB per
+100,000 values summed over all tenants, plus the same again for a tenant being reloaded.
+A replica reports ready only after it has loaded every tenant, so keep that load within
+your health check window (about 80 seconds in the compose file).
+
+### Sync worker
+
+`erebus-sync` reads the systems a tenant connects (SQLite, Postgres, MySQL) and keeps
+that tenant's known values in step with them. It is the only process that contacts
+those systems. It runs from the same image (the `sync-worker` service in the compose
+file) and needs `EREBUS_PG_DSN` and `EREBUS_GATEWAY_MASTER_KEY`, not the provider
+settings. It serves no traffic, but it holds the master key: give it the same secret
+store and host hardening as the gateway.
+
+A sample job maps a source's fields; a full sync stores the distinct values of the
+accepted fields. Values retire only after a full sync reads everything: a sync that
+fails, stops early or hits a cap keeps every value. An unreachable source is retried
+(1, 5 and 15 minutes by default); wrong credentials, a refused host or a cap fail the
+job at once and mark the source for attention. Job rows and logs hold fixed error
+text only, never a credential or value.
+
+Before connecting, the worker resolves the source host once and refuses it when any
+address is on the deny list (by default the gateway's own database host, loopback,
+link-local and cloud metadata addresses) or off the allow list when one is set.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `EREBUS_SYNC_POLL_S` | `5` | Seconds between polls for queued jobs |
+| `EREBUS_SYNC_CONCURRENCY` | `2` | Jobs run at once |
+| `EREBUS_SYNC_HEARTBEAT_S` / `EREBUS_SYNC_LEASE_S` | `30` / `600` | Heartbeat interval; a job silent for the lease is re-queued (the third time it fails) |
+| `EREBUS_SYNC_BACKOFF_S` | `60,300,900` | Retry waits for an unreachable source or failed query |
+| `EREBUS_SYNC_LIMIT_WAIT_S` | `172800` | How long a job may wait on a source's rate limit |
+| `EREBUS_SYNC_TENANT_MAX_VALUES` | `1000000` | Most active known values per tenant |
+| `EREBUS_SYNC_DENIED_HOSTS` | see above | Hosts, addresses and networks never contacted; setting it replaces the default |
+| `EREBUS_SYNC_ALLOWED_HOSTS` | unset | When set, the only hosts, addresses and networks contacted |
+| `EREBUS_SYNC_SQLITE_DIR` | unset (SQLite off) | Directory SQLite sources must resolve inside |
+
+Several workers can run against one database; each job runs on one of them.
+
+### Connecting a database
+
+| Type | Settings | Credentials |
+|------|----------|-------------|
+| `sqlite` | `path` (inside `EREBUS_SYNC_SQLITE_DIR`), `collections` | none |
+| `postgres`, `mysql` | `host`, `port`, `dbname`, `user`, `sslmode`, `schemas`, `collections` | `password` |
+
+`sslmode` is `disable`, `prefer`, `require`, `verify-ca` or `verify-full` (the default,
+checked against the system CAs). Collections are named `schema.table`; without
+`schemas` the worker reads every user schema. A raw DSN, file paths and driver options
+are refused. The worker opens every session read-only with a 10-minute statement
+limit, but the read-only account below is the real guard. Grant only the tables that
+hold customer data:
+
+```sql
+-- Postgres
+CREATE ROLE erebus_sync LOGIN PASSWORD '<password>';
+ALTER ROLE erebus_sync SET default_transaction_read_only = on;
+GRANT CONNECT ON DATABASE crm TO erebus_sync;
+GRANT USAGE ON SCHEMA public TO erebus_sync;
+GRANT SELECT ON public.customers, public.contacts TO erebus_sync;
+
+-- MySQL
+CREATE USER 'erebus_sync'@'%' IDENTIFIED BY '<password>' REQUIRE SSL;
+GRANT SELECT ON crm.customers TO 'erebus_sync'@'%';
+GRANT SELECT ON crm.contacts TO 'erebus_sync'@'%';
+```
+
+### Managing sources
+
+Source routes live under `/v1/admin/scopes/{scope_id}` (the `scope_id` onboarding
+returned) and need an operator credential. Credentials are write-only: no response
+returns them.
+
+```bash
+curl -sX POST localhost:8080/v1/admin/scopes/<scope_id>/sources \
+  -H 'Authorization: Bearer <operator-credential>' \
+  -d '{"name":"crm","type":"postgres",
+       "settings":{"host":"db.internal","dbname":"crm","user":"erebus_sync"},
+       "credentials":{"password":"..."},
+       "credentials_expire_at":"2027-08-31T00:00:00Z"}'
+# -> {"source":{"id":"...","status":"active",...},"job":{"kind":"sample","status":"queued",...}}
+```
+
+| Method and path | Does |
+|---|---|
+| `POST /sources` | Create a source; queues a sample job |
+| `GET /sources` | List sources with status and credential expiry |
+| `PATCH /sources/{id}` | Change `name`, `settings`, `credentials` (replaced whole), `status` (`active`/`paused`), `credentials_expire_at` or `max_values`; a settings or credentials change queues a sample |
+| `DELETE /sources/{id}` | Remove a source and retire the values only it held; 409 while a job runs |
+| `POST /sources/{id}/sample` | Re-run the sample job |
+| `POST /sources/{id}/sync` | Sync now: queue a full sync, or return the job already queued or running |
+| `GET /sources/{id}/fields` | The field mapping with decisions and reasons |
+| `PATCH /sources/{id}/fields/{field_id}` | `{"decision":"confirmed"}` or `"ignored"`; queues a full sync |
+| `GET /sync-jobs?source_id=&limit=` | Job status and counts, newest first |
+| `POST /known-values/erase` | `{"value":"..."}`: remove a value under every label, with its tokens, and keep syncs from adding it back |
+
+A paused source queues no jobs (409 on sample and sync). Another tenant's source is 404.
+When a job is already running, or the source is paused, the sample or full sync a change
+needs is kept as the source's `pending_job` and queued when that job ends or the source resumes.
+
+### Scheduled syncs (Pro)
+
+With a license carrying `sync.schedule` in the environment of both the gateway and the
+sync worker, the worker gives every source a daily full sync. Change or turn it off per source:
+
+```bash
+curl -sX PUT localhost:8080/v1/admin/scopes/<scope_id>/sources/<source_id>/schedule \
+  -H 'Authorization: Bearer <operator-credential>' \
+  -d '{"full_minutes":720}'
+# -> {"schedule":{"source_id":"...","full_minutes":720,"next_full_at":"...",...}}
+```
+
+`full_minutes` is 60 to 43200; `null` turns scheduled syncs off and an empty body
+restores the default. Database sources have no incremental syncs, so
+`incremental_minutes` must stay unset. The first run is one interval after the change. A
+source that is busy waits for the next check (every minute); a paused one is skipped.
+Without the feature the route returns 403 `requires Erebus Pro (feature sync.schedule)`.
 
 ### Run the release gate
 
@@ -337,10 +481,16 @@ Postgres:
 EREBUS_PG_DSN=postgresql:///postgres make gateway-test
 ```
 
+The connector contract suite runs against SQLite and Postgres; set
+`EREBUS_TEST_MYSQL_DSN=mysql://root:<password>@127.0.0.1:3306` to include a throwaway
+MySQL (skipped otherwise).
+
 The end-to-end acceptance (real uvicorn + a mock provider + real Postgres) verifies
 token-only egress, correct restoration, per-tenant central-credential egress, and
-fail-closed behavior. It binds localhost, so run it where localhost binds are
-permitted.
+fail-closed behavior. A second one runs `erebus-gateway` and `erebus-sync` as real
+processes: a synced Postgres value is tokenized in a chat, and no log, job row, audit
+event or admin response holds a synced value or a source password. Both bind
+localhost, so run them where localhost binds are permitted.
 
 ---
 
