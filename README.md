@@ -345,13 +345,13 @@ with a token, also when detection would miss them. A connector only reads.
 
 | | Free | Erebus Pro |
 |---|---|---|
-| Sources | SQLite, Postgres, MySQL | same |
+| Sources | SQLite, Postgres, MySQL | also Snowflake and BigQuery (features `connectors.snowflake`, `connectors.bigquery`) |
 | Syncs | a sample when a source is added or changed, then a full sync of the accepted fields; "sync now" | also scheduled syncs (feature `sync.schedule`) |
 
 Everything is managed through the admin API below, which only an operator credential
 can use; a tenant credential gets 403 on every source route. When a Pro license lapses,
-values already synced keep matching and "sync now" keeps working; only scheduled syncs
-stop.
+values already synced keep matching and "sync now" keeps working for free sources; only
+scheduled syncs and syncs of Pro sources stop.
 
 Sizing: each gateway replica holds every tenant's known values in memory, about 90 MB per
 100,000 values summed over all tenants, plus the same again for a tenant being reloaded.
@@ -360,7 +360,8 @@ your health check window (about 80 seconds in the compose file).
 
 ### Sync worker
 
-`erebus-sync` reads the systems a tenant connects (SQLite, Postgres, MySQL) and keeps
+`erebus-sync` reads the systems a tenant connects (SQLite, Postgres, MySQL; with Pro also
+Snowflake and BigQuery) and keeps
 that tenant's known values in step with them. It is the only process that contacts
 those systems. It runs from the same image (the `sync-worker` service in the compose
 file) and needs `EREBUS_PG_DSN` and `EREBUS_GATEWAY_MASTER_KEY`, not the provider
@@ -419,6 +420,43 @@ CREATE USER 'erebus_sync'@'%' IDENTIFIED BY '<password>' REQUIRE SSL;
 GRANT SELECT ON crm.customers TO 'erebus_sync'@'%';
 GRANT SELECT ON crm.contacts TO 'erebus_sync'@'%';
 ```
+
+### Connecting a warehouse (Pro)
+
+Needs erebus-pro (in the published image) and a license with `connectors.snowflake` or
+`connectors.bigquery` in the sync worker's environment. Without the feature the source's
+syncs fail with `requires Erebus Pro (feature connectors.<type>)`; its values keep matching.
+
+| Type | Settings | Credentials |
+|------|----------|-------------|
+| `snowflake` | `account` (`orgname-account`), `user`, `database`, `warehouse`, `role`, `schemas`, `collections` | `private_key` (PEM), `private_key_passphrase` if it is encrypted |
+| `bigquery` | `project`, `location`, `max_bytes_billed`, `auth` (`key` or `attached`), `schemas` (datasets), `collections` | `service_account_key` (the JSON key file); none with `auth: attached` |
+
+Neither takes a host: the driver derives it from the account or project, so the
+worker's host lists do not apply to them. Collections are `SCHEMA.TABLE` and
+`dataset.table`. Costs:
+
+- Snowflake: a sync resumes the warehouse, billed at least 60 seconds per resume.
+- BigQuery: each table is read in one query, billed at least 10 MB. `max_bytes_billed`
+  caps every query on on-demand pricing (slot pricing ignores it); a capped query fails
+  the sync and keeps every value. Sample rows come from the free table-read API.
+
+The read-only role is the only guard on a warehouse:
+
+```sql
+-- Snowflake: a service user with a key pair (openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt)
+CREATE ROLE erebus_reader;
+GRANT USAGE ON WAREHOUSE sync_wh TO ROLE erebus_reader;
+GRANT USAGE ON DATABASE crm TO ROLE erebus_reader;
+GRANT USAGE ON SCHEMA crm.public TO ROLE erebus_reader;
+GRANT SELECT ON TABLE crm.public.customers TO ROLE erebus_reader;
+CREATE USER erebus_sync TYPE = SERVICE DEFAULT_ROLE = erebus_reader RSA_PUBLIC_KEY = '<public key>';
+GRANT ROLE erebus_reader TO USER erebus_sync;
+```
+
+BigQuery: give the service account BigQuery Job User on the project and BigQuery Data
+Viewer only on the datasets that hold customer data. `auth: attached` uses the identity
+attached to the worker (on GCP); workload identity federation is not supported yet.
 
 ### Managing sources
 

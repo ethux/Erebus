@@ -95,6 +95,10 @@ jobs:
       # The connector contract suite (SC-6) runs against this MySQL and fails without it.
       EREBUS_TEST_MYSQL_DSN: mysql://root:mysql-ci-root@127.0.0.1:13306
       EREBUS_REQUIRE_MYSQL: "1"
+      # The Pro warehouse connectors run on fakesnow and the BigQuery emulator, and fail without them.
+      EREBUS_TEST_BIGQUERY_EMULATOR: http://127.0.0.1:9050
+      EREBUS_REQUIRE_BIGQUERY: "1"
+      EREBUS_REQUIRE_SNOWFLAKE: "1"
 
     steps:
       - name: Check out repository
@@ -110,7 +114,14 @@ jobs:
         run: |
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
           python -m pip install -e '.[gateway]'
-          python -m pip install -e ./pro
+          python -m pip install -e './pro[test]'
+
+      # A service container cannot take the emulator's --project argument.
+      - name: Start the BigQuery emulator
+        run: |
+          docker run -d --name bigquery-emulator -p 127.0.0.1:9050:9050 \
+            ghcr.io/goccy/bigquery-emulator:latest --project=erebus-test
+          for _ in $(seq 30); do curl -sf http://127.0.0.1:9050/bigquery/v2/projects/erebus-test/datasets && break; sleep 2; done
 
       - name: Core pattern tests
         run: python tests/test_core_patterns.py

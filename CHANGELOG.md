@@ -5,6 +5,15 @@ All notable changes to Erebus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Erebus Pro: Snowflake and BigQuery connectors (features `connectors.snowflake` and
+  `connectors.bigquery`). Snowflake signs in with a service user's key pair; BigQuery with
+  a service-account key or the worker's attached identity, reads each table in one query
+  and honours `max_bytes_billed`. The drivers ship in the image. When the license lapses
+  their syncs stop and values already synced keep matching.
+
 ## [1.2.0-beta.1] - 2026-10-03
 
 ### Added
