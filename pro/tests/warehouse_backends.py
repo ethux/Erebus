@@ -220,7 +220,7 @@ class BigQueryBackend:
         if not self.endpoint:
             return "EREBUS_TEST_BIGQUERY_EMULATOR is not set"
         try:
-            self._client().list_datasets(timeout=5, retry=None, max_results=1)
+            next(iter(self._client().list_datasets(timeout=5, retry=None, max_results=1)), None)  # lazy until read
         except Exception as exc:
             return f"no BigQuery emulator at EREBUS_TEST_BIGQUERY_EMULATOR ({type(exc).__name__})"
         return None
