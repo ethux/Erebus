@@ -290,7 +290,7 @@ def _check_policy(env):
     job = env.run(source=lite)
     check("SQLite is refused while EREBUS_SYNC_SQLITE_DIR is unset", job.error == "source address is not allowed")
 
-    odd = env.new_source({}, connector_type="snowflake")
+    odd = env.new_source({}, connector_type="no_such_type_zq")
     job = env.run(source=odd)
     check("an unknown connector type fails", job.status == "failed" and job.error == "unknown connector type")
 

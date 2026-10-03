@@ -68,6 +68,11 @@ def _installed() -> Mapping[str, ConnectorType]:
     return load_types()
 
 
+def installed() -> list[ConnectorType]:
+    """Every installed type (built-in and Pro), sorted by id."""
+    return sorted(_installed().values(), key=lambda t: t.id)
+
+
 def get(type_id: str) -> ConnectorType | None:
     """The installed type ``type_id``, or ``None`` (an unknown connector type)."""
     return _installed().get(type_id)

@@ -59,7 +59,12 @@ def _check_types():
     check("mysql is a free database type", connector_types.get("mysql").family == "database")
     sqlite = connector_types.get("sqlite")
     check("sqlite is a free file type with a path", sqlite.family == "file" and "path" in sqlite.setting_keys)
-    check("an unknown type is None", connector_types.get("oracle") is None)
+    check("an unknown type is None", connector_types.get("no_such_type_zq") is None)
+    installed = connector_types.installed()
+    check("installed() lists every installed type once, by id",
+          [t.id for t in installed] == sorted({t.id for t in installed})
+          and {"sqlite", "postgres", "mysql"} <= {t.id for t in installed}
+          and all(connector_types.get(t.id) is t for t in installed))
     banned = {"dsn", "passfile", "service", "sslkey", "sslrootcert", "sslcert", "hostaddr", "options",
               "local_infile", "init_command", "password"}
     check("no type allows a raw DSN, libpq file key or secret",

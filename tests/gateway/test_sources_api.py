@@ -22,6 +22,7 @@ import psycopg
 from fastapi.testclient import TestClient
 from helpers import fake_detector, operator_bearer
 
+from erebus.cataloging import connector_types
 from erebus.gateway import catalog
 from erebus.gateway.app import create_app
 from erebus.gateway.connectors import fields, jobs, sources
@@ -38,7 +39,10 @@ _KEY = base64.b64encode(os.urandom(32)).decode()
 _SECRET = "Zq-hunter2-secret"
 _NEW_SECRET = "Zq-rotated-secret"
 _ERASED = "Zyx Qorbel"
-_CONNECTOR_MODULES = ("erebus.cataloging.connectors", "erebus_pro.connectors", "pymysql", "psycopg2")
+_CONNECTOR_MODULES = ("erebus.cataloging.connectors", "erebus_pro.connectors", "pymysql", "psycopg2", "snowflake",
+                      "google.cloud", "google.auth", "fakesnow", "duckdb")
+# Settings per type a Pro install adds (the gateway checks keys only).
+_PRO_SETTINGS = {"snowflake": {"account": "acme-zq", "database": "CRM"}, "bigquery": {"project": "acme-zq"}}
 _passed = 0
 
 
@@ -58,7 +62,8 @@ def _count(conn, sql, params=(), scope=None):
 
 
 def _source_body(name="crm", ctype="postgres", **extra):
-    settings = {"sqlite": {"path": "crm.db"}}.get(ctype, {"host": "db.example", "dbname": "crm", "user": "reader"})
+    settings = {"sqlite": {"path": "crm.db"}, **_PRO_SETTINGS}.get(
+        ctype, {"host": "db.example", "dbname": "crm", "user": "reader"})
     return {"name": name, "type": ctype, "settings": settings, "credentials": {"password": _SECRET}, **extra}
 
 
@@ -197,7 +202,7 @@ def _check_refusals(w):
     base = w.base(w.a)
     before = w.state()
     cases = [
-        (_source_body(ctype="oracle"), "unknown connector type"),
+        (_source_body(ctype="no_such_type_zq"), "unknown connector type"),
         ({**_source_body(), "settings": {"dsn": f"postgresql://u:{_SECRET}@h/db"}},
          "settings contain a key this connector type does not allow"),
         ({**_source_body(), "credentials": _SECRET}, "credentials must be an object"),
@@ -374,9 +379,14 @@ def _check_audit(w, src):
 
 
 def _check_no_connector_loaded(w):
-    for ctype in ("sqlite", "postgres", "mysql"):
-        r = w.op_call("POST", f"{w.base(w.b)}/sources", _source_body(name=ctype, ctype=ctype))
-        check(f"a {ctype} source is created", r.status_code == 200)
+    installed = connector_types.installed()
+    check("every built-in type is installed", {"sqlite", "postgres", "mysql"} <= {t.id for t in installed})
+    for ctype in installed:
+        r = w.op_call("POST", f"{w.base(w.b)}/sources", _source_body(name=ctype.id, ctype=ctype.id))
+        check(f"a {ctype.id} source ({ctype.tier}) is created", r.status_code == 200
+              and r.json()["source"]["type"] == ctype.id)
+        if ctype.tier == "pro":
+            check(f"{ctype.id} is a Pro type only because erebus-pro declares it", ctype.id in _PRO_SETTINGS)
     loaded = [m for m in sys.modules if m.startswith(_CONNECTOR_MODULES)]
     check("creating a source of every type loads no connector module or driver (SC-5)", not loaded)
 

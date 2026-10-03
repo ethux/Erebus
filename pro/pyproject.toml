@@ -22,6 +22,10 @@ pro = "erebus_pro.scheduler:register"
 [project.entry-points."erebus.schema"]
 pro = "erebus_pro.schema:SCHEMA_DIR"
 
+# Data only: the gateway loads it to accept the Pro connector types.
+[project.entry-points."erebus.source_types"]
+pro = "erebus_pro.source_types"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["erebus_pro*"]
