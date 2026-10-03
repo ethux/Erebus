@@ -2,7 +2,8 @@
 
 A connector wraps every driver or HTTP failure in ``ConnectorError(kind)``, raised
 ``from None``: its message is the class's fixed text, never a host, DSN, credential or
-value. ``LicenseRequired`` is raised by Pro connectors without their license feature.
+value. ``LicenseRequired`` is raised by Pro connectors without their license feature,
+``DriverMissing`` by one whose optional driver extra is not installed.
 Pure: no store, config or gateway import.
 """
 from __future__ import annotations
@@ -20,6 +21,7 @@ CONNECTOR_TEXT = {
     "settings": "source settings are not valid",
 }
 _FEATURE = re.compile(r"[a-z0-9_.-]{1,64}")
+_REQUIREMENT = re.compile(r"[a-z0-9_.-]{1,64}\[[a-z0-9_-]{1,32}\]")
 
 
 class ConnectorError(Exception):
@@ -47,3 +49,14 @@ class LicenseRequired(PermissionError):
             raise ValueError("malformed license feature")
         super().__init__(f"requires Erebus Pro (feature {feature})")
         self.feature = feature
+
+
+class DriverMissing(RuntimeError):
+    """The driver a source needs comes from an optional extra (``package[extra]``) that is
+    not installed; the message, naming it, is stored as is."""
+
+    def __init__(self, requirement: str) -> None:
+        if not _REQUIREMENT.fullmatch(requirement):
+            raise ValueError("malformed requirement")
+        super().__init__(f"requires the {requirement} extra")
+        self.requirement = requirement

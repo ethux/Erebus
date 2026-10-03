@@ -37,7 +37,7 @@ import psycopg
 
 from ..cataloging import connector_types, field_rules
 from ..cataloging import sources as contract
-from ..cataloging.connector_errors import ConnectorError, LicenseRequired
+from ..cataloging.connector_errors import ConnectorError, DriverMissing, LicenseRequired
 from ..gateway import catalog
 from ..gateway.connectors import fields, jobs, sources
 from ..gateway.crypto.keyprovider import CryptoErased, KeyProvider
@@ -63,11 +63,11 @@ class LeaseLost(Exception):
 class JobFailed(Exception):
     """A job failure of ``error_class`` (a ``policy.ERROR_TEXT`` key)."""
 
-    def __init__(self, error_class: str, *, reset_at: datetime | None = None, license_message: str | None = None):
+    def __init__(self, error_class: str, *, reset_at: datetime | None = None, detail: str | None = None):
         super().__init__(error_class)
         self.error_class = error_class
         self.reset_at = reset_at
-        self.license_message = license_message
+        self.detail = detail
 
 
 @dataclass
@@ -101,7 +101,9 @@ def classify(exc: BaseException) -> JobFailed:
     if isinstance(exc, ConnectorError):
         return JobFailed(exc.kind, reset_at=_reset_at(exc.reset_at))
     if isinstance(exc, LicenseRequired):
-        return JobFailed("license", license_message=str(exc))
+        return JobFailed("license", detail=str(exc))
+    if isinstance(exc, DriverMissing):
+        return JobFailed("driver", detail=str(exc))
     if isinstance(exc, PolicyError):
         return JobFailed(exc.kind)
     if isinstance(exc, CryptoErased):

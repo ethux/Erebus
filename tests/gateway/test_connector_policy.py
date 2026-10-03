@@ -52,11 +52,20 @@ def _check_failure_policy():
         check(f"{cls} fails unretried and flags the source", (out.status, out.needs_attention) == ("failed", True))
         check(f"{cls} counts as an attempt", out.attempts == 1)
 
-    lic = _fail("license", license_message="requires Erebus Pro (feature connectors.snowflake)")
+    lic = _fail("license", detail="requires Erebus Pro (feature connectors.snowflake)")
     check("LicenseRequired fails unretried and flags the source", (lic.status, lic.needs_attention) == ("failed", True))
     check("LicenseRequired text is stored verbatim", lic.error == "requires Erebus Pro (feature connectors.snowflake)")
-    odd = _fail("license", license_message="requires Erebus Pro (feature x) password=hunter2")
+    odd = _fail("license", detail="requires Erebus Pro (feature x) password=hunter2")
     check("a license message of another shape falls back to fixed text", "hunter2" not in odd.error)
+    drv = _fail("driver", detail="requires the erebus-pro[mssql-entra] extra")
+    check("a missing driver fails unretried and flags the source",
+          (drv.status, drv.needs_attention) == ("failed", True))
+    check("... naming the extra to install", drv.error == "requires the erebus-pro[mssql-entra] extra")
+    odd = _fail("driver", detail="requires the x[y] extra; password=hunter2")
+    check("a driver message of another shape falls back to fixed text",
+          odd.error == policy.ERROR_TEXT["driver"] and "hunter2" not in odd.error)
+    check("a license message is not kept for another class",
+          _fail("driver", detail="requires Erebus Pro (feature x)").error == policy.ERROR_TEXT["driver"])
 
     for cls in ("unreachable", "query"):
         waits = []

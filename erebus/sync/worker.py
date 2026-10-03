@@ -160,7 +160,7 @@ class Worker:
             log.warning("job %s: %s failed: %s", job.id, job.kind, failure.error_class)
         try:
             outcome = jobs.fail(conn, job, failure.error_class, timings=self.config.timings,
-                                reset_at=failure.reset_at, license_message=failure.license_message)
+                                reset_at=failure.reset_at, detail=failure.detail)
             if outcome is None:
                 log.warning("job %s: lease lost before the failure was recorded", job.id)
                 return

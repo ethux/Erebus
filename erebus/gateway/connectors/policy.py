@@ -2,7 +2,8 @@
 
 No database, config or connector import: the job store and the worker apply these, and
 the pure tests check them directly. Every error a job row can carry is a fixed text
-from ``ERROR_TEXT`` (SC-4); only a well-formed LicenseRequired message is kept as is.
+from ``ERROR_TEXT`` (SC-4); only a well-formed LicenseRequired or DriverMissing message
+is kept as is.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from ...cataloging.connector_errors import CONNECTOR_TEXT
 ERROR_TEXT = {
     **CONNECTOR_TEXT,
     "license": "requires Erebus Pro",
+    "driver": "a required driver is not installed",
     "crypto_erased": "tenant keys erased",
     "lease": "worker lease expired",
     "internal": "internal error",
@@ -29,11 +31,13 @@ ERROR_TEXT = {
 }
 
 # Unretried, and the source is marked needs_attention: a person must act.
-_FATAL = frozenset({"auth", "permission", "incomplete", "license", "crypto_erased", "settings", "denied",
-                    "unknown_type", "unsupported"})
+_FATAL = frozenset({"auth", "permission", "incomplete", "license", "driver", "crypto_erased", "settings",
+                    "denied", "unknown_type", "unsupported"})
 # Unretried, the source left as it is: an admin paused it.
 _SKIPPED = frozenset({"paused"})
-_LICENSE_TEXT = re.compile(r"requires Erebus Pro \(feature [a-z0-9_.-]{1,64}\)")
+# The exception's own text, kept only in exactly this shape.
+_DETAIL_TEXT = {"license": re.compile(r"requires Erebus Pro \(feature [a-z0-9_.-]{1,64}\)"),
+                "driver": re.compile(r"requires the [a-z0-9_.-]{1,64}\[[a-z0-9_-]{1,32}\] extra")}
 
 # The value rules applied at upsert live with the field rules (spec 015 D2).
 MIN_VALUE_CHARS = field_rules.MIN_VALUE_CHARS
@@ -64,10 +68,11 @@ class Outcome:
     needs_attention: bool = False
 
 
-def error_text(error_class: str, license_message: str | None = None) -> str:
+def error_text(error_class: str, detail: str | None = None) -> str:
     """Fixed text for ``error_class``; unknown classes read as internal."""
-    if error_class == "license" and license_message and _LICENSE_TEXT.fullmatch(license_message):
-        return license_message
+    shape = _DETAIL_TEXT.get(error_class)
+    if shape is not None and detail and shape.fullmatch(detail):
+        return detail
     return ERROR_TEXT.get(error_class, ERROR_TEXT["internal"])
 
 
@@ -79,7 +84,7 @@ def failure_outcome(
     now: datetime,
     timings: JobTimings,
     reset_at: datetime | None = None,
-    license_message: str | None = None,
+    detail: str | None = None,
 ) -> Outcome:
     """Decide retry, wait or failure for a job that raised ``error_class``.
 
@@ -88,7 +93,7 @@ def failure_outcome(
     """
     if error_class not in ERROR_TEXT or error_class == "lease":
         error_class = "internal"
-    text = error_text(error_class, license_message)
+    text = error_text(error_class, detail)
     if error_class in _FATAL:
         return Outcome("failed", text, attempts + 1, needs_attention=True)
     if error_class in _SKIPPED:

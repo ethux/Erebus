@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 from erebus.cataloging import connector_types
-from erebus.cataloging.connector_errors import CONNECTOR_TEXT, ConnectorError, LicenseRequired
+from erebus.cataloging.connector_errors import CONNECTOR_TEXT, ConnectorError, DriverMissing, LicenseRequired
 from erebus.cataloging.connector_types import ConnectorType
 from erebus.gateway.connectors import policy
 
@@ -108,9 +108,14 @@ def _check_errors():
     check("LicenseRequired is a PermissionError", isinstance(lic, PermissionError))
     check("LicenseRequired names the feature", str(lic) == "requires Erebus Pro (feature connectors.snowflake)")
     check("a malformed feature is refused", _raises(ValueError, lambda: LicenseRequired("a b")))
+    missing = DriverMissing("erebus-pro[mssql-entra]")
+    check("DriverMissing names the extra to install", str(missing) == "requires the erebus-pro[mssql-entra] extra"
+          and missing.requirement == "erebus-pro[mssql-entra]")
+    check("DriverMissing takes only a package[extra] name",
+          all(_raises(ValueError, lambda r=r: DriverMissing(r)) for r in ("erebus-pro", "a b[c]", "x[y] pw=1", "")))
     from erebus.cataloging import sources
-    check("the contract re-exports both", sources.ConnectorError is ConnectorError
-          and sources.LicenseRequired is LicenseRequired)
+    check("the contract re-exports all three", sources.ConnectorError is ConnectorError
+          and sources.LicenseRequired is LicenseRequired and sources.DriverMissing is DriverMissing)
 
 
 def main():

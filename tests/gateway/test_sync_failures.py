@@ -22,7 +22,7 @@ from helpers import fresh_db
 from psycopg_pool import ConnectionPool
 from sync_fakes import FakeConnector, Field, Table, config, customers, lookup
 
-from erebus.cataloging.sources import ConnectorError, LicenseRequired
+from erebus.cataloging.sources import ConnectorError, DriverMissing, LicenseRequired
 from erebus.gateway import catalog
 from erebus.gateway.connectors import jobs, sources
 from erebus.gateway.crypto.keyprovider import LocalKms
@@ -244,6 +244,13 @@ def _check_retries(env):
     job = env.run()
     check("LicenseRequired is stored verbatim and unretried",
           job.status == "failed" and job.error == "requires Erebus Pro (feature connectors.postgres)")
+    env.set_status("active")
+
+    env.pg.fail[("connect", "*")] = DriverMissing("erebus-pro[mssql-entra]")
+    job = env.run()
+    check("a missing optional driver is stored by name, unretried, and flags the source",
+          job.status == "failed" and job.attempts == 1 and job.error == "requires the erebus-pro[mssql-entra] extra"
+          and env.status() == "needs_attention")
     env.set_status("active")
 
     reset = datetime.now(UTC) + timedelta(minutes=20)
