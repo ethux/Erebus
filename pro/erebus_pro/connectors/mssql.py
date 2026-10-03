@@ -44,6 +44,9 @@ from . import _mssql_drivers as drivers
 from . import _warehouse
 from ._licensed import LicensedConnector
 
+# A DNS name or an IPv4 address: FreeTDS must find the configuration section named after
+# the host, so no ":" it would read as a port and nothing near its 256-byte line limit.
+_HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,228}[A-Za-z0-9])?")
 _DATABASE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.$#@ -]{0,127}")
 _USER = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.$#@-]{0,127}")
 _CLIENT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
@@ -110,7 +113,7 @@ def _hostaddr(settings: dict[str, Any]) -> str:
 
 def _params(settings: dict[str, Any]) -> dict[str, Any]:
     """The connection parameters; ``settings`` errors first."""
-    host = _warehouse.setting(settings, "host", required=True).lower()
+    host = _warehouse.setting(settings, "host", _HOST, required=True).lower()
     port = settings.get("port", 1433)
     sslmode = settings.get("sslmode") or "verify-full"
     if type(port) is not int or not 0 < port < 65536 or sslmode not in _SSL_MODES:

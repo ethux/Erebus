@@ -460,7 +460,8 @@ or later and does not support native network encryption or Kerberos. Fields come
 read runs in a read-only transaction; CLOB values over 1,000 characters are skipped.
 
 MSSQL (SQL Server and Azure SQL) is a database the worker dials like Postgres: its host
-lists apply and `sslmode` works the same, except that there is no `prefer`. The default
+lists apply and `sslmode` works the same, except that there is no `prefer`. `host` is a
+DNS name or an IPv4 address; reach an IPv6-only server through its DNS name. The default
 `verify-full` checks the certificate against the system CAs and the name against `host`
 before the password is sent; add a private CA through `SSL_CERT_FILE` on the worker, or
 use `require` for a server with a self-signed certificate (SQL Server's default). With

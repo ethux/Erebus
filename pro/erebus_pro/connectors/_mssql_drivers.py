@@ -5,15 +5,21 @@
 **pymssql** (FreeTDS) signs in SQL logins. FreeTDS resolves server names itself and reads
 its settings from ``freetds.conf`` and ``TDS*`` environment variables, so the connector
 writes a private configuration (a 0700 directory, a 0600 file, no credential in it) whose
-one section, named ``<host>:<port>``, sends FreeTDS to the checked ``hostaddr`` and sets
-TLS: ``encryption = require``; for ``verify-*`` a copy of the system CA bundle as
-``ca file``; for ``verify-full`` the certificate's name checked against ``host``
-(``certificate hostname``, FreeTDS's ``HostNameInCertificate``). FreeTDS checks the name
-after the handshake and before it sends the login, so a wrong name never gets the
-password. ``FREETDSCONF`` points at that file and ``TDSHOST``, ``TDSPORT``, ``TDSVER``,
-``TDSDUMP`` and ``TDSDUMPCONFIG`` are dropped from the environment, since FreeTDS reads
-them during ``dbopen``; connects are serialized and the file is emptied afterwards. The
-login asks for read-only intent (``ApplicationIntent=ReadOnly``).
+one section, named ``<host>``, sends FreeTDS to the checked ``hostaddr`` and sets TLS.
+pymssql asks for ``<host>:<port>``; no section has that name, so FreeTDS drops the port,
+reads the ``<host>`` section and names exactly ``host`` in the login. That holds only for
+a host without ``:`` and short enough for FreeTDS's 256-byte lines, so the connector takes
+DNS names and IPv4 addresses of up to 230 characters. TLS: ``encryption = require``; for
+``verify-*`` a copy of the system CA bundle as ``ca file``; for ``verify-full`` the
+certificate's name checked against ``host`` (``certificate hostname``, FreeTDS's
+``HostNameInCertificate``). FreeTDS checks the name after the handshake and before it
+sends the login, so a wrong name never gets the password. ``FREETDSCONF`` points at that
+file and ``TDSHOST``, ``TDSPORT``, ``TDSVER``, ``TDSDUMP``, ``TDSDUMPCONFIG`` and
+``FREETDS`` are dropped from the environment, since FreeTDS reads them during ``dbopen``;
+connects are serialized and the file is emptied afterwards. Before it drops the port,
+FreeTDS also looks for ``<host>:<port>`` in the worker user's ``~/.freetds.conf`` and
+``~/.config/freetds.conf``, as for any pymssql client: the worker should have neither.
+The login asks for read-only intent (``ApplicationIntent=ReadOnly``).
 
 **mssql-python** signs in an Entra service principal (``ActiveDirectoryServicePrincipal``
 with the client id and secret) through Microsoft's ODBC driver, which it bundles under
@@ -41,7 +47,7 @@ from erebus.cataloging.connector_errors import ConnectorError, DriverMissing
 from . import _warehouse
 
 ENTRA_EXTRA = "erebus-pro[mssql-entra]"
-_TDS_ENV = ("TDSHOST", "TDSPORT", "TDSVER", "TDSDUMP", "TDSDUMPCONFIG")
+_TDS_ENV = ("TDSHOST", "TDSPORT", "TDSVER", "TDSDUMP", "TDSDUMPCONFIG", "FREETDS")
 _CA_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem")
 _LOCK = threading.Lock()
 _DIR: list[str] = []
@@ -116,7 +122,7 @@ def _write(path: str, text: str) -> None:
 def _configure(p: dict[str, Any]) -> str:
     """Write the FreeTDS section for this connection and point FreeTDS at it."""
     where = _private_dir()
-    lines = [f"[{p['host']}:{p['port']}]", f"host = {p['hostaddr']}", f"port = {p['port']}", "tds version = 7.4",
+    lines = [f"[{p['host']}]", f"host = {p['hostaddr']}", f"port = {p['port']}", "tds version = 7.4",
              f"encryption = {'off' if p['sslmode'] == 'disable' else 'require'}"]
     if p["sslmode"] in ("verify-full", "verify-ca"):
         cas = _system_cas()

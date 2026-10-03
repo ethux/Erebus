@@ -57,9 +57,11 @@ class TestCa:
         return builder.sign(self.key, self._hashes.SHA256())
 
     def issue(self, cn):
-        """The PEM of a key and a certificate for ``cn``, signed by this CA."""
+        """The PEM of a key and a certificate for ``cn`` (a name over 64 characters goes in the
+        subject alternative name only), signed by this CA."""
         key = self._ec.generate_private_key(self._ec.SECP256R1())
-        subject = self._x509.Name([self._x509.NameAttribute(self._x509.oid.NameOID.COMMON_NAME, cn)])
+        common = cn if len(cn) <= 64 else "zq"
+        subject = self._x509.Name([self._x509.NameAttribute(self._x509.oid.NameOID.COMMON_NAME, common)])
         cert = self._build(subject, self.cert.subject, key.public_key(), dns=cn)
         return (key.private_bytes(self._ser.Encoding.PEM, self._ser.PrivateFormat.PKCS8,
                                   self._ser.NoEncryption()).decode()
@@ -135,8 +137,9 @@ def _signed_in(conn, tls, incoming):
 
 
 @contextlib.contextmanager
-def tds_listener(ca, server_name):
-    """Yield ``(port, events)`` for a TLS-only TDS listener on 127.0.0.1."""
+def tds_listener(ca, server_name, port=0):
+    """Yield ``(port, events)`` for a TLS-only TDS listener on 127.0.0.1 (``port``, or any)."""
+    srv = socket.create_server(("127.0.0.1", port))
     tmp = tempfile.TemporaryDirectory()
     chain = os.path.join(tmp.name, "server.pem")
     with open(chain, "w", encoding="utf-8") as fh:
@@ -144,7 +147,6 @@ def tds_listener(ca, server_name):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(chain)
     events = []
-    srv = socket.create_server(("127.0.0.1", 0))
 
     def serve():
         while True:

@@ -14,8 +14,8 @@ Either way the connector dials the address the sync worker checked (``hostaddr``
 for read-only intent, and checks TLS against ``host``: by default with the certificate
 verified against the system CAs and its name matched before the password is sent;
 ``verify-ca``, ``require`` and ``disable`` relax that. FreeTDS gets a private
-configuration naming exactly that address; no user configuration or TDS environment
-applies. A TLS-only TDS listener stands in for the server in the TLS checks.
+configuration naming exactly that address; no TDS environment variable applies. A
+TLS-only TDS listener stands in for the server in the TLS checks.
 
 The live checks need the throwaway server named by ``EREBUS_TEST_MSSQL_DSN`` (skipped
 without it unless ``EREBUS_REQUIRE_MSSQL=1``): an encrypted, tagged session, text
@@ -155,9 +155,9 @@ def _check_driver_params():
           kw["read_only"] is True and kw["appname"] == "erebus-sync" and kw["login_timeout"] == 10
           and kw["timeout"] == 600 and kw["autocommit"] is True)
     sections = _conf(conf["text"])
-    check("FreeTDS gets one section, named by host and port, as the server it is asked for",
-          list(sections) == ["db.zq.test:1433"] and (kw["server"], kw["port"]) == ("db.zq.test", "1433"))
-    section = sections["db.zq.test:1433"]
+    check("FreeTDS gets one section, named by host (pymssql asks for host:port, FreeTDS then drops the port)",
+          list(sections) == ["db.zq.test"] and (kw["server"], kw["port"]) == ("db.zq.test", "1433"))
+    section = sections["db.zq.test"]
     check("... which dials the checked address, never the name",
           (section["host"], section["port"]) == ("127.0.0.1", "1433"))
     check("verify-full: TLS required, the certificate verified and its name checked against host",
@@ -171,18 +171,18 @@ def _check_driver_params():
           not os.path.isfile(conf["path"]) or Path(conf["path"]).read_text(encoding="utf-8") == "")
 
     _, _, conf = _sent({**_BASE, "sslmode": "verify-ca"}, {"password": "x"})
-    section = _conf(conf["text"])["db.zq.test:1433"]
+    section = _conf(conf["text"])["db.zq.test"]
     check("verify-ca: the certificate verified, no name check",
           section["check certificate hostname"] == "no" and "certificate hostname" not in section and conf["ca"])
     _, kw, conf = _sent({**_BASE, "sslmode": "require"}, {"password": "x"})
-    section = _conf(conf["text"])["db.zq.test:1433"]
+    section = _conf(conf["text"])["db.zq.test"]
     check("require: TLS without verification", section["encryption"] == "require" and "ca file" not in section)
     _, kw, conf = _sent({**_BASE, "sslmode": "disable"}, {"password": "x"})
-    section = _conf(conf["text"])["db.zq.test:1433"]
+    section = _conf(conf["text"])["db.zq.test"]
     check("disable: no TLS asked for", section["encryption"] == "off" and kw["encryption"] == "off")
     _, kw, conf = _sent({**_BASE, "port": 14330}, {"password": "x"})
-    check("another port names the section and is dialled",
-          _conf(conf["text"])["db.zq.test:14330"]["port"] == "14330" and kw["port"] == "14330")
+    check("another port is dialled",
+          _conf(conf["text"])["db.zq.test"]["port"] == "14330" and kw["port"] == "14330")
 
 
 def _check_settings():
@@ -231,7 +231,7 @@ def _check_tds_environment():
     with _env(TDSHOST="203.0.113.9", TDSPORT="1", TDSDUMP="/tmp/erebus-zq-tds.log", FREETDSCONF="/nonexistent"):
         _, _, conf = _sent(_BASE, {"password": "x"})
         leaked = {k for k in ("TDSHOST", "TDSPORT", "TDSDUMP") if k in os.environ}
-    check("FreeTDS reads only the connector's configuration, and no TDS variable redirects or dumps the session",
+    check("FreeTDS reads the connector's configuration, and no TDS variable redirects or dumps the session",
           conf["text"] and not leaked and not os.path.exists("/tmp/erebus-zq-tds.log"))
 
 
