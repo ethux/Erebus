@@ -28,8 +28,9 @@ The login asks for read-only intent (``ApplicationIntent=ReadOnly``).
 **mssql-python** signs in an Entra service principal (``ActiveDirectoryServicePrincipal``
 with the client id and secret) through Microsoft's ODBC driver, which it bundles under
 Microsoft's license. It is only the optional extra ``erebus-pro[mssql-entra]``; without
-it ``DriverMissing`` names the extra. The connection string dials ``tcp:<hostaddr>,<port>``
-and checks the certificate against ``host`` (``HostNameInCertificate``).
+it ``DriverMissing`` names the extra. The connection string names ``host`` as the server,
+dials ``tcp:<hostaddr>,<port>`` (``Addr``) and checks the certificate against ``host``, or
+an Azure SQL zone's wildcard (``HostNameInCertificate``).
 
 Errors are classed by the SQL Server message number (pymssql) or the driver's text
 (mssql-python), which is read only for that and never shown.
@@ -177,15 +178,20 @@ def _brace(value: str) -> str:
 
 
 def entra_string(p: dict[str, Any], secret: str) -> str:
-    """The ODBC connection string for a service principal; every value braced."""
+    """The ODBC connection string for a service principal; every value braced.
+
+    ``Server`` names ``host`` (Azure SQL finds the database by the server name in the login)
+    and ``Addr`` dials the checked address: per Microsoft's ODBC documentation ``Addr``
+    (``Address``) takes precedence over ``Server`` for the network connection. That is not
+    verified against the real driver here, which is never installed (Microsoft's license)."""
     addr = p["hostaddr"]
     if ipaddress.ip_address(addr).version == 6:
         addr = f"[{addr}]"
-    keys = {"Server": f"tcp:{addr},{p['port']}", "Database": p["database"],
+    keys = {"Server": f"tcp:{p['host']},{p['port']}", "Addr": f"tcp:{addr},{p['port']}", "Database": p["database"],
             "Authentication": "ActiveDirectoryServicePrincipal", "UID": p["client_id"], "PWD": secret,
             "Encrypt": "yes", "TrustServerCertificate": "no" if p["sslmode"] == "verify-full" else "yes"}
     if p["sslmode"] == "verify-full":
-        keys["HostNameInCertificate"] = p["host"]
+        keys["HostNameInCertificate"] = certificate_name(p["host"])
     keys.update(ApplicationIntent="ReadOnly", ConnectRetryCount="0")
     return ";".join(f"{k}={_brace(v)}" for k, v in keys.items())
 

@@ -406,8 +406,9 @@ def _check_entra():
         check("... as the service principal (client id and secret)",
               keys["Authentication"] == "ActiveDirectoryServicePrincipal" and keys["UID"] == _CLIENT_ID
               and keys["PWD"] == secret)
-        check("... dialling the checked address, the database named",
-              keys["Server"] == "tcp:127.0.0.1,1433" and keys["Database"] == "crm")
+        check("... naming the host as the server and dialling the checked address (Addr), the database named",
+              keys["Server"] == "tcp:db.zq.test,1433" and keys["Addr"] == "tcp:127.0.0.1,1433"
+              and keys["Database"] == "crm")
         check("... encrypted, the certificate verified and checked against host",
               keys["Encrypt"] == "yes" and keys["TrustServerCertificate"] == "no"
               and keys["HostNameInCertificate"] == "db.zq.test")
@@ -436,6 +437,13 @@ def _check_entra():
         check("Entra require: encrypted, the certificate not verified",
               keys["Encrypt"] == "yes" and keys["TrustServerCertificate"] == "yes"
               and "HostNameInCertificate" not in keys)
+        _connector().connect({**_ENTRA, "host": "zqserver.database.windows.net", "hostaddr": "2001:db8::5"},
+                             {"client_secret": secret}).close()
+        keys = fake.calls[1]["keys"]
+        check("Entra on Azure SQL: the server named, an IPv6 address dialled, the certificate checked "
+              "against the zone's wildcard", keys["Server"] == "tcp:zqserver.database.windows.net,1433"
+              and keys["Addr"] == "tcp:[2001:db8::5],1433"
+              and keys["HostNameInCertificate"] == "*.database.windows.net")
 
         cases = {"auth": "Driver Error: Invalid authorization specification; DDBC Error: Login failed for user "
                          "'<token-identified principal>'. AADSTS7000215: Invalid client secret",
@@ -452,7 +460,7 @@ def _check_entra():
         fake.refuse = None
         exc = _error(lambda: _connector().connect(_ENTRA, {}))
         check("Entra without a client secret is an auth error, before dialling",
-              exc.kind == "auth" and len(fake.calls) == 3)
+              exc.kind == "auth" and len(fake.calls) == 4)
 
 
 def _check_packaging():
