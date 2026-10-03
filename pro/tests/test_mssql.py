@@ -225,6 +225,13 @@ def _check_error_classes():
           kind(18456, b"DB-Lib error message 20009, severity 9:\nUnable to connect\n", connecting=True)
           == "unreachable" and kind(229, b"DB-Lib error message 20047, severity 9:\nDBPROCESS is dead\n")
           == "unreachable")
+    azure = {40531: (b"Server name cannot be determined.", "auth"),
+             40532: (b"Cannot open server \"zq\" requested by the login. The login failed.", "auth"),
+             40615: (b"Cannot open server 'zq' requested by the login. Client with IP address '203.0.113.7' is not "
+                     b"allowed to access the server.", "permission")}
+    check("Azure SQL refusing the server named in the login (40531, 40532) is 'auth', its firewall (40615) "
+          "'permission'", all(kind(code, text + server, connecting=True) == want
+                              for code, (text, want) in azure.items()))
 
 
 def _check_tds_environment():
@@ -445,22 +452,31 @@ def _check_entra():
               and keys["Addr"] == "tcp:[2001:db8::5],1433"
               and keys["HostNameInCertificate"] == "*.database.windows.net")
 
-        cases = {"auth": "Driver Error: Invalid authorization specification; DDBC Error: Login failed for user "
-                         "'<token-identified principal>'. AADSTS7000215: Invalid client secret",
-                 "unreachable": "Driver Error: Client unable to establish connection; DDBC Error: TCP Provider: "
-                                "Error code 0x2749 (db.zq.test)"}
-        for kind, text in cases.items():
+        sql = "DDBC Error: [Microsoft][ODBC Driver 18 for SQL Server][SQL Server]"
+        cases = [("a rejected secret", "auth", "Driver Error: Invalid authorization specification; DDBC Error: Login "
+                  "failed for user '<token-identified principal>'. AADSTS7000215: Invalid client secret"),
+                 ("Azure SQL refusing the server named (40532)", "auth", "Driver Error: Server rejected the "
+                  f"connection; {sql}Cannot open server \"zq\" requested by the login. The login failed."),
+                 ("Azure SQL not finding the server name (40531)", "auth", "Driver Error: Client unable to establish "
+                  f"connection; {sql}Server name cannot be determined. It must appear as the first segment of the "
+                  "server's dns name (servername.database.windows.net)."),
+                 ("Azure SQL's firewall (40615)", "permission", "Driver Error: Invalid authorization specification; "
+                  f"{sql}Cannot open server 'zq' requested by the login. Client with IP address '203.0.113.7' is not "
+                  "allowed to access the server."),
+                 ("a refused TCP connection", "unreachable", "Driver Error: Client unable to establish connection; "
+                  "DDBC Error: TCP Provider: Error code 0x2749 (db.zq.test)")]
+        for case, kind, text in cases:
             fake.refuse = fake.OperationalError(f"{text} {secret}")
             exc = _error(lambda: _connector().connect(_ENTRA, {"client_secret": secret}))
-            check(f"a driver failure is a fixed '{kind}' error without the secret, host or driver text",
+            check(f"Entra: {case} is a fixed '{kind}' error without the secret, host or driver text",
                   exc.kind == kind and exc.__cause__ is None and exc.__suppress_context__
-                  and not any(h in _shown(exc) for h in (secret, "db.zq.test", "AADSTS", "TCP Provider")))
+                  and not any(h in _shown(exc) for h in (secret, "db.zq.test", "AADSTS", "TCP Provider", "zq'")))
         exc = _error(lambda: _connector().connect({**_ENTRA, "client_id": None}, {"client_secret": secret}))
         check("Entra needs a client id", exc.kind == "settings")
         fake.refuse = None
         exc = _error(lambda: _connector().connect(_ENTRA, {}))
         check("Entra without a client secret is an auth error, before dialling",
-              exc.kind == "auth" and len(fake.calls) == 4)
+              exc.kind == "auth" and len(fake.calls) == 7)
 
 
 def _check_packaging():

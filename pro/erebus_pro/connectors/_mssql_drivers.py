@@ -58,17 +58,23 @@ _AZURE_ZONES = ("database.windows.net", "database.usgovcloudapi.net", "database.
 _LOCK = threading.Lock()
 _DIR: list[str] = []
 
-# SQL Server message numbers, and FreeTDS's own (200xx).
-_AUTH = frozenset({18456, 18470, 18486, 18487, 18488})
-_PERMISSION = frozenset({229, 230, 262, 297, 300, 916, 3906, 4060})
+# SQL Server message numbers, and FreeTDS's own (200xx). Azure SQL refuses a login naming
+# no server it knows (40531, 40532) and a client address its firewall does not allow
+# (40615): both stay refused until an admin acts, so neither is retried as unreachable.
+_AUTH = frozenset({18456, 18470, 18486, 18487, 18488, 40531, 40532})
+_PERMISSION = frozenset({229, 230, 262, 297, 300, 916, 3906, 4060, 40615})
 _UNREACHABLE = frozenset({20002, 20003, 20004, 20006, 20009, 20017, 20047, 40197, 40501, 40613})
 _DBLIB = re.compile(rb"DB-Lib error message (\d+)")
 _SERVER_SAID = 20018  # FreeTDS: "General SQL Server error: Check messages from the SQL Server"
-# What mssql-python's errors say, for classing only.
-_ENTRA_AUTH = ("Login failed", "AADSTS", "Invalid authorization specification")
-_ENTRA_PERMISSION = ("permission was denied", "is not able to access the database", "Cannot open database")
-_ENTRA_UNREACHABLE = ("Client unable to establish connection", "Communication link failure", "Timeout expired",
-                      "TCP Provider", "SSL Provider")
+# What mssql-python's errors say (lower case), for classing only, in order: Azure's
+# firewall refusal (40615) may come as an authorization error.
+_ENTRA_MARKS = (
+    ("permission", ("is not allowed to access the server",)),
+    ("auth", ("login failed", "aadsts", "invalid authorization specification", "server name cannot be determined")),
+    ("permission", ("permission was denied", "is not able to access the database", "cannot open database")),
+)
+_ENTRA_UNREACHABLE = ("client unable to establish connection", "communication link failure", "timeout expired",
+                      "tcp provider", "ssl provider")
 
 
 def pymssql_kind(exc: BaseException, *, connecting: bool) -> str:
@@ -90,11 +96,10 @@ def pymssql_kind(exc: BaseException, *, connecting: bool) -> str:
 
 
 def entra_kind(exc: BaseException, *, connecting: bool) -> str:
-    text = str(exc)
-    if any(mark in text for mark in _ENTRA_AUTH):
-        return "auth"
-    if any(mark in text for mark in _ENTRA_PERMISSION):
-        return "permission"
+    text = str(exc).lower()
+    for kind, marks in _ENTRA_MARKS:
+        if any(mark in text for mark in marks):
+            return kind
     if connecting or any(mark in text for mark in _ENTRA_UNREACHABLE):
         return "unreachable"
     return "query"
