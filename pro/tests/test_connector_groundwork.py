@@ -13,13 +13,14 @@ default entitlements come from the worker's license environment.
 import os
 import subprocess
 import sys
-import time
-import tomllib
-from importlib import metadata
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests", "gateway"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from warehouse_backends import declared_entry_points, licensed
 
 from erebus.cataloging import connector_types
 from erebus.cataloging.connector_errors import LicenseRequired
@@ -38,21 +39,8 @@ def check(name, cond):
     _passed += 1
 
 
-def entry_points(group):
-    """The entry points ``pro/pyproject.toml`` declares for ``group`` (installed or not)."""
-    with open(_PRO / "pyproject.toml", "rb") as fh:
-        declared = tomllib.load(fh)["project"]["entry-points"].get(group, {})
-    return [metadata.EntryPoint(name, value, group) for name, value in declared.items()]
-
-
-def licensed(features, *, expires_in=86400):
-    from erebus_pro.license import Entitlements, License
-    now = int(time.time())
-    return Entitlements(License("lic-zq", "Acme", frozenset(features), now - 86400, now + expires_in))
-
-
 def _check_types():
-    eps = entry_points(connector_types.GROUP)
+    eps = declared_entry_points(connector_types.GROUP)
     check("erebus-pro declares one erebus.source_types entry point", len(eps) == 1)
     types = connector_types.load_types(eps=eps)
     for tid in ("snowflake", "bigquery"):

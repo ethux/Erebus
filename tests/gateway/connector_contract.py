@@ -17,6 +17,7 @@ sent, which must all be single reads.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import traceback
@@ -176,14 +177,17 @@ def _shown(exc):
 
 
 def _sanitized(b, connector):
-    for case, settings, secrets, kind, hidden in b.bad_cases():
+    """``bad_cases()`` rows: (case, settings, secrets, kind, hidden texts[, a context manager
+    the attempt runs in, for a failure only the driver boundary can raise])."""
+    for case, settings, secrets, kind, hidden, *around in b.bad_cases():
         def attempt(settings=settings, secrets=secrets):
             src = connector.connect(settings, secrets)
             try:
                 src.list_collections()
             finally:
                 src.close()
-        exc = _error(attempt)
+        with around[0] if around else contextlib.nullcontext():
+            exc = _error(attempt)
         check(f"{b.name}: {case} fails as '{kind}' with fixed text", _fixed(exc, kind))
         shown = _shown(exc)
         check(f"{b.name}: {case}: no host, DSN, user, password or value shown",
