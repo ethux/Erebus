@@ -345,7 +345,7 @@ with a token, also when detection would miss them. A connector only reads.
 
 | | Free | Erebus Pro |
 |---|---|---|
-| Sources | SQLite, Postgres, MySQL | also Snowflake, BigQuery, Databricks and Oracle (features `connectors.snowflake`, `connectors.bigquery`, `connectors.databricks`, `connectors.oracle`) |
+| Sources | SQLite, Postgres, MySQL | also Snowflake, BigQuery, Databricks, Oracle and MSSQL / Azure SQL (features `connectors.snowflake`, `connectors.bigquery`, `connectors.databricks`, `connectors.oracle`, `connectors.mssql`) |
 | Syncs | a sample when a source is added or changed, then a full sync of the accepted fields; "sync now" | also scheduled syncs (feature `sync.schedule`) |
 
 Everything is managed through the admin API below, which only an operator credential
@@ -361,7 +361,7 @@ your health check window (about 80 seconds in the compose file).
 ### Sync worker
 
 `erebus-sync` reads the systems a tenant connects (SQLite, Postgres, MySQL; with Pro also
-Snowflake, BigQuery, Databricks and Oracle) and keeps
+Snowflake, BigQuery, Databricks, Oracle and MSSQL / Azure SQL) and keeps
 that tenant's known values in step with them. It is the only process that contacts
 those systems. It runs from the same image (the `sync-worker` service in the compose
 file) and needs `EREBUS_PG_DSN` and `EREBUS_GATEWAY_MASTER_KEY`, not the provider
@@ -421,10 +421,10 @@ GRANT SELECT ON crm.customers TO 'erebus_sync'@'%';
 GRANT SELECT ON crm.contacts TO 'erebus_sync'@'%';
 ```
 
-### Connecting a warehouse or Oracle (Pro)
+### Connecting a warehouse, Oracle or MSSQL (Pro)
 
 Needs erebus-pro (in the published image) and a license with `connectors.<type>`
-(`snowflake`, `bigquery`, `databricks` or `oracle`) in the sync worker's environment.
+(`snowflake`, `bigquery`, `databricks`, `oracle` or `mssql`) in the sync worker's environment.
 Without the feature the source's syncs fail with
 `requires Erebus Pro (feature connectors.<type>)`; its values keep matching.
 
@@ -434,6 +434,7 @@ Without the feature the source's syncs fail with
 | `bigquery` | `project`, `location`, `max_bytes_billed`, `auth` (`key` or `attached`), `schemas` (datasets), `collections` | `service_account_key` (the JSON key file); none with `auth: attached` |
 | `databricks` | `server_hostname` (the workspace host), `http_path` (the SQL warehouse's, `/sql/1.0/warehouses/<id>`), `catalog`, `client_id` (the service principal's application id), `schemas`, `collections` | `client_secret` (an OAuth secret of the service principal) |
 | `oracle` | `host`, `port` (`1521`), `service_name`, `user`, `sslmode`, `auth` (`password` or `wallet`), `schemas`, `collections` | `password`; for mutual TLS also `wallet_pem` (the wallet's `ewallet.pem`) and `wallet_password`; only `wallet_pem` with `auth: wallet` |
+| `mssql` | `host`, `port` (`1433`), `database`, `sslmode`, `auth` (`sql` or `entra`), `user` (SQL login), `client_id` (Entra: the service principal's application id), `schemas`, `collections` | `password` (SQL login) or `client_secret` (Entra) |
 
 Snowflake and BigQuery take no host: the driver derives it from the account or project.
 Databricks takes the workspace host, accepted only on Databricks' own domains
@@ -458,6 +459,30 @@ or later and does not support native network encryption or Kerberos. Fields come
 `ALL_TAB_COLUMNS` without Oracle-maintained schemas; collections are `OWNER.TABLE`. Every
 read runs in a read-only transaction; CLOB values over 1,000 characters are skipped.
 
+MSSQL (SQL Server and Azure SQL) is a database the worker dials like Postgres: its host
+lists apply and `sslmode` works the same, except that there is no `prefer`. The default
+`verify-full` checks the certificate against the system CAs and the name against `host`
+before the password is sent; add a private CA through `SSL_CERT_FILE` on the worker, or
+use `require` for a server with a self-signed certificate (SQL Server's default). With
+`disable` only the login packet is encrypted, and only if the server supports it.
+
+- SQL logins (`auth: sql`, the default) work out of the box: the driver, pymssql, ships
+  in the image.
+- Entra sign-in (`auth: entra`, a service principal with a client secret) needs
+  `pip install 'erebus-pro[mssql-entra]'` in the worker's image. That installs
+  Microsoft's mssql-python, which bundles the Microsoft ODBC Driver 18 under Microsoft's
+  license terms; whoever installs it accepts them. Without it the source's syncs fail
+  with `requires the erebus-pro[mssql-entra] extra`. Entra takes `sslmode` `verify-full`
+  or `require` only.
+
+Fields come from `INFORMATION_SCHEMA.COLUMNS` of `database` without system schemas;
+collections are `schema.table`. Each table is read in one query. SQL Server has no
+read-only session: the connector sends only reads and asks for read-only intent, so the
+read-only login is the guard. `text`, `ntext` and `(n)varchar(max)` values over 4,000
+characters are skipped. On Azure SQL, set the server's connection policy to Proxy so the
+session stays on the address the worker checked: with Redirect, Azure hands the client
+another node's address after sign-in.
+
 Grant only the tables that hold customer data. On a warehouse the read-only role is the
 only guard:
 
@@ -480,6 +505,16 @@ GRANT SELECT ON TABLE crm.sales.customers TO `<application-id>`;
 CREATE USER erebus_sync IDENTIFIED BY "<password>";
 GRANT CREATE SESSION TO erebus_sync;
 GRANT SELECT ON crm.customers TO erebus_sync;
+
+-- MSSQL: a SQL login (on Azure SQL, a contained user: CREATE USER ... WITH PASSWORD)
+CREATE LOGIN erebus_sync WITH PASSWORD = '<password>';
+USE crm;
+CREATE USER erebus_sync FOR LOGIN erebus_sync;
+GRANT SELECT ON sales.customers TO erebus_sync;
+
+-- MSSQL: an Entra service principal, in the database
+CREATE USER [<service-principal-name>] FROM EXTERNAL PROVIDER;
+GRANT SELECT ON sales.customers TO [<service-principal-name>];
 ```
 
 BigQuery: give the service account BigQuery Job User on the project and BigQuery Data

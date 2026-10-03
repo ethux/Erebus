@@ -101,6 +101,19 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 30
+      # Throwaway SQL Server (Developer edition, amd64 only) for the MSSQL connector's live tests.
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Mssql-ci-Zq7x
+        ports:
+          - "14330:1433"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Mssql-ci-Zq7x -Q 'SELECT 1' -b"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
     env:
       EREBUS_PG_DSN: postgresql://postgres:pg-ci-Zq9x@localhost:5432/postgres
       # The connector contract suite (SC-6) runs against this MySQL and fails without it.
@@ -114,6 +127,9 @@ jobs:
       EREBUS_TEST_ORACLE_DSN: oracle://system:oracle-ci-Zq7x@127.0.0.1:15210/FREEPDB1
       EREBUS_REQUIRE_ORACLE: "1"
       EREBUS_REQUIRE_DATABRICKS: "1"
+      # MSSQL runs on this throwaway server; its Entra driver (an optional extra) only at the driver boundary.
+      EREBUS_TEST_MSSQL_DSN: mssql://sa:Mssql-ci-Zq7x@127.0.0.1:14330
+      EREBUS_REQUIRE_MSSQL: "1"
 
     steps:
       - name: Check out repository
