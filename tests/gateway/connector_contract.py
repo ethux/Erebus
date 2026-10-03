@@ -228,8 +228,7 @@ def _policy_kind(policy, ctype, settings):
     return None
 
 
-def _db_policy(b, connector):
-    ctype = connector_types.get(b.name)
+def _db_policy(b, connector, ctype):
     raw = {k: v for k, v in b.settings().items() if k != "hostaddr"}
     check(f"{b.name}: the default policy denies a loopback source",
           _policy_kind(NetworkPolicy(denied=netpolicy.default_denied("")), ctype, raw) == "denied")
@@ -328,6 +327,6 @@ def run(backend_cls):
         elif ctype.family == "warehouse":
             _warehouse_policy(b, connector, ctype)
         else:
-            _db_policy(b, connector)
+            _db_policy(b, connector, ctype)
     finally:
         b.teardown()

@@ -12,7 +12,8 @@ authors = [{ name = "ETHUX" }]
 # Deliberately no dependency on `erebus`: install from this repo next to it.
 # Declaring it would let pip pull an unrelated PyPI package named `erebus`.
 # Warehouse drivers ship in the image so a customer adds a source without rebuilding.
-dependencies = ["cryptography>=43", "snowflake-connector-python>=3.12", "google-cloud-bigquery>=3.30"]
+dependencies = ["cryptography>=43", "snowflake-connector-python>=3.12", "google-cloud-bigquery>=3.30",
+                "oracledb>=26.0"]
 
 [project.optional-dependencies]
 # Test-only fakes; never installed in the image.
@@ -21,6 +22,7 @@ test = ["fakesnow>=0.9"]
 [project.entry-points."erebus.sources"]
 snowflake = "erebus_pro.connectors.snowflake:SnowflakeConnector"
 bigquery = "erebus_pro.connectors.bigquery:BigQueryConnector"
+oracle = "erebus_pro.connectors.oracle:OracleConnector"
 
 [project.entry-points."erebus.gateway.extensions"]
 pro = "erebus_pro.gateway:register"

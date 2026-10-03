@@ -3,7 +3,8 @@
 """How Pro connector types and connectors plug into core (spec 015 D6, D7, "Architecture").
 
 Pure. erebus-pro declares its types (Snowflake, BigQuery: Pro warehouses that take an
-account or project id, never a host or DSN) in a data-only module on the
+account or project id, never a host or DSN; Oracle: a database the worker dials through
+its host lists, like Postgres) in a data-only module on the
 ``erebus.source_types`` entry point, so the gateway accepts them without loading a
 connector or driver. Each Pro connector gates itself: without its license feature
 ``connectors.<type>`` (no key, another feature, expired past grace) ``connect`` raises
@@ -53,15 +54,22 @@ def _check_types():
     check("bigquery takes a project, location, byte cap, auth mode, datasets (schemas) and collections",
           types["bigquery"].setting_keys == {"project", "location", "max_bytes_billed", "auth", "schemas",
                                              "collections"})
-    check("no Pro type takes a host, DSN, endpoint or credential as a setting",
-          not any(t.setting_keys & _BANNED for t in types.values() if t.tier == "pro"))
+    oracle = types.get("oracle")
+    check("oracle is a Pro database type the worker dials through its host lists (port 1521)",
+          oracle is not None and oracle.family == "database" and oracle.tier == "pro" and oracle.default_port == 1521)
+    check("oracle takes host, port, service name, user, sslmode, auth mode, schemas and collections",
+          oracle.setting_keys == {"host", "port", "service_name", "user", "sslmode", "auth", "schemas", "collections"})
+    check("no Pro warehouse type takes a host, DSN, endpoint or credential as a setting",
+          not any(t.setting_keys & _BANNED for t in types.values() if t.tier == "pro" and t.family == "warehouse"))
+    check("no Pro type takes a DSN, hostaddr, driver file or credential as a setting",
+          not any(t.setting_keys & (_BANNED - {"host", "port"}) for t in types.values() if t.tier == "pro"))
     check("the free types are unchanged", types["postgres"].tier == "free" and types["sqlite"].tier == "free")
 
 
 def _check_data_only():
     code = ("import sys; import erebus_pro.source_types;"
             "print([m for m in sys.modules if m.startswith(('erebus_pro.connectors', 'snowflake', 'google.cloud',"
-            " 'fakesnow', 'erebus.cataloging.connectors'))])")
+            " 'fakesnow', 'oracledb', 'erebus.cataloging.connectors'))])")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
                          cwd=_PRO.parent, env={**os.environ, "PYTHONPATH": f"{_PRO}{os.pathsep}{_PRO.parent}"})
     check("the types module loads no connector module or driver (the gateway imports it)",
