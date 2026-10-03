@@ -4,8 +4,8 @@
 
 Pure. erebus-pro declares its types (Snowflake, BigQuery: Pro warehouses that take an
 account or project id, never a host or DSN; Databricks: a workspace host the connector
-checks against Databricks domains; Oracle: a database the worker dials through its host
-lists, like Postgres) in a data-only module on the
+checks against Databricks domains; Oracle and MSSQL: databases the worker dials through
+its host lists, like Postgres) in a data-only module on the
 ``erebus.source_types`` entry point, so the gateway accepts them without loading a
 connector or driver. Each Pro connector gates itself: without its license feature
 ``connectors.<type>`` (no key, another feature, expired past grace) ``connect`` raises
@@ -61,6 +61,12 @@ def _check_types():
           oracle is not None and oracle.family == "database" and oracle.tier == "pro" and oracle.default_port == 1521)
     check("oracle takes host, port, service name, user, sslmode, auth mode, schemas and collections",
           oracle.setting_keys == {"host", "port", "service_name", "user", "sslmode", "auth", "schemas", "collections"})
+    mssql = types.get("mssql")
+    check("mssql is a Pro database type the worker dials through its host lists (port 1433)",
+          mssql is not None and mssql.family == "database" and mssql.tier == "pro" and mssql.default_port == 1433)
+    check("mssql takes host, port, database, user or client id, sslmode, auth mode, schemas and collections",
+          mssql.setting_keys == {"host", "port", "database", "user", "client_id", "sslmode", "auth", "schemas",
+                                 "collections"})
     dbx = types.get("databricks")
     check("databricks is a Pro warehouse type with no host for the worker to dial",
           dbx is not None and dbx.family == "warehouse" and dbx.tier == "pro" and dbx.default_port is None)
@@ -76,7 +82,7 @@ def _check_types():
 def _check_data_only():
     code = ("import sys; import erebus_pro.source_types;"
             "print([m for m in sys.modules if m.startswith(('erebus_pro.connectors', 'snowflake', 'google.cloud',"
-            " 'fakesnow', 'oracledb', 'erebus.cataloging.connectors'))])")
+            " 'fakesnow', 'oracledb', 'pymssql', 'mssql_python', 'erebus.cataloging.connectors'))])")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
                          cwd=_PRO.parent, env={**os.environ, "PYTHONPATH": f"{_PRO}{os.pathsep}{_PRO.parent}"})
     check("the types module loads no connector module or driver (the gateway imports it)",

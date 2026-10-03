@@ -6,7 +6,7 @@ The gateway loads this to accept a Pro type and its setting keys, so it imports 
 but core's ``ConnectorType``: no connector module, no driver. SaaS warehouses take an
 account or project id and the connector derives the vendor host; Databricks takes the
 workspace host itself, accepted only on Databricks' own domains. A self-hosted database
-(Oracle) takes a host and port like Postgres: its ``default_port`` makes the worker
+(Oracle, MSSQL) takes a host and port like Postgres: its ``default_port`` makes the worker
 resolve the host, apply its host lists and hand the connector the checked ``hostaddr``.
 No Pro type takes a DSN, connect descriptor or endpoint. Without erebus-pro installed
 these types are unknown.
@@ -29,4 +29,10 @@ TYPES = (
     ConnectorType("oracle", "database", "pro",
                   frozenset({"host", "port", "service_name", "user", "sslmode", "auth", "schemas", "collections"}),
                   1521),
+    # ``auth`` is "sql" (a SQL login: ``user`` and a password, the default) or "entra" (a
+    # service principal: ``client_id`` and its secret; needs the erebus-pro[mssql-entra] extra).
+    ConnectorType("mssql", "database", "pro",
+                  frozenset({"host", "port", "database", "user", "client_id", "sslmode", "auth", "schemas",
+                             "collections"}),
+                  1433),
 )
