@@ -3,8 +3,9 @@
 """How Pro connector types and connectors plug into core (spec 015 D6, D7, "Architecture").
 
 Pure. erebus-pro declares its types (Snowflake, BigQuery: Pro warehouses that take an
-account or project id, never a host or DSN; Oracle: a database the worker dials through
-its host lists, like Postgres) in a data-only module on the
+account or project id, never a host or DSN; Databricks: a workspace host the connector
+checks against Databricks domains; Oracle: a database the worker dials through its host
+lists, like Postgres) in a data-only module on the
 ``erebus.source_types`` entry point, so the gateway accepts them without loading a
 connector or driver. Each Pro connector gates itself: without its license feature
 ``connectors.<type>`` (no key, another feature, expired past grace) ``connect`` raises
@@ -29,7 +30,8 @@ from erebus.cataloging.connector_errors import LicenseRequired
 _PRO = Path(__file__).resolve().parents[1]
 _passed = 0
 _BANNED = {"dsn", "host", "hostaddr", "port", "api_endpoint", "endpoint", "url", "passfile", "sslkey",
-           "sslrootcert", "password", "private_key", "service_account_key", "options"}
+           "sslrootcert", "password", "private_key", "service_account_key", "options", "client_secret", "wallet_pem",
+           "access_token"}
 
 
 def check(name, cond):
@@ -59,6 +61,11 @@ def _check_types():
           oracle is not None and oracle.family == "database" and oracle.tier == "pro" and oracle.default_port == 1521)
     check("oracle takes host, port, service name, user, sslmode, auth mode, schemas and collections",
           oracle.setting_keys == {"host", "port", "service_name", "user", "sslmode", "auth", "schemas", "collections"})
+    dbx = types.get("databricks")
+    check("databricks is a Pro warehouse type with no host for the worker to dial",
+          dbx is not None and dbx.family == "warehouse" and dbx.tier == "pro" and dbx.default_port is None)
+    check("databricks takes the workspace host, warehouse path, catalog, client id, schemas and collections",
+          dbx.setting_keys == {"server_hostname", "http_path", "catalog", "client_id", "schemas", "collections"})
     check("no Pro warehouse type takes a host, DSN, endpoint or credential as a setting",
           not any(t.setting_keys & _BANNED for t in types.values() if t.tier == "pro" and t.family == "warehouse"))
     check("no Pro type takes a DSN, hostaddr, driver file or credential as a setting",
