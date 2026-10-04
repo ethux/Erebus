@@ -221,7 +221,7 @@ def _live(conn, dsn, pool, admin):
 
 
 def main():
-    print("\n=== Odoo connector against live Odoo (spec 015) ===\n")
+    print("\n=== Odoo connector against live Odoo ===\n")
     urls = [u for u in os.environ.get("EREBUS_TEST_ODOO_URLS", "").split(",") if u.strip()]
     reason = None if urls else "EREBUS_TEST_ODOO_URLS is not set (pro/tests/odoo_live_stack.sh up <dir>)"
     if reason is None and connector_types.get("odoo") is None:

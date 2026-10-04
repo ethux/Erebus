@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""The shared HTTP base of the Pro app connectors (spec 015 "App connectors", SC-7, SC-9).
+"""The shared HTTP base of the Pro app connectors: network checks, limits, paging.
 
 Pure, with local listeners and ``respx``. Every connection goes through the worker's
 network policy: a denied address is refused before any byte is sent, an allowed one is
@@ -348,7 +348,7 @@ def _check_paging():
 
 
 def main():
-    print("\n=== Shared HTTP base of the app connectors (spec 015) ===\n")
+    print("\n=== Shared HTTP base of the app connectors ===\n")
     try:
         import respx  # noqa: F401
     except ImportError:

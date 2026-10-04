@@ -1,4 +1,4 @@
-"""Record links of app sources (spec 015 "Data model": ``catalog_entry_records``).
+"""Record links of app sources (``catalog_entry_records``).
 
 Live Postgres on its own database. An app source links each value to the record it came
 from. Relinking a changed record drops the links that sync did not renew and retires
@@ -146,7 +146,7 @@ def _check_rls(dsn, kms, a_id, b_id):
 
 
 def main():
-    print("\n=== Record links of app sources (spec 015) ===\n")
+    print("\n=== Record links of app sources ===\n")
     conn = fresh_db("erebus_gw_catalog_records")
     conn.autocommit = True
     kms = LocalKms()

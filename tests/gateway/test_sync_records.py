@@ -1,4 +1,4 @@
-"""Record syncs of app sources through the sync worker (spec 015 D8, SC-3, SC-8).
+"""Record syncs of app sources through the sync worker: full, incremental, retire.
 
 Live Postgres on its own database; an in-memory app connector (``app_fakes``). A full
 sync links every value to its record, retires what no record holds any more and stores
@@ -197,7 +197,7 @@ def _check_cap(conn, kms, pool):
 
 
 def main():
-    print("\n=== Record syncs of app sources (spec 015 D8) ===\n")
+    print("\n=== Record syncs of app sources ===\n")
     install_app_type()
     conn = fresh_db("erebus_gw_sync_records")
     kms = LocalKms()

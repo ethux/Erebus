@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""The Odoo connector on respx fixtures (spec 015 "App connectors": Odoo; SC-6, SC-7, SC-8).
+"""The Odoo connector on respx fixtures: both APIs, fields, paging, cursors, limits.
 
 Pure. ``odoo_fake.FakeOdoo`` stands in for Odoo 19 (JSON-2: bearer API key,
 ``X-Odoo-Database``) and Odoo 18 (XML-RPC ``execute_kw`` with database, login and key).
@@ -225,7 +225,7 @@ def _check_forced_api(respx_mock):
 
 
 def main():
-    print("\n=== Odoo connector on fixtures (spec 015) ===\n")
+    print("\n=== Odoo connector on fixtures ===\n")
     try:
         import respx
     except ImportError:

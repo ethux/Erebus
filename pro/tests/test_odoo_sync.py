@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""An Odoo source through the real sync worker (spec 015 D7, D8, SC-3, SC-7, SC-8).
+"""An Odoo source through the real sync worker.
 
 Live Postgres on a throwaway database; Odoo 19 (JSON-2) and Odoo 18 (XML-RPC) on
 ``respx`` fixtures. The sample maps contact, company and lead fields; the full sync
@@ -171,7 +171,7 @@ def _sync(conn, dsn, kms, pool, version):
 
 
 def main():
-    print("\n=== Odoo source through the sync worker (spec 015) ===\n")
+    print("\n=== Odoo source through the sync worker ===\n")
     reason = None
     try:
         import respx  # noqa: F401
