@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database connection, so after enough of them the gateway stopped answering. A stream
   no longer holds a connection while it runs, and every request gives its connection
   back however it ends.
+- Gateway: conversations with reasoning models broke after the first answer. A chat that
+  sent back an answer with a `thinking` part (Mistral) was refused with 415, placeholders
+  stayed in the reasoning of whole and streamed answers, and `reasoning_content` or
+  `reasoning` sent back in the history reached the provider without being tokenized.
+  Reasoning in all three forms is now tokenized on the way out and restored on the way
+  back.
 
 ## [1.2.0-beta.1] - 2026-10-03
 
