@@ -14,7 +14,7 @@ is set. Results are not fetched from cloud storage and the driver sends no telem
 so the worker talks to the workspace host only.
 
 Collections are ``schema.table`` in the ``catalog`` setting; fields come from the
-catalog's Unity Catalog ``information_schema.columns``. A sync wakes the SQL warehouse
+catalog's Unity Catalog ``information_schema.columns``, typed by ``full_data_type``. A sync wakes the SQL warehouse
 (Pro and classic warehouses bill at least ten minutes), so the distinct values of all
 asked field groups of a table come from one query: a ``UNION ALL`` of per-group
 ``SELECT DISTINCT``, tagged by group, name parts as extra columns, every value read as
@@ -48,8 +48,12 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,254}")
 _CLIENT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 _TOKEN_TIMEOUT_S = 30
 _BINARY = "COLLATE UTF8_BINARY"  # Databricks SQL and Runtime 16.1+, which every SQL warehouse runs
-_COLUMNS = ("SELECT table_schema, table_name, column_name, data_type, is_nullable FROM {}.information_schema.columns "
+# full_data_type (bigint, map<string,int>), not data_type: its simple names (LONG, SHORT, MAP)
+# are not the type names the field rules read.
+_COLUMNS = ("SELECT table_schema, table_name, column_name, full_data_type, is_nullable "
+            "FROM {}.information_schema.columns "
             "WHERE table_schema <> 'information_schema' ORDER BY table_schema, table_name, ordinal_position")
+_COLLATED = re.compile(r"\s+collate\s+\w+\s*$", re.I)
 # Unity Catalog reports an object the principal may not use as not found.
 _PERMISSION_MARKS = ("INSUFFICIENT_PERMISSIONS", "PERMISSION_DENIED", "_NOT_FOUND]", "SQLSTATE: 42501")
 
@@ -195,7 +199,7 @@ class DatabricksRowSource:
     def list_collections(self) -> list[CollectionInfo]:
         rows = self._rows(_COLUMNS.format(_quote(self._catalog)), 2000)
         names = self._columns.fill(
-            (schema, table, FieldInfo(column, db_type=dtype, nullable=nullable == "YES"))
+            (schema, table, FieldInfo(column, db_type=_COLLATED.sub("", dtype or ""), nullable=nullable == "YES"))
             for schema, table, column, dtype, nullable in rows
             if self._schemas is None or schema.lower() in self._schemas)
         return [CollectionInfo(name) for name in names]

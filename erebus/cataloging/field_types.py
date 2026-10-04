@@ -1,8 +1,9 @@
 """Column type classes for the gateway field rules (spec 015 "Sync behaviour").
 
 Pure. Maps the type names Postgres, MySQL, SQLite, MSSQL, Oracle and the warehouses
-report to one class. Only ``text`` can be auto-accepted; a type not listed here is
-``unknown`` and goes to review instead of being guessed.
+report to one class. Only ``text`` can be auto-accepted; arrays, maps and structs are
+``complex`` (never one text value); a type not listed here is ``unknown`` and goes to
+review instead of being guessed.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ _CLASSES = {
         "bytea", "blob", "tinyblob", "mediumblob", "longblob", "binary", "varbinary", "image", "raw",
         "long raw", "bytes", "bfile",
     ),
+    "complex": ("array", "map", "struct", "record"),
 }
 _BY_NAME = {name: cls for cls, names in _CLASSES.items() for name in names}
 _PREFIXES = (
@@ -45,10 +47,10 @@ _MODIFIERS = frozenset({"unsigned", "signed", "zerofill"})
 
 def type_class(db_type: str) -> str:
     """The class of a reported column type: text, integer, boolean, datetime, numeric,
-    uuid, json, network, binary or unknown."""
+    uuid, json, network, binary, complex or unknown."""
     raw = db_type.strip().lower()
     if "[]" in raw or "<" in raw or raw.startswith("_"):
-        return "unknown"  # arrays and structs
+        return "complex"  # text[], ARRAY<STRING>, map<string,int>, STRUCT<...>; _text is Postgres' array
     words = [w for w in _PARAMS.sub(" ", raw).split() if w not in _MODIFIERS]
     name = " ".join(words)
     if name in _BY_NAME:

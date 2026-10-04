@@ -136,9 +136,9 @@ def _check_queries(b):
     try:
         coll = b.collection("customers")
         fields = {f.name: f.db_type for f in src.list_fields(coll)}
-        check("fields come from the catalog's information_schema.columns, with Unity Catalog's types",
+        check("fields come from the catalog's information_schema.columns, with Unity Catalog's full types",
               "information_schema.columns" in fake.sent[-1] and "`erebus_ct`" in fake.sent[-1]
-              and fields["id"] == "INT" and fields["email"] == "STRING")
+              and fields["id"] == "int" and fields["email"] == "string")
         before = len(fake.sent)
         got = list(sources.distinct_groups(src, coll, [["email"], ["first_name", "last_name"], ["notes"]], 100))
         check("all field groups of a table come from one query",
@@ -152,6 +152,32 @@ def _check_queries(b):
         src.close()
     check("every statement sent is a single SELECT",
           fake.sent and all(s.lstrip().upper().startswith("SELECT") and ";" not in s for s in fake.sent))
+
+
+def _check_types(b):
+    """Unity Catalog's simple type names (LONG, SHORT, MAP) are not what the field rules
+    read: the connector reports the full type (bigint, map<string,int>)."""
+    from erebus.cataloging import field_rules
+    from erebus.cataloging.field_types import type_class
+
+    src = b.connector().connect(b.settings(), b.secrets())
+    try:
+        infos = src.list_fields("crm.events")
+        classes = {f.name: type_class(f.db_type) for f in infos}
+        check("a bigint, smallint or tinyint column is an integer, a double numeric, a timestamp date/time",
+              (classes["id"], classes["visits"], classes["flags"], classes["score"], classes["seen"])
+              == ("integer", "integer", "integer", "numeric", "datetime"))
+        check("a map or array column is complex, a string text",
+              (classes["tags"], classes["labels"], classes["contact"]) == ("complex", "complex", "text"))
+        specs = [field_rules.FieldSpec(f.name, f.db_type) for f in infos]
+        rows = [r.values for r in src.iter_records("crm.events", limit=10)]
+        decided = {r.field: (r.decision, r.reason) for r in field_rules.gateway_rules("events", specs, rows)}
+        check("so an integer id and a map are ignored as non-text, not left for review",
+              decided["id"] == decided["tags"] == ("ignored", "non-text type"))
+        got = list(sources.distinct_values(src, "crm.events", ["tags"], 10))
+        check("a map column an admin confirms anyway is read as text", len(got) == 1 and "kit" in got[0][0])
+    finally:
+        src.close()
 
 
 def _check_refresh_failure(b):
@@ -206,6 +232,7 @@ def main():
         _check_sign_in(b)
         _check_settings(b)
         _check_queries(b)
+        _check_types(b)
         _check_refresh_failure(b)
         _check_license(b)
     finally:

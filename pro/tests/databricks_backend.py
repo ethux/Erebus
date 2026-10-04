@@ -9,9 +9,11 @@ records every statement and answers it from an in-memory DuckDB holding the cont
 fixture in catalog ``erebus_ct`` (schemas ``crm`` and ``other``). Only dialect is
 translated: Spark's backtick identifiers become DuckDB's double quotes, the binary
 collation ``UTF8_BINARY`` becomes DuckDB's ``"binary"``, and
-``<catalog>.information_schema.columns`` becomes a view with Unity Catalog's type names
-(``STRING``, ``INT``). DuckDB errors come back as the driver's own
-``ServerOperationError`` with Databricks' error class in the message.
+``<catalog>.information_schema.columns`` becomes a table of the fixture's columns with
+Unity Catalog's type names: ``data_type`` the simple name (``LONG``, ``SHORT``, ``MAP``)
+and ``full_data_type`` the full one (``bigint``, ``map<string,int>``). DuckDB errors come
+back as the driver's own ``ServerOperationError`` with Databricks' error class in the
+message.
 
 Credentials are made up at run time; nothing here is a real secret or workspace.
 """
@@ -32,6 +34,23 @@ _COLUMNS_REF = re.compile(r"`((?:[^`]|``)+)`\.information_schema\.columns")
 _CUSTOMERS = ("CREATE TABLE {t} (id INTEGER NOT NULL, email VARCHAR(200), full_name VARCHAR(200) NOT NULL, "
               "first_name VARCHAR(100), last_name VARCHAR(100), active BOOLEAN, signup DATE, notes TEXT)")
 _ORDERS = "CREATE TABLE {t} (id INTEGER, product_name VARCHAR(100))"
+_EVENTS = ("CREATE TABLE {t} (id BIGINT, visits SMALLINT, flags TINYINT, score DOUBLE, "
+           "tags MAP(VARCHAR, INTEGER), labels VARCHAR[], seen TIMESTAMP, contact VARCHAR)")
+# DuckDB type -> Unity Catalog's (data_type, full_data_type).
+_SPARK = {"BIGINT": ("LONG", "bigint"), "INTEGER": ("INT", "int"), "SMALLINT": ("SHORT", "smallint"),
+          "TINYINT": ("BYTE", "tinyint"), "VARCHAR": ("STRING", "string"), "DOUBLE": ("DOUBLE", "double"),
+          "BOOLEAN": ("BOOLEAN", "boolean"), "DATE": ("DATE", "date"), "TIMESTAMP": ("TIMESTAMP", "timestamp")}
+
+
+def _spark_type(duck: str) -> tuple[str, str]:
+    """Unity Catalog's (data_type, full_data_type) for a DuckDB column type."""
+    if duck in _SPARK:
+        return _SPARK[duck]
+    if duck.endswith("[]"):
+        return "ARRAY", f"array<{_spark_type(duck[:-2])[1]}>"
+    if m := re.fullmatch(r"MAP\((\w+), (\w+)\)", duck):
+        return "MAP", f"map<{_spark_type(m[1])[1]},{_spark_type(m[2])[1]}>"
+    raise ValueError(f"no Unity Catalog name for {duck}")
 
 
 def _duck_sql(sql: str) -> str:
@@ -188,16 +207,22 @@ class DatabricksBackend:
                      _ORDERS.format(t=f"{CATALOG}.other.orders"),
                      f"INSERT INTO {CATALOG}.crm.orders VALUES (1, 'Widget')",
                      f"CREATE TABLE {CATALOG}.crm.folded (id INTEGER, name VARCHAR COLLATE NOACCENT.NOCASE)",
-                     # Unity Catalog's information_schema.columns, with its type names.
-                     f"CREATE VIEW memory.main.\"{CATALOG}_columns\" AS SELECT table_catalog, table_schema, "
-                     "table_name, column_name, ordinal_position, is_nullable, "
-                     "CASE data_type WHEN 'VARCHAR' THEN 'STRING' WHEN 'INTEGER' THEN 'INT' ELSE data_type END "
-                     "AS data_type FROM information_schema.columns "
-                     f"WHERE table_catalog = '{CATALOG}'"):
+                     _EVENTS.format(t=f"{CATALOG}.crm.events"),
+                     f"INSERT INTO {CATALOG}.crm.events VALUES (1, 2, 3, 0.5, MAP {{'kit': 1}}, ['a'], "
+                     "TIMESTAMP '2026-01-02 03:04:05', 'mila.brandt@acme.example')"):
             db.execute(stmt)
         db.executemany(f"INSERT INTO {CATALOG}.crm.customers ({', '.join(FIELDS)}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                        [list(r) for r in ROWS])
         db.executemany(f"INSERT INTO {CATALOG}.crm.folded VALUES (?, ?)", [list(r) for r in enumerate(FOLDED)])
+        # Unity Catalog's information_schema.columns, with its type names.
+        columns = db.execute("SELECT table_catalog, table_schema, table_name, column_name, ordinal_position, "
+                             "is_nullable, data_type FROM information_schema.columns "
+                             f"WHERE table_catalog = '{CATALOG}'").fetchall()
+        db.execute(f"CREATE TABLE memory.main.\"{CATALOG}_columns\" (table_catalog VARCHAR, table_schema VARCHAR, "
+                   "table_name VARCHAR, column_name VARCHAR, ordinal_position INTEGER, is_nullable VARCHAR, "
+                   "data_type VARCHAR, full_data_type VARCHAR)")
+        db.executemany(f"INSERT INTO memory.main.\"{CATALOG}_columns\" VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       [[*row[:6], *_spark_type(row[6])] for row in columns])
         self.db = db
         self.fake = FakeDatabricks(db)
         self.secret = "dbx-secret-" + secrets.token_hex(16)

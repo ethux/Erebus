@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - During a sync the worker refuses connections outside the addresses its host lists
   approve, also after a server redirect (MSSQL's native drivers aside; see the README).
+- Connectors: array, map and struct columns (a Postgres `text[]`, say) are ignored as
+  non-text instead of waiting for review: they never hold one value to match.
 
 ### Fixed
 - Connectors: a Postgres column with a case- or accent-insensitive (nondeterministic)
