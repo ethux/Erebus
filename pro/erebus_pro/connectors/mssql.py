@@ -11,7 +11,8 @@ optional extra (``erebus-pro[mssql-entra]``) the image does not ship. See
 Like the free database connectors it dials the ``hostaddr`` the sync worker checked
 against its host lists, never a name it resolves itself, and keeps ``host`` for TLS.
 ``sslmode`` defaults to ``verify-full``: TLS required, the certificate verified against
-the system CAs (``SSL_CERT_FILE`` adds a private CA) and its name matched against
+the system CAs (``SSL_CERT_FILE`` replaces that bundle: for a private CA, point it at the
+system CAs plus that one) and its name matched against
 ``host`` (on Azure SQL, against its zone's wildcard) before the password is sent.
 ``verify-ca`` skips the name, ``require`` the certificate; ``disable`` asks for no TLS
 (SQL Server still encrypts the login packet when it can). There is no ``prefer``. An

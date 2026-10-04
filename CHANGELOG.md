@@ -14,12 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key pair; BigQuery with a service-account key or the worker's attached identity, reads
   each table in one query and honours `max_bytes_billed`; Databricks with a service
   principal (OAuth machine-to-machine) and reads each table in one query; Oracle with a
-  password or an mTLS wallet, needs no Oracle Client and goes through the sync worker's
-  host lists like Postgres; MSSQL with a SQL login, or with an Entra service principal
-  after `pip install 'erebus-pro[mssql-entra]'` (Microsoft's ODBC driver, under
-  Microsoft's license terms), goes through the host lists and reads each table in one
+  password or an mTLS wallet, needs no Oracle Client and dials the address the sync
+  worker checked, like Postgres; MSSQL with a SQL login, or with an Entra service
+  principal after `pip install 'erebus-pro[mssql-entra]'` (Microsoft's ODBC driver, under
+  Microsoft's license terms), dials the checked address and reads each table in one
   query. The drivers ship in the image, except the Entra one. When the license lapses
   their syncs stop and values already synced keep matching.
+
+### Changed
+- During a sync the worker refuses connections outside the addresses its host lists
+  approve, also after a server redirect (MSSQL's native drivers aside; see the README).
 
 ## [1.2.0-beta.1] - 2026-10-03
 

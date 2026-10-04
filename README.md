@@ -377,7 +377,26 @@ text only, never a credential or value.
 
 Before connecting, the worker resolves the source host once and refuses it when any
 address is on the deny list (by default the gateway's own database host, loopback,
-link-local and cloud metadata addresses) or off the allow list when one is set.
+link-local and cloud metadata addresses) or off the allow list when one is set. While
+the connector runs, the worker also checks every connection it opens:
+
+- Postgres, MySQL, Oracle and MSSQL may connect only to the address and port the worker
+  checked. A server that sends the driver elsewhere (an Oracle listener's redirect)
+  fails the sync as denied.
+- Snowflake, BigQuery and Databricks connect to their vendor's hosts, which no setting
+  names: every address must be off the deny list and, when an allow list is set, on it.
+  With an allow list, add the vendor's hosts (exact names, no wildcards) or networks:
+  for Snowflake what `SELECT SYSTEM$ALLOWLIST()` returns, for BigQuery
+  `bigquery.googleapis.com` and `oauth2.googleapis.com`, for Databricks the workspace
+  host. Through an HTTP proxy the worker connects to the proxy, so the proxy's address
+  must pass the lists instead.
+- SQLite may connect nowhere.
+
+Native drivers are outside this check. libpq (Postgres) dials only the checked address
+and follows no redirect, but the MSSQL drivers (FreeTDS and Microsoft's ODBC driver)
+follow a server's routing redirect unchecked, such as Azure SQL's Redirect connection
+policy. The host lists are a second line: egress firewall rules on the worker are the
+real guard.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -387,8 +406,8 @@ link-local and cloud metadata addresses) or off the allow list when one is set.
 | `EREBUS_SYNC_BACKOFF_S` | `60,300,900` | Retry waits for an unreachable source or failed query |
 | `EREBUS_SYNC_LIMIT_WAIT_S` | `172800` | How long a job may wait on a source's rate limit |
 | `EREBUS_SYNC_TENANT_MAX_VALUES` | `1000000` | Most active known values per tenant |
-| `EREBUS_SYNC_DENIED_HOSTS` | see above | Hosts, addresses and networks never contacted; setting it replaces the default |
-| `EREBUS_SYNC_ALLOWED_HOSTS` | unset | When set, the only hosts, addresses and networks contacted |
+| `EREBUS_SYNC_DENIED_HOSTS` | see above | Hosts, addresses and networks a sync may not connect to (checked as above); setting it replaces the default |
+| `EREBUS_SYNC_ALLOWED_HOSTS` | unset | When set, the only hosts, addresses and networks a sync may connect to (checked as above); include your warehouse vendors' hosts |
 | `EREBUS_SYNC_SQLITE_DIR` | unset (SQLite off) | Directory SQLite sources must resolve inside |
 
 Several workers can run against one database; each job runs on one of them.
@@ -439,8 +458,10 @@ Without the feature the source's syncs fail with
 Snowflake and BigQuery take no host: the driver derives it from the account or project.
 Databricks takes the workspace host, accepted only on Databricks' own domains
 (`cloud.databricks.com`, `azuredatabricks.net`, `gcp.databricks.com` and their
-government and China clouds), and only a SQL warehouse path. The worker's host lists do
-not apply to these three. Collections are `SCHEMA.TABLE`, `dataset.table` and
+government and China clouds), and only a SQL warehouse path. The worker checks every
+address these three connect to against its deny list, and its allow list when one is
+set (see [Sync worker](#sync-worker)); BigQuery with `auth: attached` may also reach the
+GCP metadata server. Collections are `SCHEMA.TABLE`, `dataset.table` and
 `schema.table` (in `catalog`). Costs:
 
 - Snowflake: a sync resumes the warehouse, billed at least 60 seconds per resume.
@@ -455,20 +476,25 @@ works the same (the default `verify-full` checks the certificate against the sys
 or the wallet's, and the name against `host`), except that there is no `prefer`: Oracle
 serves TLS on its own port. With `disable` only the password exchange is protected. The
 driver runs in thin mode, so no Oracle Client is needed; it needs Oracle Database 12.1
-or later and does not support native network encryption or Kerberos. Fields come from
-`ALL_TAB_COLUMNS` without Oracle-maintained schemas; collections are `OWNER.TABLE`. Every
-read runs in a read-only transaction; CLOB values over 1,000 characters are skipped.
+or later and does not support native network encryption or Kerberos. A listener that
+redirects to another address fails the sync as denied, so point `host` at a listener
+that serves the database itself (on RAC, a node's VIP rather than the SCAN name). Fields
+come from `ALL_TAB_COLUMNS` without Oracle-maintained schemas; collections are
+`OWNER.TABLE`. Every read runs in a read-only transaction; CLOB values over 1,000
+characters are skipped.
 
 MSSQL (SQL Server and Azure SQL) is a database the worker dials like Postgres: its host
 lists apply and `sslmode` works the same, except that there is no `prefer`. `host` is a
 DNS name or an IPv4 address; reach an IPv6-only server through its DNS name. The default
 `verify-full` checks the certificate against the system CAs and the name against `host`
-before the password is sent; add a private CA through `SSL_CERT_FILE` on the worker, or
-use `require` for a server with a self-signed certificate (SQL Server's default). On
-Azure SQL `verify-full` accepts the zone's wildcard certificate (`*.database.windows.net`,
-or its US Government or China cloud counterpart); elsewhere a SQL login needs a
-certificate that names the host, as wildcard certificates fail the check. With
-`disable` only the login packet is encrypted, and only if the server supports it.
+before the password is sent. For a private CA, point `SSL_CERT_FILE` on the worker at a
+bundle holding the system CAs plus that CA: it replaces the system bundle rather than
+adding to it. Or use `require` for a server with a self-signed certificate (SQL Server's
+default). On Azure SQL `verify-full` accepts the zone's wildcard certificate
+(`*.database.windows.net`, or its US Government or China cloud counterpart); elsewhere a
+SQL login needs a certificate that names the host, as wildcard certificates fail the
+check. With `disable` only the login packet is encrypted, and only if the server
+supports it.
 
 - SQL logins (`auth: sql`, the default) work out of the box: the driver, pymssql, ships
   in the image.
@@ -487,7 +513,8 @@ read-only login is the guard. `text`, `ntext` and `(n)varchar(max)` values over 
 characters are skipped. On Azure SQL, set the server's connection policy to Proxy so the
 session stays on the address the worker checked: with Redirect (what the Default policy
 uses for clients inside Azure), Azure hands the client another node's address after
-sign-in, and both drivers follow it.
+sign-in, and both drivers follow it without the worker's check (they are native code).
+Egress firewall rules on the worker are what keeps them on approved networks.
 
 Grant only the tables that hold customer data. On a warehouse the read-only role is the
 only guard:
