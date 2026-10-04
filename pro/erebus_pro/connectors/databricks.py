@@ -54,8 +54,10 @@ _COLUMNS = ("SELECT table_schema, table_name, column_name, full_data_type, is_nu
             "FROM {}.information_schema.columns "
             "WHERE table_schema <> 'information_schema' ORDER BY table_schema, table_name, ordinal_position")
 _COLLATED = re.compile(r"\s+collate\s+\w+\s*$", re.I)
-# Unity Catalog reports an object the principal may not use as not found.
-_PERMISSION_MARKS = ("INSUFFICIENT_PERMISSIONS", "PERMISSION_DENIED", "_NOT_FOUND]", "SQLSTATE: 42501")
+# Unity Catalog reports an object the principal may not use as not found; a catalog it
+# cannot use fails OpenSession (connect) as NO_SUCH_CATALOG_EXCEPTION, SQLSTATE 42704.
+_PERMISSION_MARKS = ("INSUFFICIENT_PERMISSIONS", "PERMISSION_DENIED", "_NOT_FOUND]", "NO_SUCH_CATALOG_EXCEPTION",
+                     "SQLSTATE: 42501", "SQLSTATE: 42704")
 
 
 class _TokenRefused(Exception):
@@ -153,6 +155,10 @@ def _kind(exc: BaseException, tokens: Any, *, connecting: bool) -> str:
     if any(mark in message for mark in _PERMISSION_MARKS):
         return "permission"
     from databricks.sql import exc as dbx
+    # A Real-Time warehouse: the driver reopens its session on the kernel backend, which refuses
+    # a custom credentials provider (or is not installed). An admin must pick another warehouse.
+    if isinstance(exc, dbx.NotSupportedError) or (connecting and isinstance(exc, ImportError)):
+        return "settings"
     if connecting or isinstance(exc, (dbx.RequestError, OSError)):
         return "unreachable"
     return "query"

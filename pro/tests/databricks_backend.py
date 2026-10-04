@@ -121,11 +121,18 @@ class FakeDatabricks:
                                "token_type": "Bearer", "expires_in": self.expires_in, "scope": "all-apis"})
 
     def connect(self, **kwargs):
+        from databricks.sql.exc import DatabaseError
+
         self.connects.append(kwargs)
         header_factory = kwargs["credentials_provider"]()
         self.headers.append(header_factory())  # as the driver does on its first request
         if self.connect_error is not None:
             raise self.connect_error
+        catalogs = {row[0] for row in self.db.execute("SELECT database_name FROM duckdb_databases()").fetchall()}
+        if kwargs["catalog"] not in catalogs:  # OpenSession sets the catalog, as Databricks answers it
+            raise DatabaseError(f"[NO_SUCH_CATALOG_EXCEPTION] Catalog '{kwargs['catalog']}' was not found. "
+                                "Please verify the catalog name and then retry the query or command again. "
+                                "SQLSTATE: 42704")
         return _Connection(self, header_factory)
 
 
@@ -251,7 +258,7 @@ class DatabricksBackend:
         return list(self.fake.sent)
 
     def bad_cases(self):
-        from databricks.sql.exc import RequestError
+        from databricks.sql.exc import NotSupportedError, RequestError
 
         class _Reply:
             """Make the next token request answer ``reply`` while the case runs."""
@@ -302,4 +309,11 @@ class DatabricksBackend:
              _ConnectError(self.fake, down)),
             ("a workspace rate limit", self.settings(), self.secrets(), "limit", [HOST, secret],
              _ConnectError(self.fake, limited)),
+            # A Real-Time warehouse refuses Thrift; the driver reopens the session on its kernel
+            # backend, which refuses a custom credentials provider (or is not installed).
+            ("a Real-Time warehouse (the kernel backend refuses the credentials provider)", self.settings(),
+             self.secrets(), "settings", [HOST, secret], _ConnectError(self.fake, NotSupportedError(
+                 f"Ambiguous auth on use_kernel=True: credentials_provider for {HOST}"))),
+            ("a Real-Time warehouse without the driver's kernel extra", self.settings(), self.secrets(), "settings",
+             [HOST, secret], _ConnectError(self.fake, ImportError("pip install databricks-sql-connector[kernel]"))),
         ]

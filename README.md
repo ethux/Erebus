@@ -560,7 +560,10 @@ Viewer only on the datasets that hold customer data. `auth: attached` uses the i
 attached to the worker (on GCP); workload identity federation is not supported yet.
 
 Databricks: give the service principal `CAN USE` on the SQL warehouse and create an
-OAuth secret for it (machine-to-machine); personal access tokens are not supported.
+OAuth secret for it (machine-to-machine); personal access tokens are not supported. A
+catalog it cannot use fails the sync as `permission denied`. Real-Time SQL warehouses are
+not supported: the driver opens their sessions on a backend that refuses the connector's
+sign-in, and the sync fails with `source settings are not valid`.
 
 ### Managing sources
 
