@@ -11,7 +11,9 @@ address it connects to against its deny list, and its allow list when one is set
 ``auth: attached`` the GCP metadata server is let through (``egress_exceptions``).
 
 Collections are ``dataset.table``; fields come from each dataset's
-``INFORMATION_SCHEMA.COLUMNS``. Every query bills at least 10 MB, so the distinct values
+``INFORMATION_SCHEMA.COLUMNS``. Without ``location`` each query runs where its dataset
+lives; with it every job runs there and datasets in other locations are skipped (a query
+there would fail as not found). Every query bills at least 10 MB, so the distinct values
 of all asked field groups of a table come from one query: a ``UNION ALL`` of per-group
 ``SELECT DISTINCT``, tagged by group, name parts as extra columns. Every query is capped
 by ``max_bytes_billed`` when set (on-demand pricing only; slot pricing ignores it), and a
@@ -111,12 +113,14 @@ def _client(project: str, credentials: Any, location: str | None) -> Any:
 class BigQueryRowSource:
     """A BigQuery project through a read-only role; collections are ``dataset.table``."""
 
-    def __init__(self, client: Any, project: str, datasets: list[str] | None, cap: int | None, retry_s: float):
+    def __init__(self, client: Any, project: str, datasets: list[str] | None, cap: int | None, retry_s: float,
+                 location: str | None = None):
         from google.cloud import bigquery
 
         self.client = client
         self._project = project
         self._datasets = datasets
+        self._location = location.lower() if location else None
         self._cap = cap
         self._retry = bigquery.DEFAULT_RETRY.with_timeout(retry_s)
         self._columns = _warehouse.Columns()
@@ -152,13 +156,22 @@ class BigQueryRowSource:
     def list_collections(self) -> list[CollectionInfo]:
         listed = self._call(lambda: [d.dataset_id for d in self.client.list_datasets(
             self._project, retry=self._retry, timeout=_REQUEST_TIMEOUT_S)])
-        wanted = [d for d in listed if self._datasets is None or d in self._datasets]
+        wanted = [d for d in listed if (self._datasets is None or d in self._datasets) and self._located(d)]
         rows: list[tuple[str, str, FieldInfo]] = []
         for dataset in wanted:
             sql = _COLUMNS.format(_quote(self._project), _quote(dataset))
             rows += [(dataset, table, FieldInfo(column, db_type=dtype, nullable=nullable == "YES"))
                      for table, column, dtype, nullable in self._query(sql)]
         return [CollectionInfo(name) for name in self._columns.fill(rows)]
+
+    def _located(self, dataset: str) -> bool:
+        """Whether ``dataset`` can be queried from the pinned location (any, when none is set).
+        A query there would answer 404 (not found in that location): the dataset is skipped."""
+        if self._location is None:
+            return True
+        where = self._call(lambda: self.client.get_dataset(f"{self._project}.{dataset}", retry=self._retry,
+                                                           timeout=_REQUEST_TIMEOUT_S).location)
+        return not where or where.lower() == self._location
 
     def list_fields(self, collection: str) -> list[FieldInfo]:
         if not self._columns.known():
@@ -260,4 +273,4 @@ class BigQueryConnector(LicensedConnector):
             client = self._client_factory(project, credentials, location)
         except Exception:
             raise ConnectorError("auth") from None
-        return BigQueryRowSource(client, project, datasets, cap, self.retry_s)
+        return BigQueryRowSource(client, project, datasets, cap, self.retry_s, location)

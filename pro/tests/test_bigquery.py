@@ -80,6 +80,48 @@ def _check_one_query_per_table(b):
         src.close()
 
 
+def _check_locations(b):
+    """With ``location`` set, a dataset in another location is skipped: BigQuery answers a
+    query there 404 (not found in that location), which failed every sync as 'permission'.
+    Without it every query runs where its dataset lives."""
+    from google.api_core import exceptions
+    from google.cloud import bigquery
+
+    project, tokyo = b.settings()["project"], "erebus_contract_tokyo"
+    b.admin.delete_dataset(tokyo, delete_contents=True, not_found_ok=True)
+    dataset = bigquery.Dataset(f"{project}.{tokyo}")
+    dataset.location = "asia-northeast1"
+    b.admin.create_dataset(dataset)
+    b.admin.create_table(bigquery.Table(f"{project}.{tokyo}.leads", schema=[bigquery.SchemaField("email", "STRING")]))
+    real = bigquery.Client.query
+
+    def located(client, query, *args, location=None, **kwargs):  # as BigQuery answers a pinned job location
+        where = location or client.location
+        if tokyo in query and where and where.lower() != "asia-northeast1":
+            raise exceptions.NotFound(f"Not found: Dataset {project}:{tokyo} was not found in location {where}")
+        return real(client, query, *args, location=location, **kwargs)
+    bigquery.Client.query = located
+    try:
+        datasets = [*b.settings()["schemas"], tokyo]
+        src = b.connector().connect(b.settings(location="EU", schemas=datasets), b.secrets())
+        try:
+            names = [c.name for c in src.list_collections()]
+        finally:
+            src.close()
+        check("with a location set, a dataset in another location is skipped, not a failed sync",
+              b.collection("customers") in names and not any(n.startswith(tokyo + ".") for n in names))
+        src = b.connector().connect(b.settings(schemas=datasets), b.secrets())
+        try:
+            names = [c.name for c in src.list_collections()]
+        finally:
+            src.close()
+        check("without a location, datasets in every location are read", {b.collection("customers"),
+                                                                           f"{tokyo}.leads"} <= set(names))
+    finally:
+        bigquery.Client.query = real
+        b.admin.delete_dataset(tokyo, delete_contents=True, not_found_ok=True)
+
+
 def _check_credentials(b):
     import google.auth
     from google.oauth2 import service_account
@@ -150,6 +192,7 @@ def main():
     b.setup()
     try:
         _check_one_query_per_table(b)
+        _check_locations(b)
         _check_credentials(b)
         _check_unreachable(b)
     finally:

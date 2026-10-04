@@ -557,7 +557,9 @@ GRANT SELECT ON sales.customers TO [<service-principal-name>];
 ```
 
 BigQuery: give the service account BigQuery Job User on the project and BigQuery Data
-Viewer only on the datasets that hold customer data. `auth: attached` uses the identity
+Viewer only on the datasets that hold customer data. Leave `location` unset to read
+datasets in every location (each query runs where its dataset lives); with it set, every
+query runs in that location and datasets elsewhere are skipped. `auth: attached` uses the identity
 attached to the worker (on GCP); workload identity federation is not supported yet.
 
 Databricks: give the service principal `CAN USE` on the SQL warehouse and create an
