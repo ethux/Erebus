@@ -9,7 +9,9 @@ connector sends (fakes refuse no write: the documented read-only role is the gua
 
 * Snowflake: ``fakesnow`` (an in-process DuckDB behind the real driver API). Auth is
   not checked by the fake, so auth and network failures are raised at the driver
-  boundary, with the error codes Snowflake sends.
+  boundary, with the error codes Snowflake sends. fakesnow knows no Snowflake collation,
+  so the ``folded`` table is made in DuckDB (``NOACCENT.NOCASE``) and the binary
+  collation ``'utf8'`` reaches DuckDB under its name there, ``'C'``.
 * BigQuery: the ``goccy/bigquery-emulator`` container named by
   ``EREBUS_TEST_BIGQUERY_EMULATOR`` (``http://127.0.0.1:9050``); skipped without it.
 
@@ -24,7 +26,7 @@ import tomllib
 from importlib import metadata
 from pathlib import Path
 
-from connector_backends import FIELDS, ROWS
+from connector_backends import FIELDS, FOLDED, ROWS
 
 LICENSE_ID = "lic-contract"
 _SF_DB = "CONTRACT_DB"
@@ -92,6 +94,7 @@ class SnowflakeBackend:
     schemas = True
     primary_key = False  # INFORMATION_SCHEMA names no key columns; a key is not enforced anyway
     integer_classes = ("numeric",)  # INTEGER is NUMBER(38,0)
+    folds = True
 
     def connector_type(self):
         return declared_type(self.name)
@@ -122,6 +125,9 @@ class SnowflakeBackend:
             cur.execute(stmt)
         cur.executemany(f'INSERT INTO CRM."customers" ({", ".join(chr(34) + f + chr(34) for f in FIELDS)}) '
                         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", ROWS)
+        duck = admin._duck_conn  # pylint: disable=protected-access
+        duck.execute(f'CREATE TABLE {_SF_DB}.CRM."folded" ("id" INTEGER, "name" VARCHAR COLLATE NOACCENT.NOCASE)')
+        duck.executemany(f'INSERT INTO {_SF_DB}.CRM."folded" VALUES (?, ?)', [list(r) for r in enumerate(FOLDED)])
         admin.close()
         self.sent = []
         real = FakeSnowflakeCursor.execute
@@ -129,7 +135,7 @@ class SnowflakeBackend:
 
         def recording(cursor, command, *args, **kwargs):
             sent.append(command)
-            return real(cursor, command, *args, **kwargs)
+            return real(cursor, command.replace(", 'utf8')", ", 'C')"), *args, **kwargs)
         FakeSnowflakeCursor.execute = recording
         self._stack.callback(setattr, FakeSnowflakeCursor, "execute", real)
         self.key = rsa_pem()

@@ -8,7 +8,9 @@ driver derives the host from the account id (``orgname-account`` or a legacy loc
 so no setting names a host; the worker checks every address the driver connects to
 against its deny list, and its allow list when one is set. The driver's probing of cloud
 metadata addresses (to name its platform) is off. Fields come from the database's
-``INFORMATION_SCHEMA.COLUMNS``, read once; collections are ``SCHEMA.TABLE``. Every
+``INFORMATION_SCHEMA.COLUMNS``, read once; collections are ``SCHEMA.TABLE``. Distinct
+values are compared in the binary collation (``'utf8'``), so a column collated to ignore
+case or accents keeps every spelling. Every
 session is tagged ``erebus-sync`` with a statement timeout. Snowflake has no read-only
 session: the documented read-only role is the guard, and the connector only ever sends
 SELECTs. Resuming a suspended warehouse bills at least 60 seconds. Every driver failure
@@ -146,10 +148,11 @@ class SnowflakeRowSource:
             yield SourceRecord(f"{collection}:{count}", dict(zip(selected, row, strict=True)), {})
 
     def iter_distinct_values(self, collection: str, fields: list[str], limit: int) -> Iterator[tuple]:
-        """``SELECT DISTINCT`` of ``fields`` as text, all-NULL rows skipped, at most ``limit``."""
+        """``SELECT DISTINCT`` of ``fields`` as text compared byte for byte (a column's
+        collation may fold case and accents), all-NULL rows skipped, at most ``limit``."""
         table, infos = self._table(collection)
         selected = _warehouse.check_fields(infos, fields)
-        cols = ", ".join(f"{_quote(f)}::VARCHAR" for f in selected)
+        cols = ", ".join(f"COLLATE({_quote(f)}::VARCHAR, 'utf8')" for f in selected)
         some = " OR ".join(f"{_quote(f)} IS NOT NULL" for f in selected)
         query = f"SELECT DISTINCT {cols} FROM {table} WHERE {some} LIMIT {max(0, int(limit))}"
         for row in self._rows(query, 2000):
