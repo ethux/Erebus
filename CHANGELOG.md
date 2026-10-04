@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Microsoft's license terms), dials the checked address and reads each table in one
   query. The drivers ship in the image, except the Entra one. When the license lapses
   their syncs stop and values already synced keep matching.
+- Erebus Pro: Odoo connector (feature `connectors.odoo`). Reads contacts, companies and
+  leads as an integration user with an API key: over JSON-2 on Odoo 19 and later, over
+  XML-RPC on Odoo 17 and 18. Companies sync as organizations and archived contacts keep
+  matching. With `sync.schedule`, an hourly incremental sync reads only changed records,
+  so a renamed contact's old name stops matching then; a deleted contact's values retire
+  at the next full sync. On Odoo Online the worker makes at most one call per second and
+  waits out rate limits. The API key's expiry shows as `credentials_expire_at`.
 
 ### Changed
 - During a sync the worker refuses connections outside the addresses its host lists

@@ -339,14 +339,14 @@ token minted by one replica restores on another. Operational telemetry is masked
 
 ### Connectors
 
-Connect the databases that hold a tenant's customer data, and the names, emails, phone
-numbers and addresses in them become **known values**: the gateway always replaces them
+Connect the databases and apps that hold a tenant's customer data, and the names, emails,
+phone numbers and addresses in them become **known values**: the gateway always replaces them
 with a token, also when detection would miss them. A connector only reads.
 
 | | Free | Erebus Pro |
 |---|---|---|
-| Sources | SQLite, Postgres, MySQL | also Snowflake, BigQuery, Databricks, Oracle and MSSQL / Azure SQL (features `connectors.snowflake`, `connectors.bigquery`, `connectors.databricks`, `connectors.oracle`, `connectors.mssql`) |
-| Syncs | a sample when a source is added or changed, then a full sync of the accepted fields; "sync now" | also scheduled syncs (feature `sync.schedule`) |
+| Sources | SQLite, Postgres, MySQL | also Snowflake, BigQuery, Databricks, Oracle, MSSQL / Azure SQL and Odoo (features `connectors.snowflake`, `connectors.bigquery`, `connectors.databricks`, `connectors.oracle`, `connectors.mssql`, `connectors.odoo`) |
+| Syncs | a sample when a source is added or changed, then a full sync of the accepted fields; "sync now" | also scheduled syncs, incremental for apps (feature `sync.schedule`) |
 
 Everything is managed through the admin API below, which only an operator credential
 can use; a tenant credential gets 403 on every source route. When a Pro license lapses,
@@ -361,7 +361,7 @@ your health check window (about 80 seconds in the compose file).
 ### Sync worker
 
 `erebus-sync` reads the systems a tenant connects (SQLite, Postgres, MySQL; with Pro also
-Snowflake, BigQuery, Databricks, Oracle and MSSQL / Azure SQL) and keeps
+Snowflake, BigQuery, Databricks, Oracle, MSSQL / Azure SQL and Odoo) and keeps
 that tenant's known values in step with them. It is the only process that contacts
 those systems. It runs from the same image (the `sync-worker` service in the compose
 file) and needs `EREBUS_PG_DSN` and `EREBUS_GATEWAY_MASTER_KEY`, not the provider
@@ -370,7 +370,9 @@ store and host hardening as the gateway.
 
 A sample job maps a source's fields; a full sync stores the distinct values of the
 accepted fields. Values retire only after a full sync reads everything: a sync that
-fails, stops early or hits a cap keeps every value. An unreachable source is retried
+fails, stops early or hits a cap keeps every value. An app source (Odoo) also has
+incremental syncs, which read only the records changed since the last sync; a changed
+record's old values retire once the sync completes. An unreachable source is retried
 (1, 5 and 15 minutes by default); wrong credentials, a refused host or a cap fail the
 job at once and mark the source for attention. Job rows and logs hold fixed error
 text only, never a credential or value.
@@ -390,6 +392,10 @@ the connector runs, the worker also checks every connection it opens:
   `bigquery.googleapis.com` and `oauth2.googleapis.com`, for Databricks the workspace
   host. Through an HTTP proxy the worker connects to the proxy, so the proxy's address
   must pass the lists instead.
+- Odoo connects over HTTPS to its `url` host only: the worker resolves it once, checks
+  every address against the lists and connects to that address, checking the
+  certificate against the name. Redirects are not followed and proxy settings in the
+  environment are ignored.
 - SQLite may connect nowhere.
 
 Native drivers are outside this check. libpq (Postgres) dials only the checked address
@@ -407,7 +413,7 @@ real guard.
 | `EREBUS_SYNC_LIMIT_WAIT_S` | `172800` | How long a job may wait on a source's rate limit |
 | `EREBUS_SYNC_TENANT_MAX_VALUES` | `1000000` | Most active known values per tenant |
 | `EREBUS_SYNC_DENIED_HOSTS` | see above | Hosts, addresses and networks a sync may not connect to (checked as above); setting it replaces the default |
-| `EREBUS_SYNC_ALLOWED_HOSTS` | unset | When set, the only hosts, addresses and networks a sync may connect to (checked as above); include your warehouse vendors' hosts |
+| `EREBUS_SYNC_ALLOWED_HOSTS` | unset | When set, the only hosts, addresses and networks a sync may connect to (checked as above); include your warehouse vendors' and apps' hosts |
 | `EREBUS_SYNC_SQLITE_DIR` | unset (SQLite off) | Directory SQLite sources must resolve inside |
 
 Several workers can run against one database; each job runs on one of them.
@@ -587,6 +593,48 @@ catalog it cannot use fails the sync as `permission denied`. Real-Time SQL wareh
 not supported: the driver opens their sessions on a backend that refuses the connector's
 sign-in, and the sync fails with `source settings are not valid`.
 
+### Connecting Odoo (Pro)
+
+Needs a license with `connectors.odoo` in the sync worker's environment. Reads contacts
+and companies (`res.partner`) and leads (`crm.lead`).
+
+| Type | Settings | Credentials |
+|------|----------|-------------|
+| `odoo` | `url` (`https://<name>.odoo.com` or your server, no path), `database`, `login` (the integration user's), `api` (`json2` or `xmlrpc`; asked from the server when unset), `collections` (`res.partner`, `crm.lead`; default both) | `api_key` |
+
+- **Plan.** Odoo's external API needs the Custom plan; One App Free and Standard do not
+  include it. Self-hosted Odoo Community has no such restriction.
+- **API.** Odoo 19 and later: JSON-2, the key as a bearer token; `database` is sent as
+  `X-Odoo-Database` (needed when one server hosts several databases). Odoo 17 and 18:
+  XML-RPC with `database`, `login` and the key. Odoo removes XML-RPC in Odoo 22 (Odoo
+  Online 21.1).
+- **Integration user.** Create a dedicated internal user with read access to contacts
+  and, for leads, Sales "All Documents". Leave its password empty so only the API key
+  signs in. Odoo has no read-only role: the connector only calls `fields_get` and
+  `search_read` (and `authenticate` on XML-RPC), but the user's access rights are the
+  real guard.
+- **API key.** As that user: Preferences, Account Security, New API Key. Odoo keys of
+  non-admin users last at most three months: rotate before then by sending the new key
+  with `PATCH /sources/{id}`. The worker reads the key's expiry from Odoo when the user
+  has exactly one key, and `GET /sources` shows it as `credentials_expire_at`.
+- **Odoo Online.** Odoo allows about one call per second and no parallel calls. On
+  `*.odoo.com` the worker makes one call at a time, at most one a second. A 429 waits
+  and backs off; when Odoo keeps refusing, the job is rescheduled (for up to
+  `EREBUS_SYNC_LIMIT_WAIT_S`). A full sync reads 500 records per call: 100,000 contacts
+  take about 200 calls.
+- **Fields** come from `fields_get`: names, email, phone (and mobile before Odoo 19),
+  street, company names, the lead's contact and company, plus custom `x_` text fields.
+  VAT, references and custom fields wait for review. A company's name syncs as an
+  organization (the `company` field), a person's as `name`. Archived records are read
+  too and keep matching.
+- **Syncs.** With `sync.schedule`, Odoo sources get an incremental sync every hour and a
+  full sync every day. An incremental sync reads the records whose `write_date` changed
+  since the last sync (re-reading a 10-minute overlap), so a renamed contact's old name
+  stops matching then. Odoo reports no deletions: a deleted contact's values retire at
+  the next full sync.
+- **Network.** `url` must be HTTPS (plain HTTP only to a loopback address). With an
+  allow list, add the Odoo host.
+
 ### Managing sources
 
 Source routes live under `/v1/admin/scopes/{scope_id}` (the `scope_id` onboarding
@@ -623,7 +671,8 @@ needs is kept as the source's `pending_job` and queued when that job ends or the
 ### Scheduled syncs (Pro)
 
 With a license carrying `sync.schedule` in the environment of both the gateway and the
-sync worker, the worker gives every source a daily full sync. Change or turn it off per source:
+sync worker, the worker gives every source a daily full sync, and app sources (Odoo) an
+hourly incremental sync too. Change or turn them off per source:
 
 ```bash
 curl -sX PUT localhost:8080/v1/admin/scopes/<scope_id>/sources/<source_id>/schedule \
@@ -633,8 +682,8 @@ curl -sX PUT localhost:8080/v1/admin/scopes/<scope_id>/sources/<source_id>/sched
 ```
 
 `full_minutes` is 60 to 43200; `null` turns scheduled syncs off and an empty body
-restores the default. Database sources have no incremental syncs, so
-`incremental_minutes` must stay unset. The first run is one interval after the change. A
+restores the default. `incremental_minutes` (15 to 1440) applies to app sources only;
+database and warehouse sources have no incremental syncs, so it must stay unset for them. The first run is one interval after the change. A
 source that is busy waits for the next check (every minute); a paused one is skipped.
 Without the feature the route returns 403 `requires Erebus Pro (feature sync.schedule)`.
 
