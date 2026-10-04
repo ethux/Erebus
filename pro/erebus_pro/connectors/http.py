@@ -224,8 +224,10 @@ class AppHttp:
             raise ConnectorError("limit", reset_at=datetime.now(UTC) + timedelta(seconds=wait)) from None
         self._sleep(wait)
 
-    def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        """Send one request within the app's limits; the 2xx response, or ``ConnectorError``."""
+    def request(self, method: str, path: str, *, accept: frozenset[int] = frozenset(), **kwargs: Any
+                ) -> httpx.Response:
+        """Send one request within the app's limits; the 2xx response (or one whose status
+        is in ``accept``), else ``ConnectorError``."""
         attempt = 0
         refreshed = False
         while True:
@@ -248,7 +250,7 @@ class AppHttp:
                 refreshed = True
                 self._client.headers.update(self._refresh())
                 continue
-            if not 200 <= response.status_code < 300:
+            if not 200 <= response.status_code < 300 and response.status_code not in accept:
                 kind = _class(response.status_code)
                 if kind == "unreachable" and attempt < self._limits.max_retries:
                     attempt += 1

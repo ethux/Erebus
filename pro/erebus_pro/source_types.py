@@ -10,8 +10,10 @@ workspace host itself, accepted only on Databricks' own domains. A self-hosted d
 resolve the host, apply its host lists and hand the connector the checked ``hostaddr``,
 the only address the connector may then reach (a warehouse: anything its host lists let
 through).
-No Pro type takes a DSN, connect descriptor or endpoint. Without erebus-pro installed
-these types are unknown.
+An app takes its URL, which the connector checks (HTTPS, no credentials or path) and its
+HTTP transport resolves and checks against the host lists at every connection. No Pro
+type takes a DSN or connect descriptor. Without erebus-pro installed these types are
+unknown.
 """
 from __future__ import annotations
 
@@ -41,4 +43,7 @@ TYPES = (
                   frozenset({"host", "port", "database", "user", "client_id", "sslmode", "auth", "schemas",
                              "collections"}),
                   1433),
+    # ``api`` is "json2" (Odoo 19 and later) or "xmlrpc" (older); omitted, the connector asks
+    # the server. ``database`` and ``login`` are needed for XML-RPC; the API key is a credential.
+    ConnectorType("odoo", "app", "pro", frozenset({"url", "database", "login", "api", "collections"})),
 )

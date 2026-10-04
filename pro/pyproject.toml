@@ -28,6 +28,7 @@ bigquery = "erebus_pro.connectors.bigquery:BigQueryConnector"
 oracle = "erebus_pro.connectors.oracle:OracleConnector"
 databricks = "erebus_pro.connectors.databricks:DatabricksConnector"
 mssql = "erebus_pro.connectors.mssql:MssqlConnector"
+odoo = "erebus_pro.connectors.odoo:OdooConnector"
 
 [project.entry-points."erebus.gateway.extensions"]
 pro = "erebus_pro.gateway:register"

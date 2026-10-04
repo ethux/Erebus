@@ -75,7 +75,12 @@ def _check_types():
     check("no Pro warehouse type takes a host, DSN, endpoint or credential as a setting",
           not any(t.setting_keys & _BANNED for t in types.values() if t.tier == "pro" and t.family == "warehouse"))
     check("no Pro type takes a DSN, hostaddr, driver file or credential as a setting",
-          not any(t.setting_keys & (_BANNED - {"host", "port"}) for t in types.values() if t.tier == "pro"))
+          not any(t.setting_keys & (_BANNED - {"host", "port", "url"}) for t in types.values() if t.tier == "pro"))
+    check("only an app takes a URL (its connector checks it, its transport checks every connection)",
+          {t.id for t in types.values() if "url" in t.setting_keys} == {"odoo"} and types["odoo"].family == "app")
+    check("odoo takes its URL, database, login, API choice and collections; no host to dial",
+          types["odoo"].setting_keys == {"url", "database", "login", "api", "collections"}
+          and types["odoo"].default_port is None and types["odoo"].tier == "pro")
     check("the free types are unchanged", types["postgres"].tier == "free" and types["sqlite"].tier == "free")
     check("collections match as each source reads an unquoted name: Snowflake and Oracle in upper case, "
           "Databricks in lower case, BigQuery and MSSQL as written",
