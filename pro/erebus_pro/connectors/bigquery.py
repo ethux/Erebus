@@ -83,7 +83,7 @@ def _quota_reset() -> datetime:
     """The next midnight in America/Los_Angeles, when BigQuery's daily quotas reset."""
     try:
         zone: Any = ZoneInfo("America/Los_Angeles")
-    except ZoneInfoNotFoundError:  # no time zone data: standard time is never before the reset
+    except ZoneInfoNotFoundError:  # no time zone data: standard time, at worst one early retry in summer
         zone = timezone(timedelta(hours=-8))
     today = datetime.now(UTC).astimezone(zone).date()
     return datetime.combine(today + timedelta(days=1), time(), tzinfo=zone)
