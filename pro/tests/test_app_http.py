@@ -5,7 +5,9 @@
 Pure, with local listeners and ``respx``. Every connection goes through the worker's
 network policy: a denied address is refused before any byte is sent, an allowed one is
 reached at the one checked address, and outside a sync job nothing connects. Redirects
-are not followed and environment proxies are ignored. Limits: a 429 or 503 waits as long
+are not followed and environment proxies are ignored. TLS is checked against the URL's
+host name while the connection goes to the checked address; a certificate for another
+name fails at once, unretried. Limits: a 429 or 503 waits as long
 as ``Retry-After`` asks, backs off when it names nothing, and reschedules (``limit``
 with a reset time) past the bounds or on a daily-limit signal; a header budget pauses
 the next call; ``min_interval`` paces calls. No 4xx but 429 is retried, a 401 once after
@@ -13,9 +15,12 @@ a token refresh; a 500 is a query error, a 502/504 and network errors are retrie
 then ``unreachable``. Errors are fixed text. Keyset paging and the overlap window.
 """
 import contextlib
+import datetime as dt
 import http.server
 import os
+import ssl
 import sys
+import tempfile
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -136,6 +141,83 @@ def _check_transport():
         err = _error(lambda: AppHttp(f"http://127.0.0.1:{port}", check=guard_checker(_OPEN)).request("GET", "/r"))
         check("a redirect is not followed; it fails as bad settings", err is not None and err.kind == "settings"
               and hits == ["/r"])
+
+
+def _cert(directory, name):
+    """A self-signed certificate (its own CA) for ``name``; returns (cert path, key path)."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    now = dt.datetime.now(dt.UTC)
+    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - dt.timedelta(minutes=5))
+            .not_valid_after(now + dt.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    cert_path, key_path = os.path.join(directory, f"{name}.pem"), os.path.join(directory, f"{name}.key")
+    with open(cert_path, "wb") as fh:
+        fh.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(key_path, "wb") as fh:
+        fh.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                   serialization.NoEncryption()))
+    return cert_path, key_path
+
+
+def _tls_request(served, trusted):
+    """GET https://crm.zq.test/t from a loopback server presenting ``served``, trusting
+    ``trusted``; returns (error, paths served, checker calls, sleeps)."""
+    from erebus_pro.connectors.http import AppHttp
+
+    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ctx.load_cert_chain(*served)
+    hits, asked = [], []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    old = os.environ.get("SSL_CERT_FILE")
+    os.environ["SSL_CERT_FILE"] = trusted
+    clock = _Clock()
+    try:
+        client = AppHttp(f"https://crm.zq.test:{srv.server_address[1]}",
+                         check=lambda host, port: asked.append((host, port)) or "127.0.0.1",
+                         sleep=clock.sleep, clock=clock)
+        err = _error(lambda: client.request("GET", "/t"))
+    finally:
+        if old is None:
+            del os.environ["SSL_CERT_FILE"]
+        else:
+            os.environ["SSL_CERT_FILE"] = old
+        srv.shutdown()
+        srv.server_close()
+    return err, hits, [h for h, _p in asked], clock.slept
+
+
+def _check_tls():
+    with tempfile.TemporaryDirectory() as tmp:
+        good = _cert(tmp, "crm.zq.test")
+        other = _cert(tmp, "other.zq.test")
+        err, hits, asked, _slept = _tls_request(good, good[0])
+        check("TLS is checked against the URL's name while the connection goes to the checked address",
+              err is None and hits == ["/t"] and asked == ["crm.zq.test"])
+        err, hits, _asked, slept = _tls_request(other, good[0])
+        check("a certificate for another name fails at once as unreachable, unretried",
+              err is not None and err.kind == "unreachable" and hits == [] and slept == [])
 
 
 def _check_urls():
@@ -266,6 +348,7 @@ def main():
         print("  - skipped (respx is not installed: pip install './pro[test]')")
         return
     _check_transport()
+    _check_tls()
     _check_urls()
     _check_limits()
     _check_errors()

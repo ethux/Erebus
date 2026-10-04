@@ -633,7 +633,8 @@ and companies (`res.partner`) and leads (`crm.lead`).
   stops matching then. Odoo reports no deletions: a deleted contact's values retire at
   the next full sync.
 - **Network.** `url` must be HTTPS (plain HTTP only to a loopback address). With an
-  allow list, add the Odoo host.
+  allow list, add the Odoo host. For a server with a private CA, point `SSL_CERT_FILE`
+  on the worker at a bundle holding the public CAs plus yours: it replaces them.
 
 ### Managing sources
 

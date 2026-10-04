@@ -47,7 +47,8 @@ _PRO_SETTINGS = {"snowflake": {"account": "acme-zq", "database": "CRM"}, "bigque
                  "databricks": {"server_hostname": "dbc-zq.cloud.databricks.com", "catalog": "crm",
                                 "http_path": "/sql/1.0/warehouses/0123456789abcdef"},
                  "oracle": {"host": "db.example", "service_name": "CRMPDB", "user": "reader"},
-                 "mssql": {"host": "sql.example", "database": "crm", "user": "reader"}}
+                 "mssql": {"host": "sql.example", "database": "crm", "user": "reader"},
+                 "odoo": {"url": "https://acme-zq.odoo.com", "database": "acme-zq", "login": "erebus-sync"}}
 _passed = 0
 
 

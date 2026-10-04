@@ -16,7 +16,7 @@ policy and inside the app's limits.
   spent header budget pauses before the next call. ``min_interval`` paces calls (one at
   a time). No 4xx is retried except 429, and a 401 once after ``refresh``; a 500 is a
   ``query`` error, a 502, 503 or 504 and network errors are retried, then
-  ``unreachable``.
+  ``unreachable``; a certificate that fails the check is ``unreachable`` at once.
 * **Cursors.** ``overlap_since`` and ``keyset_pages`` for modified-since reads that
   re-read an overlap window and page by a stable key.
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import ssl
 import time
 import urllib.parse
 from collections.abc import Callable, Iterator
@@ -166,9 +167,22 @@ class CheckedTransport(httpx.HTTPTransport):
     def __init__(self, check: Checker) -> None:  # pylint: disable=super-init-not-called
         import httpcore
 
+        # Certificates are checked against certifi's CAs, or SSL_CERT_FILE / SSL_CERT_DIR when set
+        # (a private CA); proxy variables stay ignored (the client does not trust the environment).
         self._pool = httpcore.ConnectionPool(
-            ssl_context=httpx.create_ssl_context(trust_env=False), max_connections=1, retries=0,
+            ssl_context=httpx.create_ssl_context(trust_env=True), max_connections=1, retries=0,
             network_backend=CheckedNetwork(check))
+
+
+def _bad_certificate(exc: BaseException) -> bool:
+    seen: BaseException | None = exc
+    for _ in range(8):
+        if seen is None:
+            return False
+        if isinstance(seen, ssl.SSLCertVerificationError):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
 
 
 def guard_checker(policy: NetworkPolicy | None = None) -> Checker:
@@ -209,12 +223,15 @@ class AppHttp:
         self._next_at = self._clock() + self._min_interval
 
     def _send(self, method: str, path: str, kwargs: dict) -> httpx.Response | None:
-        """One attempt; ``None`` after a network error (the caller retries)."""
+        """One attempt; ``None`` after a network error (the caller retries). A certificate
+        that fails the check will not pass on a retry: ``unreachable`` at once."""
         self._pace()
         self.calls += 1
         try:
             return self._client.request(method, path, **kwargs)
-        except httpx.TransportError:
+        except httpx.TransportError as exc:
+            if _bad_certificate(exc):
+                raise ConnectorError("unreachable") from None
             return None
 
     def _backoff(self, attempt: int, asked: float | None) -> None:
