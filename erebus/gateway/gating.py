@@ -124,9 +124,11 @@ def _gate_messages(tok: Tokenizer, policy: dict[str, Decision], mode: str, paylo
         if isinstance(content, str):
             msg["content"] = gate_text(tok, content, mode)
         elif isinstance(content, list):  # structured content array (FR-004)
-            for part in content:
+            for i, part in enumerate(content):
                 if isinstance(part, dict):
                     gate_part(tok, part, mode, policy)
+                elif isinstance(part, str):  # not a valid part, but it would still reach the provider
+                    content[i] = gate_text(tok, part, mode)
         for call in msg.get("tool_calls") or []:  # tool-call arguments never bypass the gate
             if isinstance(call, dict):
                 gate_part(tok, call, mode, policy)

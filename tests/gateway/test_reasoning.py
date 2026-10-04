@@ -77,6 +77,11 @@ def _check_request(client, captured, hdr):
     check("reasoning_content and reasoning reach the provider as tokens",
           "[PERSON_" in sent["reasoning_content"] and "[PERSON_" in sent["reasoning"])
 
+    msg = {"role": "user", "content": [f"Mail {_NAME}", {"type": "text", "text": "today"}]}
+    client.post("/v1/chat/completions", headers=hdr, json={"messages": [msg]})
+    check("a plain string inside a content list never reaches the provider raw",
+          _NAME not in json.dumps(captured[-1]) and "[PERSON_" in captured[-1]["messages"][0]["content"][0])
+
 
 def _check_response(client, hdr):
     r = client.post("/v1/chat/completions", headers=hdr, json={"messages": [
