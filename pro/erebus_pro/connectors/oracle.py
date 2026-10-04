@@ -4,7 +4,10 @@
 
 python-oracledb in thin mode: no Instant Client, Oracle Database 12.1 or later. Like the
 free database connectors it dials the ``hostaddr`` the sync worker checked against its
-host lists, never a name it resolves itself, and keeps ``host`` for TLS. ``sslmode``
+host lists, never a name it resolves itself, and keeps ``host`` for TLS. The driver
+follows a listener's redirect before it signs in (a RAC SCAN listener's, say); the
+worker refuses any address but the checked one, so a redirecting listener fails the
+sync as denied. ``sslmode``
 defaults to ``verify-full``: TCPS, the certificate verified against the system CAs (and
 a wallet's, when given) and its name matched against ``host`` during the handshake.
 ``verify-ca`` skips the name, ``require`` the certificate, ``disable`` uses plain TCP

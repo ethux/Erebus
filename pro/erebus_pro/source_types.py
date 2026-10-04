@@ -7,7 +7,9 @@ but core's ``ConnectorType``: no connector module, no driver. SaaS warehouses ta
 account or project id and the connector derives the vendor host; Databricks takes the
 workspace host itself, accepted only on Databricks' own domains. A self-hosted database
 (Oracle, MSSQL) takes a host and port like Postgres: its ``default_port`` makes the worker
-resolve the host, apply its host lists and hand the connector the checked ``hostaddr``.
+resolve the host, apply its host lists and hand the connector the checked ``hostaddr``,
+the only address the connector may then reach (a warehouse: anything its host lists let
+through).
 No Pro type takes a DSN, connect descriptor or endpoint. Without erebus-pro installed
 these types are unknown.
 """

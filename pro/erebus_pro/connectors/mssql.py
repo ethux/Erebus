@@ -18,8 +18,9 @@ the system CAs (``SSL_CERT_FILE`` adds a private CA) and its name matched agains
 Entra source takes only ``verify-full`` or ``require``: the ODBC driver checks both chain
 and name, or neither. Azure SQL's ``Redirect`` connection policy (the default for
 clients inside Azure) hands the client another node's address after sign-in, and both
-drivers follow it (FreeTDS follows one such redirect); the ``Proxy`` policy keeps the
-session on the address the worker checked.
+drivers follow it (FreeTDS follows one such redirect) unchecked: they are native code,
+out of the worker's connect guard. The ``Proxy`` policy keeps the session on the address
+the worker checked; network egress rules are the guard against anything else.
 
 Fields come from ``INFORMATION_SCHEMA.COLUMNS`` of ``database``, without the system and
 fixed-role schemas; collections are ``schema.table``. SQL Server has no read-only

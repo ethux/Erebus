@@ -8,9 +8,10 @@ client-credentials token source asks the workspace's own token endpoint
 timeout) and the SQL driver gets only a credentials provider that adds the access token
 to its requests, never the secret. ``server_hostname`` must be a workspace on one of
 Databricks' own domains and ``http_path`` a SQL warehouse's, so no setting can point the
-worker at another host; like the other vendor-hosted warehouses it bypasses the
-worker's host lists. Results are not fetched from cloud storage and the driver sends no
-telemetry, so the worker talks to the workspace host only.
+worker at another host. As for the other vendor-hosted warehouses, the worker checks
+every address the driver connects to against its deny list, and its allow list when one
+is set. Results are not fetched from cloud storage and the driver sends no telemetry,
+so the worker talks to the workspace host only.
 
 Collections are ``schema.table`` in the ``catalog`` setting; fields come from the
 catalog's Unity Catalog ``information_schema.columns``. A sync wakes the SQL warehouse

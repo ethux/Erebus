@@ -21,8 +21,10 @@ may offer ``iter_distinct_values(collection, fields, limit)`` yielding tuples in
 ``fields`` order (without it the worker de-duplicates ``iter_records``) and a warehouse
 ``iter_distinct_groups`` (all accepted fields of a table in one query), connects to the
 ``hostaddr`` it is handed, and raises ``ConnectorError`` (``incomplete`` for a capped
-query or skipped values). Every write is fenced by the job's lease: a worker that lost
-it writes nothing.
+query or skipped values). ``egress_exceptions(settings)`` may name ``(address, port)``
+pairs a source must reach past the host lists. Every connector call runs under the
+job's connect guard (``egress``). Every write is fenced by the job's lease: a worker
+that lost it writes nothing.
 """
 from __future__ import annotations
 
@@ -46,6 +48,7 @@ from ..gateway.governance import audit
 from ..gateway.store import catalog_versions
 from ..gateway.store.known_value_store import open_scope_crypto
 from ..gateway.store.scope_context import scoped
+from . import egress
 from .config import SyncConfig
 from .netpolicy import PolicyError, prepare_settings
 
@@ -126,7 +129,10 @@ def _open(ctx: Context, job: jobs.Job, source: sources.SourceInfo, crypto) -> tu
     if connector is None:
         raise JobFailed("unknown_type")
     secrets = sources.read_secrets(ctx.conn, crypto, job.scope_id, job.source_id)
-    return connector.connect(settings, secrets), ctype
+    declared = getattr(connector, "egress_exceptions", None)
+    guard = egress.Guard.for_source(ctx.config.policy, ctype, settings, resolve=ctx.resolve,
+                                    exceptions=declared(settings) if declared is not None else ())
+    return egress.GuardedSource(guard.call(connector.connect, settings, secrets), guard), ctype
 
 
 def _field_spec(info: Any, family: str) -> field_rules.FieldSpec:

@@ -8,7 +8,8 @@ Before a connector opens a source the worker checks its settings here:
   gateway's own DB host, loopback, unspecified, link-local and cloud metadata addresses)
   and inside the allow list when one is set. The connector receives the checked address
   as ``hostaddr`` and must connect to exactly that address, checking TLS against
-  ``host``, so a second DNS answer (rebinding) is never used;
+  ``host``, so a second DNS answer (rebinding) is never used; ``egress`` refuses any
+  other address while the connector runs;
 * a SQLite path must resolve (symlinks followed) inside the SQLite directory; without
   one SQLite is off.
 
@@ -112,7 +113,8 @@ def default_denied(dsn: str) -> HostList:
     return HostList(fixed.networks + extra.networks, extra.names)
 
 
-def _address(raw: str) -> Address:
+def address(raw: str) -> Address:
+    """The address ``raw`` spells (an IPv4-mapped one as IPv4); ``ValueError`` for a name."""
     ip = ipaddress.ip_address(raw.split("%", 1)[0])
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         return ip.ipv4_mapped
@@ -121,17 +123,17 @@ def _address(raw: str) -> Address:
 
 def _resolve(host: str, port: int, resolve: Resolver) -> set[Address]:
     try:
-        return {_address(host)}
+        return {address(host)}
     except ValueError:
         pass
     try:
         answers = resolve(host, port, type=socket.SOCK_STREAM)
     except (OSError, UnicodeError):
         return set()
-    return {_address(a[4][0]) for a in answers}
+    return {address(a[4][0]) for a in answers}
 
 
-def _names_resolve(names: Iterable[str], port: int, resolve: Resolver) -> set[Address]:
+def resolve_names(names: Iterable[str], port: int, resolve: Resolver) -> set[Address]:
     # A name that does not resolve matches by name only.
     return {a for name in names for a in _resolve(name.strip("[]"), port, resolve)}
 
@@ -140,7 +142,7 @@ def _listed(host: str, addrs: set[Address], hosts: HostList, port: int, resolve:
     """Whether ``addrs`` are on ``hosts``: any of them (``every=False``) or all of them."""
     if host.lower().rstrip(".") in hosts.names:
         return True
-    named = _names_resolve(hosts.names, port, resolve)
+    named = resolve_names(hosts.names, port, resolve)
     hits = [a in named or any(a in net for net in hosts.networks) for a in addrs]
     return all(hits) if every else any(hits)
 

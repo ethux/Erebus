@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests", "gateway"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from warehouse_backends import BigQueryBackend, service_account_key
+from warehouse_backends import BigQueryBackend, licensed, service_account_key
 
 from erebus.cataloging import sources
 from erebus.cataloging.connector_errors import ConnectorError
@@ -127,8 +127,19 @@ def _check_unreachable(b):
           and exc.__suppress_context__)
 
 
+def _check_egress_exceptions():
+    from erebus_pro.connectors.bigquery import BigQueryConnector
+
+    connector = BigQueryConnector(licensed(["connectors.bigquery"]))
+    check("auth: attached may reach the GCP metadata server past the worker's host lists, nothing else",
+          set(connector.egress_exceptions({"project": "erebus-test", "auth": "attached"}))
+          == {("169.254.169.254", 80), ("fd20:ce::254", 80)})
+    check("... a service-account key needs no exception", not connector.egress_exceptions({"project": "erebus-test"}))
+
+
 def main():
     print("\n=== BigQuery connector (spec 015) ===\n")
+    _check_egress_exceptions()
     b = BigQueryBackend()
     reason = b.unavailable()
     if reason:

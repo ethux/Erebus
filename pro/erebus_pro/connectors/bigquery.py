@@ -6,7 +6,9 @@ Signs in with a service-account key (``service_account_key``, the JSON key file)
 with ``auth: attached``, the identity attached to the worker (ADC, on GCP). The key's
 token endpoint and universe are pinned to Google's, so a key file cannot send the
 worker anywhere else; a workload identity (external account) file is refused. The client
-talks only to Google's BigQuery API: no setting names a host.
+talks only to Google's BigQuery API: no setting names a host. The worker checks every
+address it connects to against its deny list, and its allow list when one is set; with
+``auth: attached`` the GCP metadata server is let through (``egress_exceptions``).
 
 Collections are ``dataset.table``; fields come from each dataset's
 ``INFORMATION_SCHEMA.COLUMNS``. Every query bills at least 10 MB, so the distinct values
@@ -36,6 +38,7 @@ _LOCATION = re.compile(r"[A-Za-z0-9-]{2,64}")
 _AUTH = re.compile(r"key|attached")
 _SCOPES = ["https://www.googleapis.com/auth/bigquery"]
 _GOOGLE = {"token_uri": "https://oauth2.googleapis.com/token", "universe_domain": "googleapis.com"}
+_METADATA = (("169.254.169.254", 80), ("fd20:ce::254", 80))  # GCP's metadata server, IPv4 and IPv6
 _LABELS = {"erebus": "sync"}
 _REQUEST_TIMEOUT_S = 60
 _PAGE = 2000
@@ -240,6 +243,11 @@ class BigQueryConnector(LicensedConnector):
                              "schemas": {}, "collections": {}},
             secrets_schema={"service_account_key": {}},
         )
+
+    def egress_exceptions(self, settings: dict[str, Any]) -> tuple[tuple[str, int], ...]:
+        """With ``auth: attached`` the client fetches its token from the GCP metadata server,
+        which the worker's deny list covers; nothing else passes its host lists."""
+        return _METADATA if settings.get("auth") == "attached" else ()
 
     def connect(self, settings: dict[str, Any], secrets: dict[str, str]) -> RowSource:
         self.require_license()

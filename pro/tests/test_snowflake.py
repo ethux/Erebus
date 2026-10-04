@@ -78,6 +78,8 @@ def _check_key_pair(b):
           params.get("QUERY_TAG") == "erebus-sync" and params.get("STATEMENT_TIMEOUT_IN_SECONDS") == 600)
     check("keeps no session alive and times out the login",
           kw.get("client_session_keep_alive") is False and kw.get("login_timeout") == 10)
+    check("never probes cloud metadata addresses to detect its platform (the worker refuses them)",
+          kw.get("platform_detection_timeout_seconds") == 0.0)
     check("keeps the driver's log at warning level",
           logging.getLogger("snowflake.connector").getEffectiveLevel() >= logging.WARNING)
 

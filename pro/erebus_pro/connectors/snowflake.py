@@ -5,7 +5,9 @@
 A ``TYPE=SERVICE`` user signs in with its key pair: the PEM key (optionally encrypted,
 ``private_key_passphrase``) is opened here and handed to the driver as DER bytes. The
 driver derives the host from the account id (``orgname-account`` or a legacy locator),
-so no setting names a host. Fields come from the database's
+so no setting names a host; the worker checks every address the driver connects to
+against its deny list, and its allow list when one is set. The driver's probing of cloud
+metadata addresses (to name its platform) is off. Fields come from the database's
 ``INFORMATION_SCHEMA.COLUMNS``, read once; collections are ``SCHEMA.TABLE``. Every
 session is tagged ``erebus-sync`` with a statement timeout. Snowflake has no read-only
 session: the documented read-only role is the guard, and the connector only ever sends
@@ -190,6 +192,8 @@ class SnowflakeConnector(LicensedConnector):
         params.update(
             authenticator="SNOWFLAKE_JWT", private_key=_private_key(secrets),
             login_timeout=_warehouse.LOGIN_TIMEOUT_S, client_session_keep_alive=False,
+            # No probing of cloud metadata addresses to name the platform: the worker refuses them.
+            platform_detection_timeout_seconds=0.0,
             session_parameters={"QUERY_TAG": _warehouse.QUERY_TAG,
                                 "STATEMENT_TIMEOUT_IN_SECONDS": _warehouse.STATEMENT_TIMEOUT_S},
         )

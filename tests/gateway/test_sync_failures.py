@@ -7,12 +7,18 @@ does. Failures follow the policy: unreachable retries with backoff and fails aft
 last step, auth and license fail unretried and flag the source, a limit waits for its
 reset without counting an attempt, anything else is an internal error. The worker
 refuses a denied host, bad settings and an unknown type before any connector runs, and
-skips a paused source. Job rows and logs carry fixed text only.
+skips a paused source. A connector that dials anything but the checked address (a
+redirect, say) fails the job as denied; model review and the worker's own database
+connections are never refused. Job rows and logs carry fixed text only.
 """
+import contextlib
 import io
 import logging
 import os
+import socket
 import sys
+import tempfile
+import threading
 from datetime import UTC, datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -313,6 +319,81 @@ def _check_policy(env):
           all(r[0] is None or ("Qorbel" not in r[0] and "Pw-Zq" not in r[0]) for r in rows))
 
 
+@contextlib.contextmanager
+def _listener():
+    """A local TCP listener; yields (port, number of connections accepted so far as a list)."""
+    srv = socket.create_server(("127.0.0.1", 0))
+    accepted = []
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            accepted.append(1)
+            conn.close()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield srv.getsockname()[1], accepted
+    finally:
+        srv.close()
+        thread.join(2)
+
+
+class _Dialing(FakeConnector):
+    """A postgres connector that also dials ``target`` while connecting, as a driver
+    following a server's redirect would."""
+
+    def __init__(self, tables, target):
+        super().__init__("postgres", tables)
+        self.target = target
+
+    def connect(self, settings, secrets):
+        try:
+            socket.create_connection(self.target, timeout=1).close()
+        except OSError:
+            raise ConnectorError("unreachable") from None
+        return super().connect(settings, secrets)
+
+
+def _check_connect_guard(env):
+    notes = Table([Field("id", "integer", True), Field("notes")], [{"id": 1, "notes": "called Zyx about the kit"}])
+    with _listener() as (port, accepted), _listener() as (other, redirected), \
+            tempfile.TemporaryDirectory(dir="/tmp") as root:
+        daemon_path = os.path.join(root, "gliner.sock")
+        daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        daemon.bind(daemon_path)
+        daemon.listen(4)
+        src = env.new_source({"host": "127.0.0.1", "port": port, "dbname": "crm"})
+        asked = []
+
+        def model(text):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.connect(daemon_path)  # the GLiNER daemon's socket, outside connector work
+            asked.append(text)
+            return []
+
+        def run(connector, kind):
+            job, _ = jobs.enqueue(env.conn, env.scope, src, kind)
+            env.conn.commit()
+            Worker(config(_DSN), pool=env.pool, provider=env.kms, connectors=lookup(connector), model=model).run_once()
+            return jobs.get_job(env.conn, env.scope, job.id)
+        try:
+            job = run(_Dialing({"notes": notes}, ("127.0.0.1", port)), "sample")
+            check("a connector dialling the checked address and port works (and the worker's own DB connections)",
+                  job.status == "done" and len(accepted) == 1)
+            check("model review reaches the GLiNER daemon's Unix socket during a sample job", bool(asked))
+            job = run(_Dialing({"notes": notes}, ("127.0.0.1", other)), "full")
+            check("a connector dialling another address (a redirect) fails the job as denied (SC-9)",
+                  job.status == "failed" and job.attempts == 1 and job.error == "source address is not allowed")
+            check("... the redirect target is never reached", not redirected)
+            check("... and the source is flagged", env.status(src) == "needs_attention")
+        finally:
+            daemon.close()
+
+
 def main():
     print("\n=== Sync worker failures (spec 015) ===\n")
     conn = fresh_db("erebus_gw_sync_failures")
@@ -325,6 +406,7 @@ def main():
         _check_capped_tuples(env)
         _check_retries(env)
         _check_policy(env)
+        _check_connect_guard(env)
     finally:
         pool.close()
         conn.close()
