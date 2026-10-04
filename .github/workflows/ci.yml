@@ -151,7 +151,7 @@ jobs:
       - name: Start the BigQuery emulator
         run: |
           docker run -d --name bigquery-emulator -p 127.0.0.1:9050:9050 \
-            ghcr.io/goccy/bigquery-emulator:latest --project=erebus-test
+            ghcr.io/goccy/bigquery-emulator:0.8.1 --project=erebus-test
           for _ in $(seq 30); do curl -sf http://127.0.0.1:9050/bigquery/v2/projects/erebus-test/datasets && break; sleep 2; done
 
       - name: Core pattern tests
