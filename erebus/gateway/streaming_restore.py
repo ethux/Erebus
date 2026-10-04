@@ -8,8 +8,11 @@ stream fail-closed rather than emitting an unresolved token or partial raw value
 A fragment that is a whole JSON chunk (an OpenAI SSE ``data:`` frame) is restored
 inside the parsed chunk, so a restored quote or backslash cannot break its JSON. A
 token split across frames is split inside one field, so the hold-back is kept per
-choice and field (``content``, each tool call's ``arguments``) and flushed into the
-frame that carries the choice's ``finish_reason``, or into a last frame at stream end.
+choice and field (``content``, each tool call's ``arguments``, any other string such
+as ``reasoning_content``) and flushed into the frame that carries the choice's
+``finish_reason``, or into a last frame at stream end. Reasoning models may stream
+``content`` as a list of parts (Mistral): a text part continues ``content``, and the
+text inside ``thinking`` parts is held as one more field.
 """
 from __future__ import annotations
 
@@ -27,6 +30,8 @@ _PARTIAL_RE = re.compile(r"\[[A-Z_]*(?:\d+(?:_[0-9a-f]*)?)?")
 _META = ("id", "object", "created", "model")
 
 Key = tuple[Any, ...]  # (choice index, field name) or (choice index, "tool_calls", call index)
+# The text inside a delta's ``thinking`` content parts, held apart from the answer text.
+_THINKING: Key = ("content", "thinking")
 
 
 def _hold_point(text: str) -> int:
@@ -35,11 +40,17 @@ def _hold_point(text: str) -> int:
     return i if i != -1 and _PARTIAL_RE.fullmatch(text, i) else len(text)
 
 
-def _fields(delta: dict) -> Iterator[tuple[tuple[Any, ...], dict, str]]:
+def _fields(delta: dict) -> Iterator[tuple[Key, Any, Any]]:
     """``(key, holder, name)`` for every streamed string field of one choice's delta."""
     for name, value in list(delta.items()):
         if isinstance(value, str):
             yield (name,), delta, name
+    content = delta.get("content")
+    for part in content if isinstance(content, list) else ():
+        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+            yield ("content",), part, "text"
+        elif isinstance(part, dict) and part.get("type") == "thinking" and "thinking" in part:
+            yield from _thinking_fields(part["thinking"], part, "thinking")
     for call in delta.get("tool_calls") or []:
         fn = call.get("function") if isinstance(call, dict) else None
         if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
@@ -49,9 +60,32 @@ def _fields(delta: dict) -> Iterator[tuple[tuple[Any, ...], dict, str]]:
         yield ("function_call",), fn, "arguments"
 
 
+def _thinking_fields(value: Any, holder: Any, name: Any) -> Iterator[tuple[Key, Any, Any]]:
+    """The strings of a thinking payload: a string, a list of them, or text parts."""
+    if isinstance(value, str):
+        yield _THINKING, holder, name
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            yield from _thinking_fields(item, value, i)
+    elif isinstance(value, dict) and isinstance(value.get("text"), str):
+        yield _THINKING, value, "text"
+
+
+def _parts(content: Any) -> list:
+    """``content`` as a list of parts, so a thinking part can go in front of it."""
+    if isinstance(content, list):
+        return content
+    return [{"type": "text", "text": content}] if isinstance(content, str) and content else []
+
+
 def _put(delta: dict, key: tuple[Any, ...], text: str) -> None:
     """Add held ``text`` for ``key`` to a delta that does not carry that field."""
-    if key[0] == "tool_calls":
+    if key == _THINKING:
+        thinking = {"type": "thinking", "thinking": [{"type": "text", "text": text}]}
+        delta["content"] = [thinking, *_parts(delta.get("content"))]
+    elif key == ("content",) and isinstance(delta.get("content"), list):
+        delta["content"].append({"type": "text", "text": text})
+    elif key[0] == "tool_calls":
         calls = delta.get("tool_calls") if isinstance(delta.get("tool_calls"), list) else []
         delta["tool_calls"] = [*calls, {"index": key[1], "function": {"arguments": text}}]
     elif key[0] == "function_call":
