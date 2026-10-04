@@ -100,6 +100,13 @@ def _check_settings(b):
               == "settings")
     check("an account id is required", _kind(lambda: connector.connect(
         {k: v for k, v in b.settings().items() if k != "account"}, b.secrets())) == "settings")
+    with _Capture() as cap:
+        kind = _kind(lambda: connector.connect({k: v for k, v in b.settings().items() if k != "warehouse"},
+                                               b.secrets()))
+    check("a warehouse is required (without one every query fails), refused before signing in",
+          kind == "settings" and not cap.calls)
+    check("... and the connector says so", connector.connector_metadata().settings_schema["warehouse"]
+          == {"required": True})
     src = connector.connect(b.settings(schemas=["crm"]), b.secrets())
     try:
         names = [c.name for c in src.list_collections()]

@@ -175,8 +175,8 @@ class SnowflakeConnector(LicensedConnector):
             version="1.0",
             capabilities=["list_collections", "list_fields", "page_records", "distinct_values"],
             settings_schema={"account": {"required": True}, "user": {"required": True},
-                             "database": {"required": True}, "warehouse": {}, "role": {}, "schemas": {},
-                             "collections": {}},
+                             "database": {"required": True}, "warehouse": {"required": True}, "role": {},
+                             "schemas": {}, "collections": {}},
             secrets_schema={"private_key": {"required": True}, "private_key_passphrase": {}},
         )
 
@@ -186,11 +186,12 @@ class SnowflakeConnector(LicensedConnector):
             "account": _warehouse.setting(settings, "account", _ACCOUNT, required=True),
             "user": _warehouse.setting(settings, "user", required=True),
             "database": _warehouse.setting(settings, "database", _IDENTIFIER, required=True),
+            # Without a warehouse every query fails (errno 606); a user's default may not be set.
+            "warehouse": _warehouse.setting(settings, "warehouse", _IDENTIFIER, required=True),
         }
-        for key in ("warehouse", "role"):
-            value = _warehouse.setting(settings, key, _IDENTIFIER)
-            if value is not None:
-                params[key] = value
+        role = _warehouse.setting(settings, "role", _IDENTIFIER)
+        if role is not None:
+            params["role"] = role
         schemas = _warehouse.schema_filter(settings)
         params.update(
             authenticator="SNOWFLAKE_JWT", private_key=_private_key(secrets),

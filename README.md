@@ -452,7 +452,7 @@ Without the feature the source's syncs fail with
 
 | Type | Settings | Credentials |
 |------|----------|-------------|
-| `snowflake` | `account` (`orgname-account`), `user`, `database`, `warehouse`, `role`, `schemas`, `collections` | `private_key` (PEM), `private_key_passphrase` if it is encrypted |
+| `snowflake` | `account` (`orgname-account`), `user`, `database`, `warehouse` (required), `role`, `schemas`, `collections` | `private_key` (PEM), `private_key_passphrase` if it is encrypted |
 | `bigquery` | `project`, `location`, `max_bytes_billed`, `auth` (`key` or `attached`), `schemas` (datasets), `collections` | `service_account_key` (the JSON key file); none with `auth: attached` |
 | `databricks` | `server_hostname` (the workspace host), `http_path` (the SQL warehouse's, `/sql/1.0/warehouses/<id>`), `catalog`, `client_id` (the service principal's application id), `schemas`, `collections` | `client_secret` (an OAuth secret of the service principal) |
 | `oracle` | `host`, `port` (`1521`), `service_name`, `user`, `sslmode`, `auth` (`password` or `wallet`), `schemas`, `collections` | `password`; for mutual TLS also `wallet_pem` (the wallet's `ewallet.pem`) and `wallet_password`; only `wallet_pem` with `auth: wallet` |
@@ -531,7 +531,8 @@ GRANT USAGE ON WAREHOUSE sync_wh TO ROLE erebus_reader;
 GRANT USAGE ON DATABASE crm TO ROLE erebus_reader;
 GRANT USAGE ON SCHEMA crm.public TO ROLE erebus_reader;
 GRANT SELECT ON TABLE crm.public.customers TO ROLE erebus_reader;
-CREATE USER erebus_sync TYPE = SERVICE DEFAULT_ROLE = erebus_reader RSA_PUBLIC_KEY = '<public key>';
+CREATE USER erebus_sync TYPE = SERVICE DEFAULT_ROLE = erebus_reader DEFAULT_WAREHOUSE = sync_wh
+  RSA_PUBLIC_KEY = '<public key>';  -- and set warehouse: sync_wh on the source
 GRANT ROLE erebus_reader TO USER erebus_sync;
 
 -- Databricks (Unity Catalog), for the service principal's application id
