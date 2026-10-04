@@ -8,6 +8,8 @@ optional ``iter_distinct_groups`` (one query per table) or group by group, withi
 limit; the
 worker loads entry points strictly (a broken plugin raises) while the laptop skips it;
 the built-in SQLite connector lives in ``erebus.cataloging.connectors`` and loads lazily.
+A connector that dials a host itself asks ``checked_address``, which refuses everything
+until the sync worker installs its network check.
 """
 import os
 import subprocess
@@ -200,6 +202,24 @@ def test_sqlite_lazy():
     check("sources.SQLiteConnector still names it", out.split()[3] == "True")
 
 
+def test_checked_address():
+    from erebus.cataloging.connector_errors import CONNECTOR_TEXT, ConnectorError
+    try:
+        sources.checked_address("crm.zq.example", 443)
+        err = None
+    except ConnectorError as exc:
+        err = exc
+    check("without the sync worker's network check no address is handed out",
+          err is not None and err.kind == "denied" and str(err) == CONNECTOR_TEXT["denied"])
+    asked = []
+    sources.set_address_check(lambda host, port: asked.append((host, port)) or "192.0.2.7")
+    try:
+        check("with it, the check decides the address", sources.checked_address("crm.zq.example", 443)
+              == "192.0.2.7" and asked == [("crm.zq.example", 443)])
+    finally:
+        sources.set_address_check(None)
+
+
 def main():
     print("source contract")
     test_field_info()
@@ -208,6 +228,7 @@ def main():
     test_entry_points()
     test_worker_loads_strictly()
     test_sqlite_lazy()
+    test_checked_address()
     print(f"  {_passed} checks passed")
 
 

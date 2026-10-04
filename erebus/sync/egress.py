@@ -20,9 +20,10 @@ and every step of an iterator it returns, that way) the hook refuses:
 * a host name in place of an address (connect would resolve it where the answer cannot
   be checked) and any family but IPv4 and IPv6, such as a Unix socket.
 
-An HTTP connector's transport resolves its host once through ``checked_address`` (the
-deny and allow lists applied to every answer, the lookup noted) and connects to exactly
-that address, checking TLS against the name.
+An HTTP connector's transport resolves its host once through the contract's
+``checked_address``, which ``install`` points at the running job's guard (the deny and
+allow lists applied to every answer, the lookup noted; outside a connector call nothing
+is handed out), and connects to exactly that address, checking TLS against the name.
 
 An ``(address, port)`` the connector declares with ``egress_exceptions(settings)`` passes
 both lists (the metadata server, for BigQuery's identity attached to the worker). Threads
@@ -50,6 +51,7 @@ import weakref
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
+from ..cataloging import sources as contract
 from ..cataloging.connector_types import ConnectorType
 from .netpolicy import Address, NetworkPolicy, PolicyError, address, check_host, resolve_names
 
@@ -234,11 +236,20 @@ def _noting(real: Callable[..., list]) -> Callable[..., list]:
     return getaddrinfo
 
 
+def _job_address(host: str, port: int) -> str:
+    guard = current()
+    if guard is None:
+        raise PolicyError("denied")
+    return guard.checked_address(host, port)
+
+
 def install() -> None:
-    """Install the connect hook and the lookup wrapper, once per process (the sync worker's)."""
+    """Install the connect hook, the lookup wrapper and the contract's address check,
+    once per process (the sync worker's)."""
     with _LOCK:
         if _INSTALLED:
             return
         sys.addaudithook(_hook)
         socket.getaddrinfo = _noting(socket.getaddrinfo)
+        contract.set_address_check(_job_address)
         _INSTALLED.append(True)

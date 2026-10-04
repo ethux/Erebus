@@ -28,7 +28,7 @@ import httpx
 from odoo_fake import DB, KEY, LOGIN, FakeOdoo, read_only
 
 from erebus.cataloging.connector_errors import ConnectorError, CursorExpired, LicenseRequired
-from erebus.sync.netpolicy import NetworkPolicy, parse_hosts
+from erebus.sync.netpolicy import NetworkPolicy, check_host, parse_hosts
 
 _passed = 0
 _FEATURE = "connectors.odoo"
@@ -73,7 +73,8 @@ def _error(fn):
 def _connector(clock=None, features=(_FEATURE,)):
     from erebus_pro.connectors.odoo import OdooConnector
     clock = clock or _Clock()
-    return OdooConnector(licensed(features), policy=_POLICY, sleep=clock.sleep, clock=clock)
+    return OdooConnector(licensed(features), check=lambda host, port: check_host(_POLICY, host, port),
+                         sleep=clock.sleep, clock=clock)
 
 
 def _settings(fake, **extra):

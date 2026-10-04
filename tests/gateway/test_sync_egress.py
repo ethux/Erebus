@@ -264,6 +264,11 @@ def _check_checked_address():
               == "denied")
         check("a name that does not resolve is unreachable",
               kind(lambda: guard.checked_address("gone.zq.test", port)) == "unreachable")
+        from erebus.cataloging import sources as contract
+        check("through the connector contract, the running job's guard hands out the address",
+              guard.call(contract.checked_address, "crm.zq.test", port) == "127.0.0.1")
+        check("... and outside a connector call nothing is handed out",
+              kind(lambda: contract.checked_address("crm.zq.test", port)) == "denied")
 
 
 def _raises(exc_type, fn):

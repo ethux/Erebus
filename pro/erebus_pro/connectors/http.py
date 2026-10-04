@@ -3,12 +3,13 @@
 """What every Pro app connector shares: HTTP that stays inside the worker's network
 policy and inside the app's limits.
 
-* **Checked transport.** Every connection resolves its host once, checks every answer
-  against the worker's deny and allow lists (``EREBUS_SYNC_DENIED_HOSTS``,
-  ``EREBUS_SYNC_ALLOWED_HOSTS``) and connects to exactly that address, with TLS checked
-  against the host name. Redirects are never followed and proxy settings from the
-  environment are ignored, so nothing reaches a host the policy did not check. Outside a
-  sync job (no guard, no policy given) nothing connects.
+* **Checked transport.** Every connection asks the connector contract's
+  ``checked_address`` for its host: the sync worker resolves it once, checks every
+  answer against its deny and allow lists (``EREBUS_SYNC_DENIED_HOSTS``,
+  ``EREBUS_SYNC_ALLOWED_HOSTS``) and hands out one address, which the transport connects
+  to with TLS checked against the host name. Redirects are never followed and proxy
+  settings from the environment are ignored, so nothing reaches a host the worker did
+  not check. Outside a sync job nothing connects.
 * **Limits.** ``LimitRules`` reads an app's limit signal: a slow-down (429, 503) waits
   as long as ``Retry-After`` or the app's reset header asks, with exponential backoff
   when it names nothing, a bounded number of times; a longer wait, or a daily limit,
@@ -38,8 +39,7 @@ from typing import Any
 import httpx
 
 from erebus.cataloging.connector_errors import ConnectorError
-from erebus.sync import egress
-from erebus.sync.netpolicy import NetworkPolicy, PolicyError, check_host
+from erebus.cataloging.sources import checked_address
 
 from ._licensed import LicensedConnector
 
@@ -155,7 +155,7 @@ class CheckedNetwork:
                                        socket_options=socket_options)
 
     def connect_unix_socket(self, *_args: Any, **_kwargs: Any) -> Any:
-        raise PolicyError("denied")
+        raise ConnectorError("denied") from None
 
     def sleep(self, seconds: float) -> None:
         self._inner.sleep(seconds)
@@ -183,19 +183,6 @@ def _bad_certificate(exc: BaseException) -> bool:
             return True
         seen = seen.__cause__ or seen.__context__
     return False
-
-
-def guard_checker(policy: NetworkPolicy | None = None) -> Checker:
-    """Check against ``policy``, or else against the running sync job's guard; with
-    neither, refuse every connection."""
-    def check(host: str, port: int) -> str:
-        if policy is not None:
-            return check_host(policy, host, port)
-        guard = egress.current()
-        if guard is None:
-            raise PolicyError("denied")
-        return guard.checked_address(host, port)
-    return check
 
 
 class AppHttp:
@@ -305,14 +292,14 @@ def keyset_pages(fetch: Callable[[Any, int], list], key: Callable[[Any], Any], p
 class HttpAppConnector(LicensedConnector):
     """Base of a Pro app connector over HTTP.
 
-    ``policy`` checks connections outside the sync worker (tests); in the worker the
-    running job's guard does. ``sleep`` and ``clock`` drive pacing and backoff.
+    ``check`` hands out the address for a host (default: the sync worker's, through the
+    connector contract); ``sleep`` and ``clock`` drive pacing and backoff.
     """
 
-    def __init__(self, entitlements: Any = None, *, policy: NetworkPolicy | None = None,
+    def __init__(self, entitlements: Any = None, *, check: Checker | None = None,
                  sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> None:
         super().__init__(entitlements)
-        self._policy = policy
+        self._check = check or checked_address
         self._sleep = sleep
         self._clock = clock
 
@@ -321,4 +308,4 @@ class HttpAppConnector(LicensedConnector):
         # httpx logs every request URL at info level; the worker log keeps none of it.
         for name in ("httpx", "httpcore"):
             logging.getLogger(name).setLevel(logging.WARNING)
-        return AppHttp(base_url, check=guard_checker(self._policy), sleep=self._sleep, clock=self._clock, **kwargs)
+        return AppHttp(base_url, check=self._check, sleep=self._sleep, clock=self._clock, **kwargs)

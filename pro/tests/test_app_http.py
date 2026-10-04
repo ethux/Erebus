@@ -32,7 +32,7 @@ import httpx
 from erebus.cataloging.connector_errors import ConnectorError
 from erebus.cataloging.connector_types import ConnectorType
 from erebus.sync import egress
-from erebus.sync.netpolicy import DEFAULT_DENIED_NETWORKS, NetworkPolicy, PolicyError, parse_hosts
+from erebus.sync.netpolicy import DEFAULT_DENIED_NETWORKS, NetworkPolicy, PolicyError, check_host, parse_hosts
 
 _passed = 0
 _OPEN = NetworkPolicy(denied=parse_hosts(",".join(n for n in DEFAULT_DENIED_NETWORKS if n != "127.0.0.0/8")))
@@ -100,26 +100,35 @@ class _Clock:
         self.now += seconds
 
 
+def _checker(policy):
+    """What the sync worker's check does, for ``policy`` (outside a worker)."""
+    return lambda host, port: check_host(policy, host, port)
+
+
 def _http(**kw):
-    from erebus_pro.connectors.http import AppHttp, guard_checker
+    from erebus_pro.connectors.http import AppHttp
     clock = kw.pop("clock", None) or _Clock()
-    return AppHttp(_BASE, check=guard_checker(_OPEN), sleep=clock.sleep, clock=clock, **kw), clock
+    return AppHttp(_BASE, check=_checker(_OPEN), sleep=clock.sleep, clock=clock, **kw), clock
 
 
 def _check_transport():
-    from erebus_pro.connectors.http import AppHttp, guard_checker
+    from erebus_pro.connectors.http import AppHttp, HttpAppConnector
 
     with _server() as (port, hits):
         url = f"http://127.0.0.1:{port}"
-        denied = AppHttp(url, check=guard_checker(_DEFAULT))
+        denied = AppHttp(url, check=_checker(_DEFAULT))
         check("a deny-listed address is refused before any byte is sent",
               isinstance(_error(lambda: denied.request("GET", "/x")), PolicyError) and hits == [])
-        allowed = AppHttp(url, check=guard_checker(_OPEN))
+        allowed = AppHttp(url, check=_checker(_OPEN))
         check("an address the policy allows is reached", allowed.request("GET", "/x").status_code == 200
               and hits == ["/x"])
-        outside = AppHttp(url, check=guard_checker())
-        check("outside a sync job, with no policy, nothing connects",
-              isinstance(_error(lambda: outside.request("GET", "/y")), PolicyError) and hits == ["/x"])
+        outside = HttpAppConnector().open_http(url)
+        err = _error(lambda: outside.request("GET", "/y"))
+        check("outside the sync worker nothing connects", err is not None and err.kind == "denied" and hits == ["/x"])
+        egress.install()  # what the sync worker does at start
+        err = _error(lambda: outside.request("GET", "/y"))
+        check("... nor in the worker outside a sync job", err is not None and err.kind == "denied"
+              and hits == ["/x"])
         app = ConnectorType("zq-app", "app", "pro", frozenset({"url"}))
         guard = egress.Guard.for_source(_OPEN, app, {})
         check("inside a sync job the job's guard checks the connection",
@@ -131,14 +140,14 @@ def _check_transport():
         os.environ["HTTP_PROXY"] = "http://192.0.2.1:9"
         try:
             check("proxy settings from the environment are ignored",
-                  AppHttp(url, check=guard_checker(_OPEN)).request("GET", "/p").status_code == 200)
+                  AppHttp(url, check=_checker(_OPEN)).request("GET", "/p").status_code == 200)
         finally:
             if old is None:
                 del os.environ["HTTP_PROXY"]
             else:
                 os.environ["HTTP_PROXY"] = old
     with _server(302, {"Location": "http://169.254.169.254/latest"}) as (port, hits):
-        err = _error(lambda: AppHttp(f"http://127.0.0.1:{port}", check=guard_checker(_OPEN)).request("GET", "/r"))
+        err = _error(lambda: AppHttp(f"http://127.0.0.1:{port}", check=_checker(_OPEN)).request("GET", "/r"))
         check("a redirect is not followed; it fails as bad settings", err is not None and err.kind == "settings"
               and hits == ["/r"])
 

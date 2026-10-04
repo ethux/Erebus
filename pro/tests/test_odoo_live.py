@@ -133,8 +133,9 @@ def _run(conn, worker, scope_id, source_id, kind):
 def _api_used(admin, settings, key):
     from erebus_pro.connectors.odoo import OdooConnector
 
-    from erebus.sync.netpolicy import NetworkPolicy, parse_hosts
-    source = OdooConnector(licensed([_FEATURE]), policy=NetworkPolicy(denied=parse_hosts("169.254.0.0/16"))
+    from erebus.sync.netpolicy import NetworkPolicy, check_host, parse_hosts
+    policy = NetworkPolicy(denied=parse_hosts("169.254.0.0/16"))
+    source = OdooConnector(licensed([_FEATURE]), check=lambda host, port: check_host(policy, host, port)
                            ).connect(settings, {"api_key": key})
     try:
         return type(source._rpc).__name__  # pylint: disable=protected-access

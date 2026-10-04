@@ -20,6 +20,8 @@ CONNECTOR_TEXT = {
     "incomplete": "sync incomplete",
     # A setting only the connector can check (a malformed warehouse account id, say).
     "settings": "source settings are not valid",
+    # The worker's host lists refuse the address (or no worker check is installed).
+    "denied": "source address is not allowed",
 }
 _FEATURE = re.compile(r"[a-z0-9_.-]{1,64}")
 _REQUIREMENT = re.compile(r"[a-z0-9_.-]{1,64}\[[a-z0-9_-]{1,32}\]")
