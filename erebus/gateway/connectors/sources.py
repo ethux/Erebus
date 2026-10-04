@@ -206,6 +206,20 @@ def set_cursor(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UU
     return row is not None
 
 
+def set_credentials_expiry(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UUID,
+                           expire_at: datetime) -> bool:
+    """Store when the credentials expire, as the source itself reported it (sync worker).
+
+    ``True`` when the stored time changed."""
+    with scoped(conn, scope_id):
+        row = conn.execute(
+            "UPDATE sources SET credentials_expire_at = %s, updated_at = now() WHERE scope_id = %s AND id = %s "
+            "AND credentials_expire_at IS DISTINCT FROM %s RETURNING 1",
+            (expire_at, scope_id, source_id, expire_at),
+        ).fetchone()
+    return row is not None
+
+
 def delete_source(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UUID) -> int | None:
     """Remove a source and retire the entries only it held; return how many retired.
 

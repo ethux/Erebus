@@ -105,6 +105,67 @@ def add_known_value(
     return row[0]
 
 
+def _upsert_entries(
+    conn: psycopg.Connection,
+    crypto: ScopeCrypto,
+    scope_id: uuid.UUID,
+    items: Iterable[tuple[str, str]],
+    stop_words: Collection[str],
+    tenant_max: int | None,
+) -> tuple[dict[bytes, uuid.UUID], int, int]:
+    """Inside the caller's ``scoped`` transaction: upsert the kept ``(value, label)`` items.
+
+    Returns ``({blind index: entry id}, added, rejected)``. Rows are written in
+    blind-index order, the order ``_retire_unlinked`` locks in, so concurrent syncs
+    cannot deadlock on entries; ``TenantCapExceeded`` past ``tenant_max`` active entries.
+    """
+    rejected = 0
+    batch: dict[bytes, tuple[str, str]] = {}
+    for value, label in items:
+        norm = normalize_label(label)
+        if reject_reason(value, norm, stop_words=stop_words):
+            rejected += 1
+            continue
+        cleaned = clean_value(value)
+        batch.setdefault(crypto.blind_index(cleaned, norm), (cleaned, norm))
+    if not batch:
+        return {}, 0, rejected
+    free = {bidx: crypto.blind_index(v, "") for bidx, (v, _l) in batch.items()}
+    _erase_lock(conn, scope_id, shared=True)
+    erased = _suppressed(conn, scope_id, sorted(set(free.values())))
+    keep = sorted(b for b in batch if free[b] not in erased)
+    rejected += len(batch) - len(keep)
+    if not keep:
+        return {}, 0, rejected
+    retired = {
+        bytes(r[0])
+        for r in conn.execute(
+            "SELECT value_blind_index FROM catalog_entries "
+            "WHERE scope_id = %s AND value_blind_index = ANY(%s) AND status = 'retired'",
+            (scope_id, keep),
+        ).fetchall()
+    }
+    sealed = [crypto.encrypt(batch[b][0].encode("utf-8")) for b in keep]
+    rows = conn.execute(
+        "INSERT INTO catalog_entries "
+        "(scope_id, label, value_ciphertext, value_nonce, value_blind_index, key_version, origin) "
+        "SELECT %s, t.l, t.c, t.n, t.b, %s, 'source' "
+        "FROM unnest(%s::text[], %s::bytea[], %s::bytea[], %s::bytea[]) AS t(l, c, n, b) ORDER BY t.b "
+        "ON CONFLICT (scope_id, value_blind_index) DO UPDATE SET status = 'active', retired_at = NULL "
+        "RETURNING id, value_blind_index, (xmax = 0)",
+        (scope_id, crypto.key_version, [batch[b][1] for b in keep], [ct for _n, ct in sealed],
+         [n for n, _ct in sealed], keep),
+    ).fetchall()
+    added = sum(1 for _id, bidx, inserted in rows if inserted or bytes(bidx) in retired)
+    if tenant_max is not None and added:
+        active = conn.execute(
+            "SELECT count(*) FROM catalog_entries WHERE scope_id = %s AND status = 'active'", (scope_id,)
+        ).fetchone()[0]
+        if active > tenant_max:
+            raise TenantCapExceeded()
+    return {bytes(bidx): entry_id for entry_id, bidx, _new in rows}, added, rejected
+
+
 def upsert_values(
     conn: psycopg.Connection,
     crypto: ScopeCrypto,
@@ -119,86 +180,85 @@ def upsert_values(
     """Upsert one batch of ``(value, label)`` seen by a source and link each to ``sync_id``.
 
     One transaction. Rejects what ``policy.reject_reason`` rejects (by default with the
-    bundled stop-list) and every value suppressed by an erasure (label-free). An existing entry keeps its origin (manual
-    stays manual) and becomes active again. Rows are written in blind-index order, the
-    order ``retire_unseen`` locks in, so concurrent syncs cannot deadlock on entries.
-    Raises ``TenantCapExceeded`` (batch rolled back) when active entries pass
-    ``tenant_max``. The caller bumps the catalog version once the sync is done.
+    bundled stop-list) and every value suppressed by an erasure (label-free). An existing
+    entry keeps its origin (manual stays manual) and becomes active again. Raises
+    ``TenantCapExceeded`` (batch rolled back) when active entries pass ``tenant_max``.
+    The caller bumps the catalog version once the sync is done.
     """
-    rejected = 0
-    batch: dict[bytes, tuple[str, str]] = {}
-    for value, label in items:
-        norm = normalize_label(label)
-        if reject_reason(value, norm, stop_words=stop_words):
-            rejected += 1
-            continue
-        cleaned = clean_value(value)
-        batch.setdefault(crypto.blind_index(cleaned, norm), (cleaned, norm))
-    if not batch:
-        return UpsertResult(0, 0, rejected)
-    free = {bidx: crypto.blind_index(v, "") for bidx, (v, _l) in batch.items()}
     with scoped(conn, scope_id):
-        _erase_lock(conn, scope_id, shared=True)
-        erased = _suppressed(conn, scope_id, sorted(set(free.values())))
-        keep = sorted(b for b in batch if free[b] not in erased)
-        rejected += len(batch) - len(keep)
-        if not keep:
+        entries, added, rejected = _upsert_entries(conn, crypto, scope_id, items, stop_words, tenant_max)
+        if not entries:
             return UpsertResult(0, 0, rejected)
-        retired = {
-            bytes(r[0])
-            for r in conn.execute(
-                "SELECT value_blind_index FROM catalog_entries "
-                "WHERE scope_id = %s AND value_blind_index = ANY(%s) AND status = 'retired'",
-                (scope_id, keep),
-            ).fetchall()
-        }
-        sealed = [crypto.encrypt(batch[b][0].encode("utf-8")) for b in keep]
-        rows = conn.execute(
-            "INSERT INTO catalog_entries "
-            "(scope_id, label, value_ciphertext, value_nonce, value_blind_index, key_version, origin) "
-            "SELECT %s, t.l, t.c, t.n, t.b, %s, 'source' "
-            "FROM unnest(%s::text[], %s::bytea[], %s::bytea[], %s::bytea[]) AS t(l, c, n, b) ORDER BY t.b "
-            "ON CONFLICT (scope_id, value_blind_index) DO UPDATE SET status = 'active', retired_at = NULL "
-            "RETURNING id, value_blind_index, (xmax = 0)",
-            (scope_id, crypto.key_version, [batch[b][1] for b in keep], [ct for _n, ct in sealed],
-             [n for n, _ct in sealed], keep),
-        ).fetchall()
-        added = sum(1 for _id, bidx, inserted in rows if inserted or bytes(bidx) in retired)
         conn.execute(
             "INSERT INTO catalog_entry_sources (scope_id, entry_id, source_id, last_seen_sync_id) "
             "SELECT %s, e, %s, %s FROM unnest(%s::uuid[]) AS e ORDER BY e "
             "ON CONFLICT (scope_id, entry_id, source_id) DO UPDATE SET last_seen_sync_id = EXCLUDED.last_seen_sync_id",
-            (scope_id, source_id, sync_id, [r[0] for r in rows]),
+            (scope_id, source_id, sync_id, list(entries.values())),
         )
-        if tenant_max is not None and added:
-            active = conn.execute(
-                "SELECT count(*) FROM catalog_entries WHERE scope_id = %s AND status = 'active'", (scope_id,)
-            ).fetchone()[0]
-            if active > tenant_max:
-                raise TenantCapExceeded()
-    return UpsertResult(added, len(rows), rejected)
+    return UpsertResult(added, len(entries), rejected)
 
 
-def _retire_unlinked(conn: psycopg.Connection, scope_id: uuid.UUID, unlink_sql: str, params: tuple) -> int:
-    """Run ``unlink_sql`` (a DELETE on links RETURNING entry_id); retire the orphans.
+def upsert_record_values(
+    conn: psycopg.Connection,
+    crypto: ScopeCrypto,
+    scope_id: uuid.UUID,
+    source_id: uuid.UUID,
+    sync_id: uuid.UUID,
+    items: Iterable[tuple[str, str, str, str]],
+    *,
+    stop_words: Collection[str] = STOP_WORDS,
+    tenant_max: int | None = None,
+) -> UpsertResult:
+    """``upsert_values`` for an app source: ``(collection, record_id, value, label)`` items,
+    each kept value linked to its record under ``sync_id``.
+
+    A record's links not renewed here stay until ``relink_records`` or
+    ``retire_unseen_records`` drops them, once the sync completes.
+    """
+    items = list(items)
+    with scoped(conn, scope_id):
+        entries, added, rejected = _upsert_entries(conn, crypto, scope_id, ((v, lb) for _c, _r, v, lb in items),
+                                                   stop_words, tenant_max)
+        links = sorted({
+            (collection, record_id, entry)
+            for collection, record_id, value, label in items
+            if (entry := entries.get(crypto.blind_index(clean_value(value), normalize_label(label)))) is not None
+        })
+        if links:
+            conn.execute(
+                "INSERT INTO catalog_entry_records "
+                "(scope_id, source_id, collection, record_id, entry_id, last_seen_sync_id) "
+                "SELECT %s, %s, t.c, t.r, t.e, %s FROM unnest(%s::text[], %s::text[], %s::uuid[]) AS t(c, r, e) "
+                "ON CONFLICT (scope_id, source_id, collection, record_id, entry_id) "
+                "DO UPDATE SET last_seen_sync_id = EXCLUDED.last_seen_sync_id",
+                (scope_id, source_id, sync_id, [c for c, _r, _e in links], [r for _c, r, _e in links],
+                 [e for _c, _r, e in links]),
+            )
+    return UpsertResult(added, len(entries), rejected)
+
+
+def _retire_unlinked(conn: psycopg.Connection, scope_id: uuid.UUID, unlink_ctes: str, params: tuple) -> int:
+    """Run ``unlink_ctes`` (WITH clauses deleting links, ending in ``gone``: the entry
+    ids they returned); retire the entries left with no link of either kind.
 
     The candidates are locked first, in blind-index order; the retire then re-reads
     links in a new statement, so a link a concurrent sync committed meanwhile counts.
     Only ``origin = 'source'`` entries retire; manual ones never do.
     """
     locked = conn.execute(
-        f"WITH gone AS ({unlink_sql}) "
-        "SELECT e.id FROM catalog_entries e JOIN gone g ON g.entry_id = e.id "
-        "WHERE e.scope_id = %s AND e.origin = 'source' AND e.status = 'active' "
-        "ORDER BY e.value_blind_index FOR UPDATE OF e",
+        f"WITH {unlink_ctes} "
+        "SELECT e.id FROM catalog_entries e "
+        "WHERE e.scope_id = %s AND e.id IN (SELECT entry_id FROM gone) AND e.origin = 'source' "
+        "AND e.status = 'active' ORDER BY e.value_blind_index FOR UPDATE OF e",
         (*params, scope_id),
     ).fetchall()
     if not locked:
         return 0
     return conn.execute(
         "UPDATE catalog_entries e SET status = 'retired', retired_at = now() "
-        "WHERE e.scope_id = %s AND e.id = ANY(%s) AND e.status = 'active' AND NOT EXISTS ("
-        "  SELECT 1 FROM catalog_entry_sources l WHERE l.scope_id = e.scope_id AND l.entry_id = e.id)",
+        "WHERE e.scope_id = %s AND e.id = ANY(%s) AND e.status = 'active' "
+        "AND NOT EXISTS (SELECT 1 FROM catalog_entry_sources l WHERE l.scope_id = e.scope_id AND l.entry_id = e.id) "
+        "AND NOT EXISTS (SELECT 1 FROM catalog_entry_records r WHERE r.scope_id = e.scope_id AND r.entry_id = e.id)",
         (scope_id, [r[0] for r in locked]),
     ).rowcount
 
@@ -209,9 +269,41 @@ def retire_unseen(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid
     with scoped(conn, scope_id):
         return _retire_unlinked(
             conn, scope_id,
-            "DELETE FROM catalog_entry_sources WHERE scope_id = %s AND source_id = %s "
-            "AND last_seen_sync_id <> %s RETURNING entry_id",
+            "gone AS (DELETE FROM catalog_entry_sources WHERE scope_id = %s AND source_id = %s "
+            "AND last_seen_sync_id <> %s RETURNING entry_id)",
             (scope_id, source_id, sync_id),
+        )
+
+
+def retire_unseen_records(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UUID,
+                          sync_id: uuid.UUID) -> int:
+    """After a complete full sync of an app source: drop its record links not renewed in
+    ``sync_id`` (records gone, or values they no longer hold) and retire the source
+    entries left with no link. Returns how many retired."""
+    with scoped(conn, scope_id):
+        return _retire_unlinked(
+            conn, scope_id,
+            "gone AS (DELETE FROM catalog_entry_records WHERE scope_id = %s AND source_id = %s "
+            "AND last_seen_sync_id <> %s RETURNING entry_id)",
+            (scope_id, source_id, sync_id),
+        )
+
+
+def relink_records(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid.UUID, sync_id: uuid.UUID,
+                   records: Collection[tuple[str, str]]) -> int:
+    """After an incremental sync: replace the links of the ``(collection, record_id)``
+    records it read (changed or deleted) by those renewed in ``sync_id``, and retire the
+    source entries left with no link. Returns how many retired."""
+    if not records:
+        return 0
+    pairs = sorted(records)
+    with scoped(conn, scope_id):
+        return _retire_unlinked(
+            conn, scope_id,
+            "gone AS (DELETE FROM catalog_entry_records l USING unnest(%s::text[], %s::text[]) AS t(c, r) "
+            "WHERE l.scope_id = %s AND l.source_id = %s AND l.collection = t.c AND l.record_id = t.r "
+            "AND l.last_seen_sync_id <> %s RETURNING l.entry_id)",
+            ([c for c, _r in pairs], [r for _c, r in pairs], scope_id, source_id, sync_id),
         )
 
 
@@ -220,8 +312,10 @@ def unlink_source(conn: psycopg.Connection, scope_id: uuid.UUID, source_id: uuid
     with scoped(conn, scope_id):
         return _retire_unlinked(
             conn, scope_id,
-            "DELETE FROM catalog_entry_sources WHERE scope_id = %s AND source_id = %s RETURNING entry_id",
-            (scope_id, source_id),
+            "v AS (DELETE FROM catalog_entry_sources WHERE scope_id = %s AND source_id = %s RETURNING entry_id), "
+            "r AS (DELETE FROM catalog_entry_records WHERE scope_id = %s AND source_id = %s RETURNING entry_id), "
+            "gone AS (SELECT entry_id FROM v UNION SELECT entry_id FROM r)",
+            (scope_id, source_id, scope_id, source_id),
         )
 
 

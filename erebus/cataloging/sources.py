@@ -20,7 +20,7 @@ from importlib import metadata
 from typing import Any, Protocol
 
 # Part of the contract: connectors raise these (re-exported for them).
-from .connector_errors import ConnectorError, DriverMissing, LicenseRequired  # noqa: F401
+from .connector_errors import ConnectorError, CursorExpired, DriverMissing, LicenseRequired  # noqa: F401
 
 
 @dataclass

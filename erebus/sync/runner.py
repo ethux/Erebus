@@ -17,6 +17,15 @@ credentials decrypted (tenant key, AAD = source id).
   the links this sync did not see, bump the catalog version and mark the job done.
   Anything short of that fails the job and retires nothing, but bumps the version when
   it committed values; ``max_values`` counts every distinct row read, value or not.
+  Databases and warehouses keep no cursor: an incremental job of theirs is a full sync.
+* **app sources** (family ``app``) are read record by record and every value is linked
+  to its record (``catalog_entry_records``). A full sync reads every record, then drops
+  the links it did not renew and stores each collection's cursor. An incremental sync
+  reads the records changed since the stored cursors, then replaces the links of every
+  record it read (a deleted record's are dropped) and stores the new cursors. Entries
+  left with no link retire, in the transaction that marks the job done; a failure
+  retires nothing and keeps the old cursors. With no cursor, or one the source calls
+  expired, the job reads everything instead. ``max_values`` counts values read.
 
 The worker contract with connectors, beyond ``erebus.sources``: a database connector
 may offer ``iter_distinct_values(collection, fields, limit)`` yielding tuples in
@@ -41,7 +50,7 @@ import psycopg
 
 from ..cataloging import connector_types, field_rules
 from ..cataloging import sources as contract
-from ..cataloging.connector_errors import ConnectorError, DriverMissing, LicenseRequired
+from ..cataloging.connector_errors import ConnectorError, CursorExpired, DriverMissing, LicenseRequired
 from ..gateway import catalog
 from ..gateway.connectors import fields, jobs, sources
 from ..gateway.crypto.keyprovider import CryptoErased, KeyProvider
@@ -272,6 +281,112 @@ def _full(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: 
     return counts
 
 
+def _record_value(field: fields.SourceField, values: dict) -> str | None:
+    """One accepted field of a record as a value (a name tuple joined), or ``None``."""
+    if "+" in field.field:
+        first, *middles, last = (values.get(p) for p in field.field.split("+"))
+        return field_rules.join_name(first, middles, last)
+    value = values.get(field.field)
+    return str(value) if isinstance(value, str | int | float) and not isinstance(value, bool) else None
+
+
+def _check_columns(rows_source: Any, collection: str, accepted: list[fields.SourceField], present: set[str]
+                   ) -> list[str]:
+    """The record fields to read for ``accepted``; ``incomplete`` when one is gone."""
+    if collection not in present:
+        raise JobFailed("incomplete")
+    columns = {f.name for f in rows_source.list_fields(collection)}
+    for f in accepted:
+        if not set(f.field.split("+")) <= columns or f.label is None:
+            raise JobFailed("incomplete")
+    return sorted({part for f in accepted for part in f.field.split("+")})
+
+
+def _read_records(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any, crypto,
+                  by_collection: dict[str, list[fields.SourceField]], since: dict[str, str] | None) -> dict:
+    """Read an app source (every record, or with ``since`` the changes) and commit the result."""
+    present = {c.name for c in rows_source.list_collections()} if by_collection else set()
+    seen = values = added = 0
+    batch: list[tuple[str, str, str, str]] = []
+    touched: set[tuple[str, str]] = set()
+    cursors: dict[str, str] = {}
+
+    def flush() -> None:
+        nonlocal added
+        ctx.lease.check()
+        if batch:
+            added += catalog.upsert_record_values(ctx.conn, crypto, job.scope_id, job.source_id, job.id, batch,
+                                                  tenant_max=ctx.config.tenant_max_values).added
+            batch.clear()
+
+    try:
+        for collection, accepted in by_collection.items():
+            ctx.lease.check()
+            wanted = _check_columns(rows_source, collection, accepted, present)
+            records = rows_source.iter_records(collection, fields=wanted) if since is None \
+                else rows_source.iter_changes(collection, wanted, since[collection])
+            for record in records:
+                seen += 1
+                record_id = str(record.record_ref)
+                touched.add((collection, record_id))
+                if record.metadata.get("deleted"):
+                    continue
+                items = [(collection, record_id, value, f.label) for f in accepted
+                         if (value := _record_value(f, record.values)) is not None]
+                values += len(items)
+                if values > source.max_values:
+                    raise JobFailed("incomplete")
+                batch += items
+                if len(batch) >= UPSERT_BATCH:
+                    flush()
+            position = rows_source.cursor(collection) if hasattr(rows_source, "cursor") else None
+            if position is not None:
+                cursors[collection] = str(position)
+        flush()
+    except BaseException:
+        if added:
+            _bump_after_failure(ctx, job)
+        raise
+    with ctx.conn.transaction():
+        if not jobs.hold_lease(ctx.conn, job):
+            raise LeaseLost()
+        if since is None:
+            retired = catalog.retire_unseen_records(ctx.conn, job.scope_id, job.source_id, job.id)
+        else:
+            retired = catalog.relink_records(ctx.conn, job.scope_id, job.source_id, job.id, touched)
+            cursors = {c: cursors.get(c, since[c]) for c in by_collection}
+        sources.set_cursor(ctx.conn, job.scope_id, job.source_id, cursors)
+        if added or retired or job.attempts:
+            catalog_versions.bump(ctx.conn, job.scope_id)
+        counts = {"rows_seen": seen, "values_added": added, "values_retired": retired,
+                  "read": "all" if since is None else "changes"}
+        _succeed(ctx, job, counts)
+    return counts
+
+
+def _records(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any, crypto) -> dict:
+    """A full or incremental sync of an app source; see the module docstring."""
+    by_collection: dict[str, list[fields.SourceField]] = {}
+    for f in fields.accepted_fields(ctx.conn, job.scope_id, job.source_id):
+        by_collection.setdefault(f.collection, []).append(f)
+    stored = {c: v for c, v in source.cursor.items() if isinstance(v, str)}
+    if job.kind == "incremental" and hasattr(rows_source, "iter_changes") and set(by_collection) <= set(stored):
+        try:
+            return _read_records(ctx, job, source, rows_source, crypto, by_collection, stored)
+        except CursorExpired:
+            log.info("job %s: the source's cursor expired, reading every record", job.id)
+    return _read_records(ctx, job, source, rows_source, crypto, by_collection, None)
+
+
+def _note_expiry(ctx: Context, job: jobs.Job, rows_source: Any) -> None:
+    """Store when the credentials expire, if the source can tell."""
+    method = getattr(rows_source, "credentials_expire_at", None)
+    when = method() if method is not None else None
+    if isinstance(when, datetime) and when.tzinfo is not None:
+        ctx.lease.check()
+        sources.set_credentials_expiry(ctx.conn, job.scope_id, job.source_id, when)
+
+
 def _succeed(ctx: Context, job: jobs.Job, counts: dict, *, then: str | None = None) -> None:
     """Inside the result transaction: clear needs_attention, audit, mark the job done."""
     with scoped(ctx.conn, job.scope_id):
@@ -311,9 +426,11 @@ def execute(ctx: Context, job: jobs.Job) -> dict:
     crypto = open_scope_crypto(ctx.conn, ctx.provider, job.scope_id)
     rows_source, ctype = _open(ctx, job, source, crypto)
     try:
+        _note_expiry(ctx, job, rows_source)
         if job.kind == "sample":
             return _sample(ctx, job, source, rows_source, ctype)
-        # Phase 1 connectors keep no cursor: an incremental job reads everything.
+        if ctype.family == "app":
+            return _records(ctx, job, source, rows_source, crypto)
         return _full(ctx, job, source, rows_source, crypto)
     finally:
         try:

@@ -4,7 +4,8 @@ A connector wraps every driver or HTTP failure in ``ConnectorError(kind)``, rais
 ``from None``: its message is the class's fixed text, never a host, DSN, credential or
 value. ``LicenseRequired`` is raised by Pro connectors without their license feature,
 ``DriverMissing`` by one whose optional driver extra is not installed.
-Pure: no store, config or gateway import.
+``CursorExpired`` tells the worker an incremental cursor can no longer be used, so it
+reads everything instead. Pure: no store, config or gateway import.
 """
 from __future__ import annotations
 
@@ -60,3 +61,11 @@ class DriverMissing(RuntimeError):
             raise ValueError("malformed requirement")
         super().__init__(f"requires the {requirement} extra")
         self.requirement = requirement
+
+
+class CursorExpired(Exception):
+    """An app source cannot read changes since the cursor it was given (expired, from an
+    older connector version, or malformed); the worker runs a full sync instead."""
+
+    def __init__(self) -> None:
+        super().__init__("sync cursor expired")
