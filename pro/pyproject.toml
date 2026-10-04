@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "erebus-pro"
-version = "1.2.0b1"
+version = "1.2.0b2"
 description = "Erebus Pro: licensed extensions for the Erebus gateway"
 license = { text = "Elastic-2.0" }
 requires-python = ">=3.11"
