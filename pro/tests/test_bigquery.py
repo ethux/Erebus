@@ -197,10 +197,46 @@ def _check_byte_cap():
         {"project": "erebus-test", "max_bytes_billed": mib10}, key).close()) is None)
 
 
+class _Refusing(_NoClient):
+    """A client whose dataset listing fails with ``exc``."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def list_datasets(self, *_a, **_kw):
+        raise self.exc
+
+
+def _check_quota():
+    from datetime import datetime, time, timedelta
+    from zoneinfo import ZoneInfo
+
+    from erebus_pro.connectors.bigquery import BigQueryConnector
+    from google.api_core import exceptions
+
+    def failure(reason):
+        exc = exceptions.Forbidden(f"Quota exceeded: {reason}", errors=[{"reason": reason}])
+        connector = BigQueryConnector(licensed(["connectors.bigquery"]), client_factory=lambda *_a: _Refusing(exc))
+        src = connector.connect({"project": "erebus-test"}, {"service_account_key": service_account_key()})
+        return _error(src.list_collections)
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    before = datetime.now(pacific).date()
+    exc = failure("quotaExceeded")
+    after = datetime.now(pacific).date()  # the run may cross midnight
+    expected = {datetime.combine(day + timedelta(days=1), time(), tzinfo=pacific) for day in (before, after)}
+    check("a daily quota waits for its reset: the next midnight in America/Los_Angeles",
+          exc is not None and exc.kind == "limit" and exc.reset_at in expected)
+    exc = failure("rateLimitExceeded")
+    check("a rate limit waits the worker's own short step (no reset time)",
+          exc is not None and exc.kind == "limit" and exc.reset_at is None)
+
+
 def main():
     print("\n=== BigQuery connector (spec 015) ===\n")
     _check_egress_exceptions()
     _check_byte_cap()
+    _check_quota()
     b = BigQueryBackend()
     reason = b.unavailable()
     if reason:

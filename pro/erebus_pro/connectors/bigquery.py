@@ -27,7 +27,9 @@ import itertools
 import json
 import re
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from erebus.cataloging.connector_errors import ConnectorError
 from erebus.cataloging.sources import CollectionInfo, ConnectorMetadata, FieldInfo, RowSource, SourceRecord
@@ -75,6 +77,25 @@ def _kind(exc: BaseException) -> str:
     except ImportError:
         pass
     return "query"
+
+
+def _quota_reset() -> datetime:
+    """The next midnight in America/Los_Angeles, when BigQuery's daily quotas reset."""
+    try:
+        zone: Any = ZoneInfo("America/Los_Angeles")
+    except ZoneInfoNotFoundError:  # no time zone data: standard time is never before the reset
+        zone = timezone(timedelta(hours=-8))
+    today = datetime.now(UTC).astimezone(zone).date()
+    return datetime.combine(today + timedelta(days=1), time(), tzinfo=zone)
+
+
+def _failure(exc: BaseException) -> ConnectorError:
+    """The fixed-text error ``exc`` stands for; a daily quota says when it resets."""
+    kind = _kind(exc)
+    reasons = {e.get("reason") for e in getattr(exc, "errors", None) or () if isinstance(e, dict)}
+    if kind == "limit" and "quotaExceeded" in reasons:
+        return ConnectorError(kind, reset_at=_quota_reset())
+    return ConnectorError(kind)
 
 
 def _quote(identifier: str) -> str:
@@ -133,7 +154,7 @@ class BigQueryRowSource:
         except ConnectorError:
             raise
         except Exception as exc:
-            raise ConnectorError(_kind(exc)) from None
+            raise _failure(exc) from None
 
     def _iterate(self, rows: Any) -> Iterator[Any]:
         it = iter(self._call(lambda: rows))
