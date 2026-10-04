@@ -23,6 +23,7 @@ import datetime
 import os
 import ssl
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -145,6 +146,10 @@ def _check_wallet():
     where, dir_mode, file_mode, seen = wallets[0]
     check("a wallet is written as ewallet.pem in a private directory while connecting",
           seen == pem and dir_mode == 0o700 and file_mode == 0o600 and kw["wallet_password"] == "Wp-zq")
+    root = os.path.join(tempfile.gettempdir(), f"erebus-sync-{os.getuid()}")
+    check("... under the worker's own root, named for this process",
+          os.path.dirname(where) == root and os.path.basename(where).startswith(f"erebus-wallet-{os.getpid()}-")
+          and stat.S_IMODE(os.lstat(root).st_mode) == 0o700)
     check("... and removed when connect returns, even after a failure",
           kind == "unreachable" and not os.path.exists(where))
     kind, kw, wallets = _sent({**_BASE, "auth": "wallet"}, {"wallet_pem": pem})
@@ -154,6 +159,57 @@ def _check_wallet():
     check("auth: wallet without a wallet is an auth error", kind == "auth" and kw is None)
     kind, kw, _ = _sent(_BASE, {"password": "x", "wallet_pem": "not a wallet zq"})
     check("a wallet that is not PEM is an auth error", kind == "auth" and kw is None)
+
+
+def _dead_pid():
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
+
+
+def _check_wallet_sweep():
+    from erebus_pro.connectors import _wallet
+    from warehouse_backends import declared_entry_points
+
+    check("the sweep runs at worker start (a worker extension)",
+          "erebus_pro.connectors._wallet:register" in {ep.value for ep in declared_entry_points(
+              "erebus.worker.extensions")})
+    saved = tempfile.tempdir
+    with tempfile.TemporaryDirectory() as tmp:
+        tempfile.tempdir = tmp
+        try:
+            root = _wallet.root()
+            made = {}
+            for name, pid, age in (("dead", _dead_pid(), 0), ("own", os.getpid(), 0), ("live", os.getppid(), 0),
+                                   ("old", os.getppid(), 7200)):
+                where = os.path.join(root, f"erebus-wallet-{pid}-{name}")
+                os.mkdir(where, 0o700)
+                with open(os.path.join(where, "ewallet.pem"), "w", encoding="utf-8") as fh:
+                    fh.write("-----BEGIN PRIVATE KEY-----zq")
+                if age:
+                    os.utime(where, (time.time() - age, time.time() - age))
+                made[name] = where
+            other = os.path.join(root, "keep-me-zq")
+            os.mkdir(other)
+            outside = os.path.join(tmp, "outside-zq")
+            os.mkdir(outside)
+            os.symlink(outside, os.path.join(root, f"erebus-wallet-{_dead_pid()}-link"))
+            _wallet.register(None)
+            check("a worker starting removes the wallets of a worker that died while connecting",
+                  not os.path.exists(made["dead"]))
+            check("... and those carrying its own process id (a restarted container reuses it)",
+                  not os.path.exists(made["own"]))
+            check("... and any older than an hour", not os.path.exists(made["old"]))
+            check("... but keeps a live worker's wallet, anything else, and what a link points to",
+                  os.path.exists(made["live"]) and os.path.isdir(other) and os.path.isdir(outside))
+            os.chmod(root, 0o755)
+            check("a root others can read is not used", _wallet.root() is None)
+            os.chmod(root, 0o700)
+            os.rename(root, root + "-moved")
+            os.symlink(root + "-moved", root)
+            check("nor a root that is a link", _wallet.root() is None)
+        finally:
+            tempfile.tempdir = saved
 
 
 # --- TLS against the name, on a local listener ------------------------------------
@@ -342,6 +398,7 @@ def main():
     _check_driver_params()
     _check_settings()
     _check_wallet()
+    _check_wallet_sweep()
     _check_tls()
     b = OracleBackend()
     reason = b.unavailable()

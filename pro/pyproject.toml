@@ -34,6 +34,8 @@ pro = "erebus_pro.gateway:register"
 
 [project.entry-points."erebus.worker.extensions"]
 pro = "erebus_pro.scheduler:register"
+# Removes Oracle wallets a worker killed while connecting left on disk.
+oracle-wallets = "erebus_pro.connectors._wallet:register"
 
 [project.entry-points."erebus.schema"]
 pro = "erebus_pro.schema:SCHEMA_DIR"

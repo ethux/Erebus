@@ -17,8 +17,9 @@ on its own port. No connect string, tnsnames.ora or sqlnet.ora is read.
 The user signs in with a password, optionally over mutual TLS with a wallet
 (``wallet_pem``, the wallet's ``ewallet.pem``, and ``wallet_password``) as Autonomous
 Database requires; with ``auth: wallet`` the wallet's certificate alone signs in
-(external authentication). A wallet is written to a private temporary directory for the
-handshake and removed before ``connect`` returns.
+(external authentication). A wallet is written to a private directory under the worker's
+own root for the handshake and removed before ``connect`` returns; a worker sweeps what a
+killed one left there when it starts (``_wallet``).
 
 Fields come from ``ALL_TAB_COLUMNS``, Oracle-maintained schemas left out; collections are
 ``OWNER.TABLE``. Every read runs in ``SET TRANSACTION READ ONLY`` and the connection rests
@@ -30,13 +31,9 @@ fixed-text ``ConnectorError`` raised ``from None``.
 """
 from __future__ import annotations
 
-import contextlib
 import ipaddress
-import os
 import re
-import shutil
 import ssl
-import tempfile
 from collections.abc import Iterator
 from typing import Any
 
@@ -45,6 +42,7 @@ from erebus.cataloging.sources import CollectionInfo, ConnectorMetadata, FieldIn
 
 from . import _warehouse
 from ._licensed import LicensedConnector
+from ._wallet import wallet_dir
 
 _SERVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.$#-]{0,127}")
 _USER = re.compile(r"[A-Za-z0-9_$#]{1,128}")
@@ -126,22 +124,6 @@ def _tls(sslmode: str, host: str) -> ssl.SSLContext:
     if ctx.verify_mode != ssl.CERT_NONE:
         ctx.load_default_certs()
     return ctx
-
-
-@contextlib.contextmanager
-def _wallet(pem: str | None) -> Iterator[str | None]:
-    """A private directory holding ``ewallet.pem`` while the driver connects."""
-    if pem is None:
-        yield None
-        return
-    where = tempfile.mkdtemp(prefix="erebus-wallet-")  # mode 0700
-    try:
-        fd = os.open(os.path.join(where, "ewallet.pem"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(pem)
-        yield where
-    finally:
-        shutil.rmtree(where, ignore_errors=True)
 
 
 def _hostaddr(settings: dict[str, Any]) -> str:
@@ -324,7 +306,7 @@ class OracleConnector(LicensedConnector):
         import oracledb
 
         try:
-            with _wallet(wallet) as where:
+            with wallet_dir(wallet) as where:
                 if where is not None:
                     params["wallet_location"] = where
                 conn = oracledb.connect(**params)
