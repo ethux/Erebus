@@ -201,7 +201,6 @@ class AppHttp:
         self._sleep = sleep
         self._clock = clock
         self._next_at = 0.0
-        self.calls = 0
 
     def _pace(self) -> None:
         wait = self._next_at - self._clock()
@@ -213,7 +212,6 @@ class AppHttp:
         """One attempt; ``None`` after a network error (the caller retries). A certificate
         that fails the check will not pass on a retry: ``unreachable`` at once."""
         self._pace()
-        self.calls += 1
         try:
             return self._client.request(method, path, **kwargs)
         except httpx.TransportError as exc:
