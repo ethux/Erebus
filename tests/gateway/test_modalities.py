@@ -76,6 +76,17 @@ def main():
     check("image smuggled inside tool args is blocked, not passed",
           classify_part(smuggled) == ["block"])
 
+    # Reasoning models get their thinking back as a part (Mistral): it is text, never refused.
+    think = {"type": "thinking", "thinking": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}
+    check("thinking part tokenizes every nested text part", classify_part(think) == ["tokenize", "tokenize"])
+    check("thinking part is never blocked", "block" not in classify_part(think))
+    check("thinking part with a plain string tokenizes",
+          classify_part({"type": "thinking", "thinking": "a"}) == ["tokenize"])
+    check("thinking part with nothing in it still does not bypass",
+          classify_part({"type": "thinking"}) == ["tokenize"])
+    check("image smuggled inside a thinking part is blocked, not passed",
+          classify_part({"type": "thinking", "thinking": [{"type": "image_url"}]}) == ["block"])
+
     # Configurable: an operator policy may permit a modality via acknowledgement.
     check("policy can route image to ack-required",
           classify_part({"type": "image"}, {"image": "ack-required"}) == ["ack-required"])

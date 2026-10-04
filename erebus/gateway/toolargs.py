@@ -66,11 +66,12 @@ def restore_arguments(raw: str, lookup: Lookup) -> str:
     return restore_escaped(raw, lookup) if _parses(raw) else restore_plain(raw, lookup)
 
 
-def _restore_tree(value: Any, lookup: Lookup, key: str | None = None) -> Any:
+def restore_tree(value: Any, lookup: Lookup, key: str | None = None) -> Any:
+    """Restore every string in ``value``; an ``arguments`` string JSON-escaped."""
     if isinstance(value, dict):
-        return {k: _restore_tree(v, lookup, k) for k, v in value.items()}
+        return {k: restore_tree(v, lookup, k) for k, v in value.items()}
     if isinstance(value, list):
-        return [_restore_tree(v, lookup) for v in value]
+        return [restore_tree(v, lookup) for v in value]
     if isinstance(value, str):
         # A streamed arguments delta is a slice of JSON text, so it cannot be parsed.
         return restore_escaped(value, lookup) if key == "arguments" else restore_plain(value, lookup)
@@ -90,4 +91,4 @@ def parse_frame(chunk: str) -> dict | None:
 def restore_frame(frame: dict, lookup: Lookup) -> str:
     """Restore a parsed chunk and re-encode it, so it stays valid JSON whatever the
     restored value contains."""
-    return json.dumps(_restore_tree(frame, lookup), ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(restore_tree(frame, lookup), ensure_ascii=False, separators=(",", ":"))
