@@ -265,6 +265,9 @@ class BigQueryBackend:
         errors += admin.insert_rows_json(f"{_BQ_PROJECT}.{_BQ_CRM}.orders", [{"id": 1, "product_name": "Widget"}])
         if errors:
             raise RuntimeError("could not load the BigQuery fixture")
+        view = bigquery.Table(f"{_BQ_PROJECT}.{_BQ_CRM}.customer_emails")  # no stored rows: read by query
+        view.view_query = f"SELECT email, full_name FROM `{_BQ_PROJECT}.{_BQ_CRM}.customers` WHERE email IS NOT NULL"
+        admin.create_table(view)
         self.admin = admin
         self.handed = []
         self.sent = []  # (sql, job config) per query the connector ran

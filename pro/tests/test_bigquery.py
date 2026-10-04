@@ -80,6 +80,27 @@ def _check_one_query_per_table(b):
         src.close()
 
 
+def _check_view(b):
+    """A view has no stored rows for the table-read API: its sample rows come from a query,
+    capped, labelled and limited like every other."""
+    src = b.connector().connect(b.settings(), b.secrets())
+    try:
+        view = b.collection("customer_emails")
+        check("a view is listed with its columns", [f.name for f in src.list_fields(view)] == ["email", "full_name"])
+        before = len(b.sent)
+        records = list(src.iter_records(view, limit=3, page_size=2))
+        sent = b.sent[before:]
+        check("a view's sample rows come from one query, limited, capped and labelled",
+              len(records) == 3 and len(sent) == 1 and sent[0][0].endswith(" LIMIT 3")
+              and sent[0][1].maximum_bytes_billed == 10**9 and sent[0][1].labels == {"erebus": "sync"})
+        check("... carrying the asked fields", all(set(r.values) == {"email", "full_name"} for r in records))
+        emails = {row[0] for row in sources.distinct_values(src, view, ["email"], 100)}
+        check("a view's distinct values are read like a table's",
+              emails == {"zyx.qorbel@acme.example", "mila.brandt@acme.example", "Zyx.Qorbel@ACME.example"})
+    finally:
+        src.close()
+
+
 def _check_locations(b):
     """With ``location`` set, a dataset in another location is skipped: BigQuery answers a
     query there 404 (not found in that location), which failed every sync as 'permission'.
@@ -247,6 +268,7 @@ def main():
     b.setup()
     try:
         _check_one_query_per_table(b)
+        _check_view(b)
         _check_locations(b)
         _check_credentials(b)
         _check_unreachable(b)
