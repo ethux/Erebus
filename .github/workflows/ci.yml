@@ -130,6 +130,8 @@ jobs:
       # MSSQL runs on this throwaway server; its Entra driver (an optional extra) only at the driver boundary.
       EREBUS_TEST_MSSQL_DSN: mssql://sa:Mssql-ci-Zq7x@127.0.0.1:14330
       EREBUS_REQUIRE_MSSQL: "1"
+      # The app connectors run on respx fixtures (the pro test extra) and fail without them.
+      EREBUS_REQUIRE_RESPX: "1"
 
     steps:
       - name: Check out repository

@@ -17,7 +17,7 @@ dependencies = ["cryptography>=43", "snowflake-connector-python>=3.12", "google-
 
 [project.optional-dependencies]
 # Test-only fakes; never installed in the image.
-test = ["fakesnow>=0.9", "duckdb>=1.1"]
+test = ["fakesnow>=0.9", "duckdb>=1.1", "respx>=0.21"]
 # Entra sign-in for MSSQL. Not in the image: mssql-python bundles Microsoft's ODBC driver
 # under Microsoft's license, which whoever installs this extra accepts.
 mssql-entra = ["mssql-python>=1.0"]
