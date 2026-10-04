@@ -36,6 +36,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings are not valid`; Postgres entries match as Postgres reads an unquoted name
   (lower case) and SQLite entries in any case.
 
+## [1.2.0-beta.2] - 2026-10-04
+
+### Security
+- Gateway: reasoning that a client sent back in the conversation history
+  (`reasoning_content` or `reasoning`, as used with DeepSeek, vLLM and OpenRouter models)
+  and plain strings inside a `content` list reached the provider without being
+  tokenized. Both are now tokenized like the rest of the message.
+
+### Fixed
+- Gateway: requests that a client cut off, such as a cancelled stream, could keep their
+  database connection, so after enough of them the gateway stopped answering. A stream
+  no longer holds a connection while it runs, provider calls no longer hold one either,
+  and every request gives its connection back however it ends.
+- Gateway: conversations with reasoning models broke after the first answer. Sending back
+  an answer with a Mistral `thinking` part was refused with 415, and placeholders were
+  left in the reasoning of whole and streamed answers. Thinking is now tokenized on the
+  way out and restored on the way back.
+
 ## [1.2.0-beta.1] - 2026-10-03
 
 ### Added

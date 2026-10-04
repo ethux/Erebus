@@ -1,9 +1,10 @@
 """Modality + tokenization gate for the chat path (FR-004; extracted from app.py).
 
 Pure request-shaping helpers: every cloud-bound message part (string content, a
-structured content array, or tool-call arguments) is routed through the gate so text is
-tokenized and any non-text modality is blocked by default, and upstream responses are
-restored. Lives in its own module so the FastAPI app module stays within the line budget.
+structured content array, tool-call arguments, or a reasoning model's reasoning sent back
+in history) is routed through the gate so text is tokenized and any non-text modality is
+blocked by default, and upstream responses are restored. Lives in its own module so the
+FastAPI app module stays within the line budget.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from .crypto.keyprovider import KeyProvider
 from .modalities import Decision, classify_part
 from .store.known_value_store import open_store
 from .tokenizer import Detector, Matcher, Tokenizer
-from .toolargs import map_json_strings, restore_arguments
+from .toolargs import map_json_strings, restore_arguments, restore_tree
 
 # Part types whose natural-language text is tokenized in place.
 _TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
@@ -23,6 +24,9 @@ _TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _STRUCTURED_PART_TYPES = frozenset({"tool_call", "tool_use", "function", "function_call"})
 # Keys of a structured part that name it rather than carry content (no known-value match).
 _CALL_IDENTIFIERS = frozenset({"id", "type"})
+# Reasoning as a string on a message (DeepSeek ``reasoning_content``; vLLM and OpenRouter
+# ``reasoning``). Mistral's reasoning is a ``thinking`` content part instead.
+_REASONING_FIELDS = ("reasoning_content", "reasoning")
 
 
 class EdgeRawError(Exception):
@@ -95,6 +99,23 @@ def gate_part(tok: Tokenizer, part: dict, mode: str, policy: dict[str, Decision]
         part["text"] = gate_text(tok, part["text"], mode)
     elif ptype in _STRUCTURED_PART_TYPES:
         _gate_call(tok, part, mode)
+    elif ptype == "thinking" and "thinking" in part:
+        part["thinking"] = _gate_nested(tok, part["thinking"], mode, policy)
+
+
+def _gate_nested(tok: Tokenizer, value: Any, mode: str, policy: dict[str, Decision]) -> Any:
+    """Gate a thinking payload the way ``classify_part`` routed it: each string, each typed part."""
+    if isinstance(value, str):
+        return gate_text(tok, value, mode)
+    if isinstance(value, list):
+        return [_gate_nested(tok, item, mode, policy) for item in value]
+    if isinstance(value, dict):
+        if isinstance(value.get("type"), str):
+            gate_part(tok, value, mode, policy)
+        else:
+            for key, item in value.items():
+                value[key] = _gate_nested(tok, item, mode, policy)
+    return value
 
 
 def _gate_messages(tok: Tokenizer, policy: dict[str, Decision], mode: str, payload: dict) -> None:
@@ -103,15 +124,20 @@ def _gate_messages(tok: Tokenizer, policy: dict[str, Decision], mode: str, paylo
         if isinstance(content, str):
             msg["content"] = gate_text(tok, content, mode)
         elif isinstance(content, list):  # structured content array (FR-004)
-            for part in content:
+            for i, part in enumerate(content):
                 if isinstance(part, dict):
                     gate_part(tok, part, mode, policy)
+                elif isinstance(part, str):  # not a valid part, but it would still reach the provider
+                    content[i] = gate_text(tok, part, mode)
         for call in msg.get("tool_calls") or []:  # tool-call arguments never bypass the gate
             if isinstance(call, dict):
                 gate_part(tok, call, mode, policy)
         fc = msg.get("function_call")
         if isinstance(fc, dict):  # deprecated OpenAI field: same gate, its name stays verbatim
             _gate_call(tok, {"function": fc}, mode)
+        for field in _REASONING_FIELDS:  # a reasoning model's reasoning, replayed by the client
+            if isinstance(msg.get(field), str):
+                msg[field] = gate_text(tok, msg[field], mode)
 
 
 def tokenize_payload(key_provider: KeyProvider, detector: Detector, policy: dict[str, Decision],
@@ -141,7 +167,8 @@ def restore_payload(key_provider: KeyProvider, detector: Detector,
     """Restore tokens in an upstream response back to the real values.
 
     Tool-call ``arguments`` are restored JSON-escaped, so a restored quote or
-    backslash keeps them valid JSON.
+    backslash keeps them valid JSON. Reasoning is restored too: every string inside a
+    ``thinking`` part and the ``reasoning_content`` / ``reasoning`` strings.
     """
     store = open_store(conn, key_provider, scope_id)
     tok = Tokenizer(store, detector)
@@ -154,6 +181,11 @@ def restore_payload(key_provider: KeyProvider, detector: Detector,
             for part in content:
                 if isinstance(part, dict) and isinstance(part.get("text"), str):
                     part["text"] = tok.restore(part["text"])
+                if isinstance(part, dict) and part.get("type") == "thinking" and "thinking" in part:
+                    part["thinking"] = restore_tree(part["thinking"], store.lookup)
+        for field in _REASONING_FIELDS:
+            if isinstance(msg.get(field), str):
+                msg[field] = tok.restore(msg[field])
         calls = [c.get("function") for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
         for fn in [*calls, msg.get("function_call")]:
             if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):

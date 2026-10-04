@@ -1,6 +1,7 @@
 """Streaming restore + mid-stream fail-closed (T027/T029/T037; FR-002/SC-002/FR-025).
 
-Unit-tests the split-token hold-back, then a route round-trip and a mid-stream
+Unit-tests the split-token hold-back (also inside reasoning: Mistral thinking parts,
+``reasoning_content``, ``reasoning``), then a route round-trip and a mid-stream
 abort via TestClient. Live Postgres for the route tests; self-skips without it.
 """
 import json
@@ -109,6 +110,73 @@ def _check_frames():
     check("a frame with nothing to restore keeps its bytes", _run([plain], lookup)[0] == [plain])
 
 
+def _thinking(text, **extra):
+    return {"type": "thinking", "thinking": [{"type": "text", "text": text}], **extra}
+
+
+def _joined_reasoning(parsed):
+    """Reassemble answer, thinking and reasoning strings the way a client does."""
+    out = {"content": "", "thinking": "", "reasoning_content": "", "reasoning": ""}
+    for frame in parsed:
+        for choice in frame["choices"]:
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if isinstance(content, str):
+                out["content"] += content
+            for part in content if isinstance(content, list) else []:
+                if part.get("type") == "text":
+                    out["content"] += part["text"]
+                elif part.get("type") == "thinking":
+                    out["thinking"] += "".join(sub.get("text", "") for sub in part["thinking"])
+            for key in ("reasoning_content", "reasoning"):
+                out[key] += delta.get(key) or ""
+    return out
+
+
+def _check_reasoning_frames():
+    """Reasoning streamed as thinking parts or reasoning strings is held back like content."""
+    pw, mail = "[" + "PASSWORD_1_abcdef" + "]", "[" + "EMAIL_ADDRESS_2_a1b2c3" + "]"
+    secret = 'Pa"ss\\word1'
+    lookup = {pw: secret, mail: "jan@voorbeeld.test"}.get
+
+    # Mistral: thinking chunks, a transition list (closing thinking + first text), then strings.
+    frames = [_frame({"role": "assistant", "content": [_thinking("Mail " + mail[:9])]}),
+              _frame({"content": [_thinking(mail[9:] + " now")]}),
+              _frame({"content": [_thinking(" fine", closed=True), {"type": "text", "text": "Hi " + pw[:6]}]}),
+              _frame({"content": pw[6:] + "!"}),
+              _frame({}, "stop")]
+    raw, parsed = _run(frames, lookup)
+    joined = _joined_reasoning(parsed)
+    check("thinking: every emitted frame is valid JSON", all(p is not None for p in parsed))
+    check("thinking: no emitted frame carries a partial or whole token",
+          not any("[EMAIL" in e or "[PASS" in e for e in raw))
+    check("thinking: a token split across thinking frames is restored",
+          joined["thinking"] == "Mail jan@voorbeeld.test now fine")
+    check("thinking: a token split from a text part into string content is restored",
+          joined["content"] == "Hi " + secret + "!")
+
+    joined = _joined_reasoning(_run([_frame({"content": [_thinking("see " + pw[:6])]}), _frame({}, "stop")],
+                                    lookup)[1])
+    check("thinking: finish_reason flushes a held prefix back into the thinking",
+          joined["thinking"] == "see " + pw[:6] and joined["content"] == "")
+    _raw, parsed = _run([_frame({"content": [_thinking("see " + pw[:6])]})], lookup)
+    check("thinking: stream end flushes a held prefix as a valid thinking frame",
+          _joined_reasoning(parsed)["thinking"] == "see " + pw[:6] and parsed[-1]["id"] == "c1")
+    plain = _frame({"content": [_thinking("nothing to restore")]})
+    check("thinking: a frame with nothing to restore keeps its bytes", _run([plain], lookup)[0] == [plain])
+
+    # DeepSeek reasoning_content and vLLM/OpenRouter reasoning, split inside a token.
+    for key in ("reasoning_content", "reasoning"):
+        frames = [_frame({"role": "assistant", key: "Mail " + mail[:9]}), _frame({key: mail[9:]}),
+                  _frame({"content": "ok"}), _frame({}, "stop")]
+        raw, parsed = _run(frames, lookup)
+        joined = _joined_reasoning(parsed)
+        check(f"{key}: every emitted frame is valid JSON", all(p is not None for p in parsed))
+        check(f"{key}: no emitted frame carries a partial token", not any("[EMAIL" in e for e in raw))
+        check(f"{key}: a token split across frames is restored",
+              joined[key] == "Mail jan@voorbeeld.test" and joined["content"] == "ok")
+
+
 async def _noop(_payload):
     return {"choices": [{"message": {"content": ""}}]}
 
@@ -126,6 +194,7 @@ def main():
           all(tok[:5] not in e for e in emits))
     check("split token restored across chunks", "".join(emits) == "Hi John Smith bye")
     _check_frames()
+    _check_reasoning_frames()
 
     try:
         conn = psycopg.connect(_DSN)

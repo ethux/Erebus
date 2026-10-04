@@ -18,6 +18,10 @@ Three decisions are possible per part:
   ack-required unless a modality is named in the supplied policy; the default
   policy permits nothing, so unhandled modalities still block.
 
+A ``thinking`` part (a reasoning model's reasoning, which clients send back in the
+next turn; Mistral nests text parts under its ``thinking`` key) is text: every string
+inside it tokenizes and it is never refused for its type.
+
 Structured tool-call / function arguments are never trusted to be plain text: the
 gate recurses into their string fields and routes each to tokenization, so a raw
 value cannot ride into the provider hidden inside a JSON arguments blob. Nested
@@ -40,6 +44,10 @@ _TEXT_TYPES: frozenset[str] = frozenset({"text", "input_text", "output_text"})
 _STRUCTURED_TYPES: frozenset[str] = frozenset(
     {"tool_call", "tool_use", "function", "function_call"}
 )
+
+# A reasoning model's thinking, returned as a part and sent back in history. Its
+# ``thinking`` payload (a string or a list of text parts) is recursed like arguments.
+_THINKING_TYPES: frozenset[str] = frozenset({"thinking"})
 
 # Known non-text modalities that are blocked by default unless policy opts in.
 _NON_TEXT_TYPES: frozenset[str] = frozenset(
@@ -103,7 +111,7 @@ def classify_part(
 ) -> list[Decision]:
     """Classify one message part into one or more protective decisions (FR-004).
 
-    Returns a non-empty list: text tokenizes; known non-text modalities block by
+    Returns a non-empty list: text and thinking tokenize; known non-text modalities block by
     default (or follow ``policy``); structured tool-call/function arguments recurse
     so their string fields tokenize; unknown types block. The list is never empty,
     which is the guarantee that no modality bypasses the gate.
@@ -113,6 +121,10 @@ def classify_part(
 
     if part_type in _TEXT_TYPES:
         return ["tokenize"]
+
+    if part_type in _THINKING_TYPES:
+        # Text all the way down; only a non-text part nested inside it can block.
+        return _classify_value(part.get("thinking"), pol) or ["tokenize"]
 
     if part_type in _STRUCTURED_TYPES:
         decisions: list[Decision] = []
