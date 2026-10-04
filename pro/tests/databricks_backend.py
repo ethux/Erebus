@@ -6,11 +6,12 @@ Databricks has no emulator, so the connector is tested at the driver boundary:
 ``FakeDatabricks.connect`` stands in for ``databricks.sql.connect`` and
 ``FakeDatabricks.post`` for the workspace's OAuth token endpoint. The fake connection
 records every statement and answers it from an in-memory DuckDB holding the contract
-fixture in catalog ``erebus_ct`` (schemas ``crm`` and ``other``). Only two things are
-translated, both outside the connector's control: Spark's backtick identifiers become
-DuckDB's double quotes, and ``<catalog>.information_schema.columns`` becomes a view with
-Unity Catalog's type names (``STRING``, ``INT``). DuckDB errors come back as the driver's
-own ``ServerOperationError`` with Databricks' error class in the message.
+fixture in catalog ``erebus_ct`` (schemas ``crm`` and ``other``). Only dialect is
+translated: Spark's backtick identifiers become DuckDB's double quotes, the binary
+collation ``UTF8_BINARY`` becomes DuckDB's ``"binary"``, and
+``<catalog>.information_schema.columns`` becomes a view with Unity Catalog's type names
+(``STRING``, ``INT``). DuckDB errors come back as the driver's own
+``ServerOperationError`` with Databricks' error class in the message.
 
 Credentials are made up at run time; nothing here is a real secret or workspace.
 """
@@ -20,7 +21,7 @@ import json
 import re
 import secrets
 
-from connector_backends import FIELDS, ROWS
+from connector_backends import FIELDS, FOLDED, ROWS
 from warehouse_backends import declared_type, licensed, unlicensed_cases
 
 HOST = "dbc-a1b2c3d4-e5f6.cloud.databricks.com"
@@ -35,6 +36,7 @@ _ORDERS = "CREATE TABLE {t} (id INTEGER, product_name VARCHAR(100))"
 
 def _duck_sql(sql: str) -> str:
     """Spark SQL as DuckDB reads it: backtick identifiers become double-quoted ones."""
+    sql = sql.replace("COLLATE UTF8_BINARY", 'COLLATE "binary"')
     sql = _COLUMNS_REF.sub(lambda m: f"memory.main.\"{m.group(1).replace('``', '`')}_columns\"", sql)
     out, i = [], 0
     while i < len(sql):
@@ -163,6 +165,7 @@ class DatabricksBackend:
     tier = "pro"
     schemas = True
     primary_key = False  # Unity Catalog keys are informational; the connector reads none
+    folds = True  # a column collated like UNICODE_CI_AI (DuckDB's NOACCENT.NOCASE)
 
     def connector_type(self):
         return declared_type(self.name)
@@ -184,6 +187,7 @@ class DatabricksBackend:
                      _CUSTOMERS.format(t=f"{CATALOG}.crm.customers"), _ORDERS.format(t=f"{CATALOG}.crm.orders"),
                      _ORDERS.format(t=f"{CATALOG}.other.orders"),
                      f"INSERT INTO {CATALOG}.crm.orders VALUES (1, 'Widget')",
+                     f"CREATE TABLE {CATALOG}.crm.folded (id INTEGER, name VARCHAR COLLATE NOACCENT.NOCASE)",
                      # Unity Catalog's information_schema.columns, with its type names.
                      f"CREATE VIEW memory.main.\"{CATALOG}_columns\" AS SELECT table_catalog, table_schema, "
                      "table_name, column_name, ordinal_position, is_nullable, "
@@ -193,6 +197,7 @@ class DatabricksBackend:
             db.execute(stmt)
         db.executemany(f"INSERT INTO {CATALOG}.crm.customers ({', '.join(FIELDS)}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                        [list(r) for r in ROWS])
+        db.executemany(f"INSERT INTO {CATALOG}.crm.folded VALUES (?, ?)", [list(r) for r in enumerate(FOLDED)])
         self.db = db
         self.fake = FakeDatabricks(db)
         self.secret = "dbx-secret-" + secrets.token_hex(16)

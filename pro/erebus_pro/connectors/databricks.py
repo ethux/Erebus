@@ -17,7 +17,8 @@ Collections are ``schema.table`` in the ``catalog`` setting; fields come from th
 catalog's Unity Catalog ``information_schema.columns``. A sync wakes the SQL warehouse
 (Pro and classic warehouses bill at least ten minutes), so the distinct values of all
 asked field groups of a table come from one query: a ``UNION ALL`` of per-group
-``SELECT DISTINCT``, tagged by group, name parts as extra columns. Sessions are tagged
+``SELECT DISTINCT``, tagged by group, name parts as extra columns, every value read as
+text in the binary collation (``UTF8_BINARY``). Sessions are tagged
 ``erebus-sync`` and every statement times out. Databricks has no read-only session: the
 documented grants are the guard, and the connector only sends single SELECTs. Every
 failure is a fixed-text ``ConnectorError`` raised ``from None``.
@@ -46,6 +47,7 @@ _HTTP_PATH = re.compile(r"/sql/1\.0/(?:warehouses|endpoints)/[0-9a-f]{16}")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,254}")
 _CLIENT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 _TOKEN_TIMEOUT_S = 30
+_BINARY = "COLLATE UTF8_BINARY"  # Databricks SQL and Runtime 16.1+, which every SQL warehouse runs
 _COLUMNS = ("SELECT table_schema, table_name, column_name, data_type, is_nullable FROM {}.information_schema.columns "
             "WHERE table_schema <> 'information_schema' ORDER BY table_schema, table_name, ordinal_position")
 # Unity Catalog reports an object the principal may not use as not found.
@@ -225,15 +227,17 @@ class DatabricksRowSource:
 
     def iter_distinct_groups(self, collection: str, groups: list[list[str]], limit: int
                              ) -> Iterator[tuple[int, tuple]]:
-        """``(group index, distinct tuple as text)`` for every group, from one query."""
+        """``(group index, distinct tuple as text)`` for every group, from one query. Values
+        are compared as text in the binary collation, so a column whose collation ignores
+        case or accents keeps every spelling."""
         table, infos = self._table(collection)
         groups = _warehouse.check_groups(infos, groups)
         width = max(len(g) for g in groups)
         branches = []
         for index, group in enumerate(groups):
-            inner = ", ".join(f"{_quote(f)} AS _c{k}" for k, f in enumerate(group))
+            inner = ", ".join(f"CAST({_quote(f)} AS STRING) {_BINARY} AS _c{k}" for k, f in enumerate(group))
             some = " OR ".join(f"{_quote(f)} IS NOT NULL" for f in group)
-            values = ", ".join(f"CAST(_c{k} AS STRING) AS v{k}" if k < len(group) else f"CAST(NULL AS STRING) AS v{k}"
+            values = ", ".join(f"_c{k} AS v{k}" if k < len(group) else f"CAST(NULL AS STRING) {_BINARY} AS v{k}"
                                for k in range(width))
             branches.append(f"SELECT {index} AS g, {values} FROM (SELECT DISTINCT {inner} FROM {table} "
                             f"WHERE {some}) AS t{index}")
