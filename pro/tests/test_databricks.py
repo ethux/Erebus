@@ -14,6 +14,7 @@ and all accepted field groups of a table are read in one query. Without the lice
 feature nothing is requested.
 """
 import inspect
+import logging
 import os
 import sys
 
@@ -49,7 +50,10 @@ def _kind(fn):
 
 def _check_sign_in(b):
     fake = b.fake
+    logging.getLogger("databricks").setLevel(logging.DEBUG)  # as a verbose worker log would leave it
     src = b.connector().connect(b.settings(), b.secrets())
+    check("lowers the driver's log to warning level (it logs hosts and requests below that)",
+          logging.getLogger("databricks").getEffectiveLevel() >= logging.WARNING)
     try:
         url, data, auth, kw = fake.posts[-1]
         check("asks the workspace's own token endpoint for a client-credentials token",

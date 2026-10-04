@@ -63,6 +63,7 @@ def _kind(fn):
 
 def _check_key_pair(b):
     connector = b.connector()
+    logging.getLogger("snowflake.connector").setLevel(logging.DEBUG)  # as a verbose worker log would leave it
     with _Capture() as cap:
         connector.connect(b.settings(), {**b.secrets(), "password": "Zq-never-sent"}).close()
     kw = cap.calls[0]
@@ -80,7 +81,7 @@ def _check_key_pair(b):
           kw.get("client_session_keep_alive") is False and kw.get("login_timeout") == 10)
     check("never probes cloud metadata addresses to detect its platform (the worker refuses them)",
           kw.get("platform_detection_timeout_seconds") == 0.0)
-    check("keeps the driver's log at warning level",
+    check("lowers the driver's log to warning level (its connection chatter names hosts)",
           logging.getLogger("snowflake.connector").getEffectiveLevel() >= logging.WARNING)
 
     wrapped = rsa_pem("Zq-right-phrase")

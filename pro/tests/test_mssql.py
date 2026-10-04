@@ -22,6 +22,7 @@ without it unless ``EREBUS_REQUIRE_MSSQL=1``): an encrypted, tagged session, tex
 values over 4,000 characters skipped, and the README's least-privilege grants enough.
 """
 import contextlib
+import logging
 import os
 import re
 import stat
@@ -405,11 +406,14 @@ def _check_entra():
           isinstance(exc, DriverMissing) and str(exc) == "requires the erebus-pro[mssql-entra] extra"
           and exc.__cause__ is None and secret not in _shown(exc) and not cap.calls)
 
+    logging.getLogger("mssql_python").setLevel(logging.DEBUG)  # as a verbose worker log would leave it
     with _driver(_fake_mssql_python()) as fake, _Capture() as cap:
         src = _connector().connect(_ENTRA, {"client_secret": secret})
         call = fake.calls[0]
         keys = call["keys"]
         check("Entra goes through mssql-python, never pymssql", not cap.calls and len(fake.calls) == 1)
+        check("... with its log lowered to warning level",
+              logging.getLogger("mssql_python").getEffectiveLevel() >= logging.WARNING)
         check("... as the service principal (client id and secret)",
               keys["Authentication"] == "ActiveDirectoryServicePrincipal" and keys["UID"] == _CLIENT_ID
               and keys["PWD"] == secret)
