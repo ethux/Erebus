@@ -47,6 +47,8 @@ _PAGE = 2000
 _COLUMNS = ("SELECT table_name, column_name, data_type, is_nullable FROM {}.{}.INFORMATION_SCHEMA.COLUMNS "
             "WHERE is_hidden = 'NO' ORDER BY table_name, ordinal_position")
 _LIMIT_REASONS = frozenset({"rateLimitExceeded", "quotaExceeded", "jobRateLimitExceeded"})
+# BigQuery bills every query at least 10 MiB, so a lower max_bytes_billed caps every query.
+_MIN_BYTES_BILLED = 10 * 1024 * 1024
 
 
 def _kind(exc: BaseException) -> str:
@@ -83,7 +85,7 @@ def _byte_cap(settings: dict[str, Any]) -> int | None:
     cap = settings.get("max_bytes_billed")
     if cap is None:
         return None
-    if type(cap) is not int or cap <= 0:
+    if type(cap) is not int or cap < _MIN_BYTES_BILLED:
         raise ConnectorError("settings") from None
     return cap
 

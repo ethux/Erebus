@@ -472,7 +472,8 @@ Databricks; BigQuery and MSSQL names match as written. Costs:
 - Snowflake: a sync resumes the warehouse, billed at least 60 seconds per resume.
 - BigQuery: each table is read in one query, billed at least 10 MB. `max_bytes_billed`
   caps every query on on-demand pricing (slot pricing ignores it); a capped query fails
-  the sync and keeps every value. Sample rows come from the free table-read API.
+  the sync and keeps every value. It must be at least 10485760 (10 MiB), or every query
+  would be capped. Sample rows come from the free table-read API.
 - Databricks: a sync wakes the SQL warehouse; Pro and classic warehouses bill at least
   10 minutes per start. Each table is read in one query.
 

@@ -179,9 +179,28 @@ def _check_egress_exceptions():
     check("... a service-account key needs no exception", not connector.egress_exceptions({"project": "erebus-test"}))
 
 
+class _NoClient:
+    def close(self):
+        pass
+
+
+def _check_byte_cap():
+    from erebus_pro.connectors.bigquery import BigQueryConnector
+
+    connector = BigQueryConnector(licensed(["connectors.bigquery"]), client_factory=lambda *_a: _NoClient())
+    key = {"service_account_key": service_account_key()}
+    mib10 = 10 * 1024 * 1024
+    exc = _error(lambda: connector.connect({"project": "erebus-test", "max_bytes_billed": mib10 - 1}, key))
+    check("a byte cap under BigQuery's 10 MiB minimum bill is a settings error (every query would be capped)",
+          exc is not None and exc.kind == "settings")
+    check("... 10 MiB itself is accepted", _error(lambda: connector.connect(
+        {"project": "erebus-test", "max_bytes_billed": mib10}, key).close()) is None)
+
+
 def main():
     print("\n=== BigQuery connector (spec 015) ===\n")
     _check_egress_exceptions()
+    _check_byte_cap()
     b = BigQueryBackend()
     reason = b.unavailable()
     if reason:

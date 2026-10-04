@@ -326,6 +326,8 @@ class BigQueryBackend:
              ["evil.example", self.key]),
             ("a byte cap that is not a positive number", self.settings(max_bytes_billed=0), self.secrets(),
              "settings", [self.key]),
+            ("a byte cap under BigQuery's 10 MiB minimum bill", self.settings(max_bytes_billed=10 * 2**20 - 1),
+             self.secrets(), "settings", [self.key]),
             ("no credentials", self.settings(), {}, "auth", [email]),
             ("a key that is not JSON", self.settings(), {"service_account_key": "not-json-Zq-77"}, "auth",
              ["not-json-Zq-77"]),
