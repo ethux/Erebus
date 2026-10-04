@@ -8,7 +8,8 @@ name returned during the job); SQLite reaches nothing. Deny-listed addresses, ho
 Unix sockets and the cloud metadata address are refused; threads a connector starts
 inherit its guard; concurrent jobs keep their own. Outside a connector call nothing is
 refused, so the worker's own connections work. A connector call that fails after a
-refusal is the fixed-text, unretried ``denied`` failure.
+refusal is the fixed-text, unretried ``denied`` failure. An HTTP connector's transport
+asks the job's guard for the one checked address of its host before it connects.
 """
 import contextlib
 import ipaddress
@@ -236,6 +237,35 @@ def _check_vendor_types():
                                                               exceptions=[("metadata.zq.test", 80)])))
 
 
+def _check_checked_address():
+    app = ConnectorType("zq-app", "app", "pro", frozenset({"url"}))
+    table = {"crm.zq.test": "127.0.0.1", "meta.zq.test": "169.254.169.254"}
+
+    def fake_dns(host, port, *_a, **_k):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (table[host], port))] if host in table else []
+
+    def kind(fn):
+        try:
+            fn()
+        except PolicyError as exc:
+            return exc.kind
+        return "ok"
+
+    with _listener() as (port, _accepted):
+        guard = egress.Guard.for_source(_policy(allowed=parse_hosts("crm.zq.test")), app, {}, resolve=fake_dns)
+        addr = guard.checked_address("crm.zq.test", port)
+        check("an HTTP transport gets the one checked address of an allowed name", addr == "127.0.0.1")
+        check("... which the connect guard then lets through (the lookup was noted)",
+              _in(guard, _dial, (addr, port)) == "ok")
+        check("a name resolving to a deny-listed address is refused before any connect",
+              kind(lambda: guard.checked_address("meta.zq.test", 80)) == "denied")
+        other = egress.Guard.for_source(_policy(allowed=parse_hosts("other.zq.test")), app, {}, resolve=fake_dns)
+        check("a name off the allow list is refused", kind(lambda: other.checked_address("crm.zq.test", port))
+              == "denied")
+        check("a name that does not resolve is unreachable",
+              kind(lambda: guard.checked_address("gone.zq.test", port)) == "unreachable")
+
+
 def _raises(exc_type, fn):
     try:
         fn()
@@ -370,6 +400,7 @@ def main():
     _check_outside_jobs()
     _check_host_types()
     _check_vendor_types()
+    _check_checked_address()
     _check_threads()
     _check_surfacing()
     _check_guarded_source()

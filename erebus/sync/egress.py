@@ -20,6 +20,10 @@ and every step of an iterator it returns, that way) the hook refuses:
 * a host name in place of an address (connect would resolve it where the answer cannot
   be checked) and any family but IPv4 and IPv6, such as a Unix socket.
 
+An HTTP connector's transport resolves its host once through ``checked_address`` (the
+deny and allow lists applied to every answer, the lookup noted) and connects to exactly
+that address, checking TLS against the name.
+
 An ``(address, port)`` the connector declares with ``egress_exceptions(settings)`` passes
 both lists (the metadata server, for BigQuery's identity attached to the worker). Threads
 a connector starts inherit its guard. Outside a connector call nothing is checked: the
@@ -47,7 +51,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from ..cataloging.connector_types import ConnectorType
-from .netpolicy import Address, NetworkPolicy, PolicyError, address, resolve_names
+from .netpolicy import Address, NetworkPolicy, PolicyError, address, check_host, resolve_names
 
 _INET = frozenset({socket.AF_INET, socket.AF_INET6})
 _THREAD_START = frozenset({"_thread.start_new_thread", "_thread.start_joinable_thread"})
@@ -87,6 +91,7 @@ class Guard:
         self._denied_names = frozenset(policy.denied.names)
         self._allowed_names = frozenset(policy.allowed.names if policy.allowed else ())
         self._seen: dict[Address, set[str]] = {}
+        self._resolve = resolve
         self.refusals = 0
 
     @classmethod
@@ -111,6 +116,16 @@ class Guard:
                 self._seen.setdefault(address(answer[4][0]), set()).add(name)
             except (ValueError, TypeError, IndexError):
                 continue
+
+    def checked_address(self, host: str, port: int) -> str:
+        """The one address an HTTP transport may connect to for ``host``: resolved once,
+        every answer checked against the deny and allow lists (``PolicyError`` otherwise),
+        the lookup noted so the connect that follows passes."""
+        def resolve(name: Any, *args: Any, **kwargs: Any) -> list:
+            answers = self._resolve(name, *args, **kwargs)
+            self.note(name, answers)
+            return answers
+        return check_host(self._policy, host, port, resolve=resolve)
 
     def allows(self, family: Any, addr: Any) -> bool:
         """Whether a socket of ``family`` may connect to ``addr``."""
