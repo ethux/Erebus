@@ -124,6 +124,60 @@ def _check_driver_params():
     check("disable: plain TCP", kw["protocol"] == "tcp" and "ssl_context" not in kw)
 
 
+class _Server:
+    """An Oracle connection of ``version`` at the driver boundary: it lists one text column
+    (``CRM.T.NAME``) and records every statement."""
+
+    def __init__(self, version):
+        self.version = version
+        self.sent = []
+
+    def cursor(self):
+        return _Cursor(self)
+
+    def rollback(self):
+        pass
+
+
+class _Cursor:
+    arraysize = prefetchrows = 0
+
+    def __init__(self, server):
+        self.server, self.rows = server, []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def execute(self, sql, **_kw):
+        self.server.sent.append(sql)
+        self.rows = [("CRM", "T", "NAME", "VARCHAR2", "Y", None, None)] if "ALL_TAB_COLUMNS" in sql else []
+
+    def fetchmany(self):
+        rows, self.rows = self.rows, []
+        return rows
+
+    def close(self):
+        pass
+
+
+def _check_binary_compare():
+    from erebus_pro.connectors.oracle import OracleRowSource
+
+    for version, collates in (("19.3.0.0.0", True), ("12.2.0.1.0", True), ("12.1.0.2.0", False)):
+        server = _Server(version)
+        src = OracleRowSource(server, None)
+        src.compare_binary()
+        list(sources.distinct_values(src, "CRM.T", ["NAME"], 10))
+        distinct = next(s for s in server.sent if "DISTINCT" in s)
+        check(f"Oracle {version}: the session compares byte for byte; distinct values are read "
+              + ("COLLATE BINARY" if collates else "without COLLATE (the operator came in 12.2)"),
+              server.sent[0] == "ALTER SESSION SET NLS_COMP = BINARY NLS_SORT = BINARY"
+              and ('"NAME" COLLATE BINARY' in distinct) == collates and ("COLLATE" in distinct) == collates)
+
+
 def _check_settings():
     bad = {"service name with connect-descriptor syntax": {"service_name": "X)(HOST=evil.example"},
            "user with proxy syntax": {"user": "a[b]"}, "sslmode prefer": {"sslmode": "prefer"},
@@ -396,6 +450,7 @@ def main():
         print("  - skipped (oracledb is not installed)")
         return
     _check_driver_params()
+    _check_binary_compare()
     _check_settings()
     _check_wallet()
     _check_wallet_sweep()

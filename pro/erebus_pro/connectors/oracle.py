@@ -24,7 +24,11 @@ killed one left there when it starts (``_wallet``).
 Fields come from ``ALL_TAB_COLUMNS``, Oracle-maintained schemas left out; collections are
 ``OWNER.TABLE``. Every read runs in ``SET TRANSACTION READ ONLY`` and the connection rests
 in such a transaction between reads, so a write through it fails (ORA-01456); every
-round trip has a call timeout. CLOB and NCLOB values are read through
+round trip has a call timeout. Distinct values are compared in the binary collation, so
+a column or session that compares linguistically (ignoring case or accents, by a logon
+trigger, say) keeps every spelling: each session is set to ``NLS_COMP = BINARY`` and,
+from Oracle 12.2 (which has the ``COLLATE`` operator), every value is read ``COLLATE
+BINARY``. CLOB and NCLOB values are read through
 ``DBMS_LOB.SUBSTR`` up to 1,000 characters (4,000 bytes at most); longer values are
 skipped. The documented read-only user is the real guard. Every driver failure is a
 fixed-text ``ConnectorError`` raised ``from None``.
@@ -157,6 +161,15 @@ def _params(settings: dict[str, Any]) -> tuple[dict[str, Any], str]:
     return params, auth
 
 
+def _collates(version: Any) -> bool:
+    """Whether a server of ``version`` ("19.3.0.0.0") has the ``COLLATE`` operator (12.2+)."""
+    try:
+        major, minor = (int(part) for part in str(version).split(".")[:2])
+    except ValueError:
+        return True
+    return (major, minor) >= (12, 2)
+
+
 class OracleRowSource:
     """An Oracle database read in read-only transactions; collections are ``OWNER.TABLE``."""
 
@@ -164,6 +177,12 @@ class OracleRowSource:
         self.conn = conn
         self._schemas = schemas
         self._columns = _warehouse.Columns()
+        self._binary = " COLLATE BINARY" if _collates(getattr(conn, "version", "")) else ""
+
+    def compare_binary(self) -> None:
+        """Compare text byte for byte in this session, whatever a logon trigger set."""
+        with self.conn.cursor() as cur:
+            cur.execute("ALTER SESSION SET NLS_COMP = BINARY NLS_SORT = BINARY")
 
     def begin(self) -> None:
         """End any transaction and start a read-only one."""
@@ -243,18 +262,18 @@ class OracleRowSource:
             yield SourceRecord(f"{collection}:{ref}", {f: values[f] for f in selected}, {})
 
     def iter_distinct_values(self, collection: str, fields: list[str], limit: int) -> Iterator[tuple]:
-        """``SELECT DISTINCT`` of ``fields`` as text, all-NULL rows and long LOB values
-        skipped, at most ``limit``."""
+        """``SELECT DISTINCT`` of ``fields`` as text compared byte for byte, all-NULL rows
+        and long LOB values skipped, at most ``limit``."""
         table, infos = self._table(collection)
         selected = _warehouse.check_fields(list(infos.values()), fields)
         cols, guards = [], []
         for name in selected:
             q, dtype = _quote(name), infos[name].db_type
             if dtype in _LOB_TYPES:
-                cols.append(f"DBMS_LOB.SUBSTR({q}, {_LOB_CHARS}, 1)")
+                cols.append(f"DBMS_LOB.SUBSTR({q}, {_LOB_CHARS}, 1){self._binary}")
                 guards.append(f"({q} IS NULL OR DBMS_LOB.GETLENGTH({q}) <= {_LOB_CHARS})")
             else:
-                cols.append(q if dtype in _TEXT_TYPES else f"TO_CHAR({q})")
+                cols.append((q if dtype in _TEXT_TYPES else f"TO_CHAR({q})") + self._binary)
         some = " OR ".join(f"{_quote(f)} IS NOT NULL" for f in selected)
         where = " AND ".join([f"({some})", *guards])
         query = (f"SELECT DISTINCT {', '.join(cols)} FROM {table} WHERE {where} "
@@ -317,6 +336,7 @@ class OracleConnector(LicensedConnector):
         source = OracleRowSource(conn, schemas)
         try:
             conn.call_timeout = _warehouse.STATEMENT_TIMEOUT_S * 1000
+            source.compare_binary()
             source.begin()
         except oracledb.Error as exc:
             source.close()

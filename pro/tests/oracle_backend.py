@@ -9,6 +9,9 @@ quoted names so the shared field names apply. The connector signs in as the DSN'
 account (SYSTEM: every privilege, every schema visible), so a refused write proves the
 connector's own read-only transaction, and the listing proves Oracle-maintained schemas
 are left out. ``least_privileged()`` adds a user with only the documented grants.
+A logon trigger makes the DSN account's sessions compare linguistically, ignoring case
+and accents (as a DBA's trigger might), so its distinct reads must ask for the binary
+collation themselves.
 """
 from __future__ import annotations
 
@@ -19,16 +22,21 @@ import socket
 import time
 from urllib.parse import unquote, urlparse
 
-from connector_backends import FIELDS, ROWS
+from connector_backends import FIELDS, FOLDED, ROWS
 from warehouse_backends import declared_type, licensed, unlicensed_cases
 
 CRM = "EREBUS_CRM"
 OTHER = "EREBUS_OTHER"
 READER = "EREBUS_SYNC_ZQ"
+FOLDING = "EREBUS_FOLD_ZQ"  # the logon trigger, in the DSN account's schema
 _CUSTOMERS = ('CREATE TABLE {s}."customers" ("id" NUMBER(10) PRIMARY KEY, "email" VARCHAR2(200), '
               '"full_name" VARCHAR2(200) NOT NULL, "first_name" VARCHAR2(100), "last_name" VARCHAR2(100), '
               '"active" BOOLEAN, "signup" DATE, "notes" CLOB)')
 _ORDERS = 'CREATE TABLE {s}."orders" ("id" NUMBER(10) PRIMARY KEY, "product_name" VARCHAR2(100))'
+_FOLDED = 'CREATE TABLE {s}."folded" ("id" NUMBER(10) PRIMARY KEY, "name" VARCHAR2(100))'
+_TRIGGER = (f"CREATE OR REPLACE TRIGGER {FOLDING} AFTER LOGON ON SCHEMA BEGIN "
+            "EXECUTE IMMEDIATE 'ALTER SESSION SET NLS_COMP = LINGUISTIC'; "
+            "EXECUTE IMMEDIATE 'ALTER SESSION SET NLS_SORT = BINARY_AI'; END;")
 
 
 def closed_port() -> int:
@@ -42,6 +50,7 @@ class OracleBackend:
     tier = "pro"
     schemas = True
     integer_classes = ("numeric",)  # NUMBER(10,0)
+    folds = True  # every column, through the logon trigger
 
     def connector_type(self):
         return declared_type(self.name)
@@ -69,6 +78,10 @@ class OracleBackend:
 
     def _drop(self, cur):
         import oracledb
+        try:
+            cur.execute(f"DROP TRIGGER {FOLDING}")
+        except oracledb.DatabaseError:
+            pass  # not there yet
         for user in (READER, CRM, OTHER):
             try:
                 cur.execute(f"DROP USER {user} CASCADE")
@@ -81,15 +94,17 @@ class OracleBackend:
         self._drop(cur)
         for schema in (CRM, OTHER):
             cur.execute(f"CREATE USER {schema} NO AUTHENTICATION QUOTA UNLIMITED ON USERS")
-        for stmt in (_CUSTOMERS.format(s=CRM), _ORDERS.format(s=CRM), _ORDERS.format(s=OTHER),
+        for stmt in (_CUSTOMERS.format(s=CRM), _ORDERS.format(s=CRM), _ORDERS.format(s=OTHER), _FOLDED.format(s=CRM),
                      f"INSERT INTO {CRM}.\"orders\" VALUES (1, 'Widget')"):
             cur.execute(stmt)
         cols = ", ".join(f'"{f}"' for f in FIELDS)
         rows = [(r[0], r[1], r[2], r[3], r[4], r[5], datetime.date.fromisoformat(r[6]), r[7])
                 for r in ROWS]
         cur.executemany(f'INSERT INTO {CRM}."customers" ({cols}) VALUES (:1, :2, :3, :4, :5, :6, :7, :8)', rows)
+        cur.executemany(f'INSERT INTO {CRM}."folded" VALUES (:1, :2)', list(enumerate(FOLDED)))
         self.admin.commit()
         self._settle(cur)
+        cur.execute(_TRIGGER)
         self.reader_password = "Rd-" + secrets.token_hex(12)
 
     def _settle(self, cur):
@@ -99,7 +114,7 @@ class OracleBackend:
         for _ in range(60):
             try:
                 cur.execute("SET TRANSACTION READ ONLY")
-                for table in (f'{CRM}."customers"', f'{CRM}."orders"', f'{OTHER}."orders"'):
+                for table in (f'{CRM}."customers"', f'{CRM}."orders"', f'{OTHER}."orders"', f'{CRM}."folded"'):
                     cur.execute(f"SELECT COUNT(*) FROM {table}").fetchall()
                 self.admin.rollback()
                 return
