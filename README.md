@@ -709,6 +709,15 @@ processes: a synced Postgres value is tokenized in a chat, and no log, job row, 
 event or admin response holds a synced value or a source password. Both bind
 localhost, so run them where localhost binds are permitted.
 
+The Odoo connector also runs against real Odoo 18 and 19 in Docker (skipped otherwise):
+
+```bash
+bash pro/tests/odoo_live_stack.sh up /tmp/erebus-odoo   # writes odoo-live.env (mode 600)
+set -a; . /tmp/erebus-odoo/odoo-live.env; set +a
+EREBUS_PG_DSN=postgresql:///postgres python pro/tests/test_odoo_live.py
+bash pro/tests/odoo_live_stack.sh down
+```
+
 ---
 
 ## Architecture
