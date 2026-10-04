@@ -17,20 +17,24 @@ from __future__ import annotations
 
 from erebus.cataloging.connector_types import ConnectorType
 
+# ``identifiers``: Snowflake and Oracle read an unquoted name in upper case, Unity Catalog
+# (Databricks) stores every name in lower case; BigQuery and MSSQL names match as written.
 TYPES = (
     ConnectorType("snowflake", "warehouse", "pro",
-                  frozenset({"account", "user", "database", "warehouse", "role", "schemas", "collections"})),
+                  frozenset({"account", "user", "database", "warehouse", "role", "schemas", "collections"}),
+                  identifiers="upper"),
     # ``schemas`` are BigQuery datasets; ``auth`` is "key" (a service-account key) or "attached" (ADC).
     ConnectorType("bigquery", "warehouse", "pro",
                   frozenset({"project", "location", "max_bytes_billed", "auth", "schemas", "collections"})),
     # ``server_hostname`` is the workspace host, which the connector checks against Databricks'
     # own domains; ``client_id`` is the service principal's (its secret is a credential).
     ConnectorType("databricks", "warehouse", "pro",
-                  frozenset({"server_hostname", "http_path", "catalog", "client_id", "schemas", "collections"})),
+                  frozenset({"server_hostname", "http_path", "catalog", "client_id", "schemas", "collections"}),
+                  identifiers="lower"),
     # ``auth`` is "password" (the default) or "wallet" (an mTLS wallet's certificate signs in).
     ConnectorType("oracle", "database", "pro",
                   frozenset({"host", "port", "service_name", "user", "sslmode", "auth", "schemas", "collections"}),
-                  1521),
+                  1521, identifiers="upper"),
     # ``auth`` is "sql" (a SQL login: ``user`` and a password, the default) or "entra" (a
     # service principal: ``client_id`` and its secret; needs the erebus-pro[mssql-entra] extra).
     ConnectorType("mssql", "database", "pro",

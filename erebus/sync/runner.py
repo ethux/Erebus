@@ -8,7 +8,9 @@ credentials decrypted (tenant key, AAD = source id).
 * **sample**: up to ``SAMPLE_ROWS`` rows per collection (``settings.collections``, or
   every collection the connector lists), the gateway field rules, one ``source_fields``
   write; the transaction marking the job done queues the full sync if a field is
-  accepted.
+  accepted. A ``collections`` entry names a listed collection as written or as the
+  source reads an unquoted name (``ConnectorType.identifiers``); one that names none
+  fails the sample as ``settings``.
 * **full**: distinct values of every accepted field (a name tuple as one distinct tuple,
   stored as the full name), batch-upserted and linked under the job id. Only when every
   field was read, within ``max_values`` and the tenant cap, does one transaction retire
@@ -144,11 +146,36 @@ def _field_spec(info: Any, family: str) -> field_rules.FieldSpec:
     )
 
 
-def _sample(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any, family: str) -> dict:
+def _reads_as(rule: str, name: str, entry: str) -> bool:
+    """Whether the source reads ``entry``, given unquoted, as the listed ``name``."""
+    if rule == "insensitive":
+        return name.casefold() == entry.casefold()
+    fold = {"upper": str.upper, "lower": str.lower}.get(rule)
+    parts, asked = name.split("."), entry.split(".")
+    return fold is not None and len(parts) == len(asked) and all(
+        part in (word, fold(word)) for part, word in zip(parts, asked, strict=True))
+
+
+def selected(ctype: connector_types.ConnectorType, listed: list[str], wanted: list[str]) -> list[str]:
+    """The ``listed`` collections the ``collections`` setting names, in listed order. An
+    exact match wins over one by the source's reading of an unquoted name; an entry that
+    names nothing fails the job as ``settings``, so a typo never passes as an empty source."""
+    chosen: set[str] = set()
+    for entry in wanted:
+        hits = [n for n in listed if n == entry] or [n for n in listed if _reads_as(ctype.identifiers, n, entry)]
+        if not hits:
+            raise JobFailed("settings")
+        chosen.update(hits)
+    return [n for n in listed if n in chosen]
+
+
+def _sample(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any,
+            ctype: connector_types.ConnectorType) -> dict:
     wanted = source.settings.get("collections")
     names = [c.name for c in rows_source.list_collections()]
     if wanted:
-        names = [n for n in names if n in wanted]
+        names = selected(ctype, names, [str(w) for w in wanted])
+    family = ctype.family
     samples: list[fields.FieldSample] = []
     rows_seen = 0
     for collection in names:
@@ -285,7 +312,7 @@ def execute(ctx: Context, job: jobs.Job) -> dict:
     rows_source, ctype = _open(ctx, job, source, crypto)
     try:
         if job.kind == "sample":
-            return _sample(ctx, job, source, rows_source, ctype.family)
+            return _sample(ctx, job, source, rows_source, ctype)
         # Phase 1 connectors keep no cursor: an incremental job reads everything.
         return _full(ctx, job, source, rows_source, crypto)
     finally:

@@ -77,6 +77,10 @@ def _check_types():
     check("no Pro type takes a DSN, hostaddr, driver file or credential as a setting",
           not any(t.setting_keys & (_BANNED - {"host", "port"}) for t in types.values() if t.tier == "pro"))
     check("the free types are unchanged", types["postgres"].tier == "free" and types["sqlite"].tier == "free")
+    check("collections match as each source reads an unquoted name: Snowflake and Oracle in upper case, "
+          "Databricks in lower case, BigQuery and MSSQL as written",
+          {t: types[t].identifiers for t in ("snowflake", "oracle", "databricks", "bigquery", "mssql")}
+          == {"snowflake": "upper", "oracle": "upper", "databricks": "lower", "bigquery": "exact", "mssql": "exact"})
 
 
 def _check_data_only():

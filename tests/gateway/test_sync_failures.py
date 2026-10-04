@@ -7,9 +7,11 @@ does. Failures follow the policy: unreachable retries with backoff and fails aft
 last step, auth and license fail unretried and flag the source, a limit waits for its
 reset without counting an attempt, anything else is an internal error. The worker
 refuses a denied host, bad settings and an unknown type before any connector runs, and
-skips a paused source. A connector that dials anything but the checked address (a
-redirect, say) fails the job as denied; model review and the worker's own database
-connections are never refused. Job rows and logs carry fixed text only.
+skips a paused source. A ``collections`` entry the source does not list fails the sample
+as bad settings; an entry matches as written or as the source reads an unquoted name. A
+connector that dials anything but the checked address (a redirect, say) fails the job as
+denied; model review and the worker's own database connections are never refused. Job
+rows and logs carry fixed text only.
 """
 import contextlib
 import io
@@ -28,9 +30,10 @@ from helpers import fresh_db
 from psycopg_pool import ConnectionPool
 from sync_fakes import FakeConnector, Field, Table, config, customers, lookup
 
+from erebus.cataloging.connector_types import ConnectorType
 from erebus.cataloging.sources import ConnectorError, DriverMissing, LicenseRequired
 from erebus.gateway import catalog
-from erebus.gateway.connectors import jobs, sources
+from erebus.gateway.connectors import fields, jobs, sources
 from erebus.gateway.crypto.keyprovider import LocalKms
 from erebus.gateway.store import catalog_versions
 from erebus.gateway.store.known_value_store import open_scope_crypto, provision_scope
@@ -319,6 +322,41 @@ def _check_policy(env):
           all(r[0] is None or ("Qorbel" not in r[0] and "Pw-Zq" not in r[0]) for r in rows))
 
 
+def _check_collections(env):
+    calls = len(env.pg.calls)
+    src = env.new_source({"host": "127.0.0.1", "dbname": "crm", "collections": ["Customers"]})
+    job = env.run("sample", source=src)
+    read = {c[1] for c in env.pg.calls[calls:] if c[0] == "records"}
+    check("a collections entry matches as Postgres reads an unquoted name (lower case)",
+          job.status == "done" and read == {"customers"})
+    env.settle(jobs.list_jobs(env.conn, env.scope, source_id=src)[0].id)  # the full sync it queued
+
+    bad = env.new_source({"host": "127.0.0.1", "dbname": "crm", "collections": ["customers", "no_such_table_zq"]})
+    job = env.run("sample", source=bad)
+    check("a collections entry the source does not list fails the sample as bad settings, unretried",
+          job.status == "failed" and job.attempts == 1 and job.error == "source settings are not valid")
+    check("... flags the source and maps no field",
+          env.status(bad) == "needs_attention" and fields.list_fields(env.conn, env.scope, bad) == [])
+
+    def pick(rule, listed, wanted):
+        try:
+            return runner.selected(ConnectorType("zq", "warehouse", "pro", frozenset(), identifiers=rule),
+                                   listed, wanted)
+        except runner.JobFailed as exc:
+            return exc.error_class
+    upper = ["CRM.customers", "CRM.CUSTOMERS", "PUBLIC.ORDERS"]
+    check("upper: an entry matches as written, or as Snowflake and Oracle read it unquoted",
+          pick("upper", upper, ["public.orders"]) == ["PUBLIC.ORDERS"]
+          and pick("upper", upper, ["crm.customers"]) == ["CRM.customers", "CRM.CUSTOMERS"])
+    check("... an exact match wins", pick("upper", upper, ["CRM.customers"]) == ["CRM.customers"])
+    check("... an upper-case entry never matches a quoted lower-case name",
+          pick("upper", ["CRM.customers"], ["CRM.CUSTOMERS"]) == "settings")
+    check("insensitive (SQLite): any case matches", pick("insensitive", ["Customers"], ["CUSTOMERS"]) == ["Customers"])
+    check("exact (MySQL, BigQuery, MSSQL): only the name as written",
+          pick("exact", ["crm.customers"], ["crm.Customers"]) == "settings")
+    check("collections keep the source's order", pick("exact", ["a.x", "a.y"], ["a.y", "a.x"]) == ["a.x", "a.y"])
+
+
 @contextlib.contextmanager
 def _listener():
     """A local TCP listener; yields (port, number of connections accepted so far as a list)."""
@@ -406,6 +444,7 @@ def main():
         _check_capped_tuples(env)
         _check_retries(env)
         _check_policy(env)
+        _check_collections(env)
         _check_connect_guard(env)
     finally:
         pool.close()

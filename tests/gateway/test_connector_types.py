@@ -59,6 +59,9 @@ def _check_types():
     check("mysql is a free database type", connector_types.get("mysql").family == "database")
     sqlite = connector_types.get("sqlite")
     check("sqlite is a free file type with a path", sqlite.family == "file" and "path" in sqlite.setting_keys)
+    check("collections match as each source reads a name: postgres folds to lower case, mysql exact, "
+          "sqlite ignores case", (pg.identifiers, connector_types.get("mysql").identifiers, sqlite.identifiers)
+          == ("lower", "exact", "insensitive"))
     check("an unknown type is None", connector_types.get("no_such_type_zq") is None)
     installed = connector_types.installed()
     check("installed() lists every installed type once, by id",
@@ -81,6 +84,10 @@ def _check_entry_points():
         ValueError,
         lambda: connector_types.load_types(eps=[_EP("x", type("M", (), {"TYPES": (ConnectorType(
             "postgres", "database", "pro", frozenset()),)}))])))
+    check("a type with an unknown identifier rule is refused", _raises(
+        ValueError,
+        lambda: connector_types.load_types(eps=[_EP("x", type("M", (), {"TYPES": (ConnectorType(
+            "zq", "warehouse", "pro", frozenset(), identifiers="mixed"),)}))])))
     check("a broken types module fails closed",
           _raises(RuntimeError, lambda: connector_types.load_types(eps=[_EP("bad", _Broken())])))
 

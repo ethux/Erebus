@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connectors: a Postgres column with a case- or accent-insensitive (nondeterministic)
   collation, or a SQLite `NOCASE` column, kept one spelling of values such as "Müller"
   and "Muller", so the other never became a known value. Syncs now read every spelling.
+- Connectors: a `collections` entry that named no table (a typo, or a name in the wrong
+  case) made the sample finish with no fields and no error. It now fails with `source
+  settings are not valid`; Postgres entries match as Postgres reads an unquoted name
+  (lower case) and SQLite entries in any case.
 
 ## [1.2.0-beta.1] - 2026-10-03
 

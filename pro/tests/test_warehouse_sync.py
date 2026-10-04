@@ -6,8 +6,10 @@ Live Postgres on a throwaway database; the Snowflake connector on fakesnow. Lice
 the sample maps the warehouse columns (email and full name auto-accepted, the name parts
 paired, integers, dates and flags ignored) and the full sync stores the distinct values.
 When the license lapses the next sync fails unretried with the license text and flags the
-source, and every value already synced stays active: filtering never weakens. Needs
-erebus-pro installed (its connector types come from the entry point).
+source, and every value already synced stays active: filtering never weakens. A
+``collections`` entry matches as Snowflake reads an unquoted name (``crm.customers`` is
+``CRM.customers``); one the warehouse does not have fails the sample as bad settings.
+Needs erebus-pro installed (its connector types come from the entry point).
 """
 import os
 import sys
@@ -46,6 +48,30 @@ def _drain(worker):
     while len(ran) < 10 and (job_id := worker.run_once()) is not None:
         ran.append(job_id)
     return ran
+
+
+def _check_collections(conn, worker, scope_id, kms, b):
+    from erebus.gateway.connectors import fields, jobs, sources
+    from erebus.gateway.store.known_value_store import open_scope_crypto
+
+    def sample(collections):
+        source_id = sources.create_source(conn, open_scope_crypto(conn, kms, scope_id), scope_id, name="dwh-only",
+                                          connector_type="snowflake",
+                                          settings=b.settings(collections=collections), secrets=b.secrets())
+        job, _ = jobs.enqueue(conn, scope_id, source_id, "sample")
+        conn.commit()
+        worker.run_once()
+        _drain(worker)  # the full sync a done sample queues
+        return jobs.get_job(conn, scope_id, job.id), source_id
+
+    job, source_id = sample(["crm.customers"])
+    mapped = {f.collection for f in fields.list_fields(conn, scope_id, source_id)}
+    check("a lower-case collections entry matches the warehouse's upper-case (unquoted) schema",
+          job.status == "done" and mapped == {"CRM.customers"})
+    job, source_id = sample(["crm.customers", "crm.no_such_table_zq"])
+    check("a collections entry the warehouse does not have fails the sample as bad settings, unretried",
+          job.status == "failed" and job.attempts == 1 and job.error == "source settings are not valid"
+          and sources.get_source(conn, scope_id, source_id).status == "needs_attention")
 
 
 def _run(dsn, b):
@@ -87,6 +113,8 @@ def _run(dsn, b):
               {"Zyx Qorbel", "Anna Visser", "Zyx Qorbël", "mila.brandt@acme.example"} <= before
               and "zyx.qorbel@acme.example" in {v.casefold() for v in before}  # case variants are one value
               and "Zyx" not in before and "Qorbel" not in before)
+
+        _check_collections(conn, worker, scope_id, kms, b)
 
         current["connector"] = b.connector(licensed([_FEATURE], expires_in=-30 * 86400))
         job, _ = jobs.enqueue(conn, scope_id, source_id, "full")

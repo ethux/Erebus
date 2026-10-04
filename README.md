@@ -421,7 +421,10 @@ Several workers can run against one database; each job runs on one of them.
 
 `sslmode` is `disable`, `prefer`, `require`, `verify-ca` or `verify-full` (the default,
 checked against the system CAs). Collections are named `schema.table`; without
-`schemas` the worker reads every user schema. A raw DSN, file paths and driver options
+`schemas` the worker reads every user schema. A `collections` entry matches as written or
+as the database reads an unquoted name (Postgres: lower case; MySQL: as written; SQLite:
+any case); an entry the source does not have fails the sample with `source settings are
+not valid`. A raw DSN, file paths and driver options
 are refused. The worker opens every session read-only with a 10-minute statement
 limit, but the read-only account below is the real guard. Grant only the tables that
 hold customer data:
@@ -462,7 +465,9 @@ government and China clouds), and only a SQL warehouse path. The worker checks e
 address these three connect to against its deny list, and its allow list when one is
 set (see [Sync worker](#sync-worker)); BigQuery with `auth: attached` may also reach the
 GCP metadata server. Collections are `SCHEMA.TABLE`, `dataset.table` and
-`schema.table` (in `catalog`). Costs:
+`schema.table` (in `catalog`). A `collections` entry also matches as Snowflake and Oracle
+read an unquoted name (`crm.customers` finds `CRM.CUSTOMERS`) and in any case on
+Databricks; BigQuery and MSSQL names match as written. Costs:
 
 - Snowflake: a sync resumes the warehouse, billed at least 60 seconds per resume.
 - BigQuery: each table is read in one query, billed at least 10 MB. `max_bytes_billed`
