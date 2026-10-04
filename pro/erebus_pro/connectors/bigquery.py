@@ -117,7 +117,11 @@ def _credentials(settings: dict[str, Any], secrets: dict[str, str]) -> Any:
     try:
         if mode == "attached":
             import google.auth
-            return google.auth.default(scopes=_SCOPES)[0]
+            from google.auth.credentials import with_scopes_if_required
+
+            # Scoped afterwards: asked with scopes, default() exchanges an external account's
+            # token and looks its project up at once; the first API call gets the token instead.
+            return with_scopes_if_required(google.auth.default()[0], _SCOPES)
         raw = secrets.get("service_account_key")
         info = json.loads(raw) if isinstance(raw, str) and raw.strip() else None
         if not isinstance(info, dict) or info.get("type") != "service_account":

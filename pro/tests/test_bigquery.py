@@ -253,11 +253,61 @@ def _check_quota():
           exc is not None and exc.kind == "limit" and exc.reset_at is None)
 
 
+def _check_workload_identity():
+    """``auth: attached`` with a workload identity federation (external account) config in
+    GOOGLE_APPLICATION_CREDENTIALS, as the README documents: connecting builds the
+    credentials without a request (no token exchange, no project lookup); the first API
+    call exchanges the token at Google's STS."""
+    import json
+    import tempfile
+
+    import google.auth.transport.requests
+    from erebus_pro.connectors.bigquery import BigQueryConnector
+    from google.auth import identity_pool
+
+    handed, requests = [], []
+    connector = BigQueryConnector(licensed(["connectors.bigquery"]),
+                                  client_factory=lambda _p, creds, _l: handed.append(creds) or _NoClient())
+    real = google.auth.transport.requests.Request.__call__
+
+    def recording(_request, url, *_a, **_kw):
+        requests.append(url)
+        raise OSError("no network in this test")
+    with tempfile.TemporaryDirectory() as root:
+        token = os.path.join(root, "token")
+        with open(token, "w", encoding="utf-8") as fh:
+            fh.write("header.payload.signature")
+        config = os.path.join(root, "wif.json")
+        with open(config, "w", encoding="utf-8") as fh:
+            json.dump({"type": "external_account", "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                       "audience": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/"
+                                   "erebus/providers/zq", "token_url": "https://sts.googleapis.com/v1/token",
+                       "credential_source": {"file": token}}, fh)
+        saved = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = config
+        google.auth.transport.requests.Request.__call__ = recording
+        try:
+            exc = _error(lambda: connector.connect({"project": "erebus-test", "auth": "attached"}, {}).close())
+        finally:
+            google.auth.transport.requests.Request.__call__ = real
+            if saved is None:
+                del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+            else:
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = saved
+    creds = handed[-1] if handed else None
+    check("auth: attached takes a workload identity federation config from GOOGLE_APPLICATION_CREDENTIALS",
+          exc is None and isinstance(creds, identity_pool.Credentials)
+          and creds.info["token_url"] == "https://sts.googleapis.com/v1/token")
+    check("... scoped to BigQuery, and connecting sends no request (no token exchange or project lookup yet)",
+          not creds.requires_scopes and not requests)
+
+
 def main():
     print("\n=== BigQuery connector (spec 015) ===\n")
     _check_egress_exceptions()
     _check_byte_cap()
     _check_quota()
+    _check_workload_identity()
     b = BigQueryBackend()
     reason = b.unavailable()
     if reason:
