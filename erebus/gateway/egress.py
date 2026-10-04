@@ -96,10 +96,31 @@ def _resolve_egress(conn, crypto, scope_id: uuid.UUID, provider: str,
     return route.base_url, secret
 
 
+async def _lookup_route(pool, kms: KeyProvider, scope_id: uuid.UUID, provider: str,
+                        model: str | None) -> tuple[str, str]:
+    """Resolve the approved route and central credential on a short-lived pooled connection.
+
+    The connection goes back to the pool before the provider is called, so a slow or
+    abandoned upstream call never holds one while requests and audit wait for the pool.
+    Getting and returning it are shielded so a cancelled request (a client hanging up)
+    cannot lose it.
+    """
+    with anyio.CancelScope(shield=True):
+        conn = await anyio.to_thread.run_sync(pool.getconn)
+    try:
+        crypto = await anyio.to_thread.run_sync(lambda: _open_scope(conn, kms, scope_id))
+        # Off the event-loop thread; every None is guarded inside _resolve_egress so the
+        # send-site never builds 'Bearer None' (R1/FR-001); the model allowlist applies.
+        return await anyio.to_thread.run_sync(lambda: _resolve_egress(conn, crypto, scope_id, provider, model))
+    finally:
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(lambda: pool.putconn(conn))
+
+
 def build_egress(pool, kms: KeyProvider, config: GatewayConfig, http_post: HttpPost) -> Egress:
     """Return an ``Egress`` that egresses token-only via the per-tenant central credential.
 
-    Per request: pooled conn -> open scope crypto -> resolve provider from the payload's
+    Per request: short-lived pooled conn -> open scope crypto -> resolve provider from the payload's
     model (``config.provider_for``) -> drop any client credential from the payload -> fail
     closed if the central credential is missing/revoked -> :func:`build_upstream_call` (binds
     the approved route + model allowlist) -> invoke. The central credential is the only
@@ -114,15 +135,8 @@ def build_egress(pool, kms: KeyProvider, config: GatewayConfig, http_post: HttpP
         # Drop any client-supplied credential BEFORE the transport runs, so the only
         # Authorization reaching the provider is the tenant's central credential (FR-003).
         sanitized = _drop_client_credential(payload)
-        conn = await anyio.to_thread.run_sync(pool.getconn)
         try:
-            crypto = await anyio.to_thread.run_sync(lambda: _open_scope(conn, kms, scope_id))
-            # Resolve allow/route/credential ONCE, OFF the event-loop thread, so the sync DB
-            # work no longer blocks the loop (R3/FR-003). Every None is guarded inside
-            # _resolve_egress so the send-site never builds 'Bearer None' (R1/FR-001).
-            base_url, secret = await anyio.to_thread.run_sync(
-                lambda: _resolve_egress(conn, crypto, scope_id, provider, model)
-            )
+            base_url, secret = await _lookup_route(pool, kms, scope_id, provider, model)
             headers = {"Authorization": f"Bearer {secret}"}  # central credential, never the client's
             return await http_post(base_url, headers, sanitized)
         except EgressDenied:
@@ -131,8 +145,6 @@ def build_egress(pool, kms: KeyProvider, config: GatewayConfig, http_post: HttpP
             raise EgressDenied(f"{provider}: quota refused") from exc
         except Exception as exc:  # missing credential / crypto-erased / state failure
             raise EgressDenied(f"{provider}: egress unavailable") from exc
-        finally:
-            await anyio.to_thread.run_sync(lambda: pool.putconn(conn))
 
     return egress
 
@@ -144,8 +156,8 @@ def build_egress_stream(pool, kms: KeyProvider, config: GatewayConfig,
     Resolves the provider, opens the scope crypto, and enforces the approved route +
     model allowlist + central credential exactly as the non-streaming path (so a client
     credential is never forwarded and an unapproved route fails closed), then streams the
-    upstream SSE fragments. The pooled connection is held for the lifetime of the stream
-    and released when it ends or aborts.
+    upstream SSE fragments. The pooled connection is only used for that lookup and goes
+    back to the pool before the upstream stream starts.
     """
 
     async def egress_stream(scope_id: uuid.UUID, payload: dict) -> AsyncIterator[str]:
@@ -154,27 +166,16 @@ def build_egress_stream(pool, kms: KeyProvider, config: GatewayConfig,
         # Drop any client-supplied credential before streaming upstream, mirroring the
         # non-streaming path: the central credential is the only Authorization sent (FR-003).
         sanitized = _drop_client_credential(payload)
-        conn = await anyio.to_thread.run_sync(pool.getconn)
         try:
-            crypto = await anyio.to_thread.run_sync(lambda: _open_scope(conn, kms, scope_id))
-            try:
-                # Resolve allow/route/credential ONCE, off-loop, exactly like the
-                # non-streaming path. Every None (route revoked / credential erased in the
-                # race) is guarded inside _resolve_egress, so the stream never dereferences
-                # None nor builds 'Bearer None' (R1/FR-001); model allowlist is enforced too.
-                base_url, secret = await anyio.to_thread.run_sync(
-                    lambda: _resolve_egress(conn, crypto, scope_id, provider, model)
-                )
-                headers = {"Authorization": f"Bearer {secret}"}  # central credential, never the client's
-            except EgressDenied:
-                raise
-            except QuotaExceeded as exc:  # a quota refusal must fail closed, not leak (FR-039)
-                raise EgressDenied(f"{provider}: quota refused") from exc
-            except Exception as exc:  # crypto-erased / state failure
-                raise EgressDenied(f"{provider}: egress unavailable") from exc
-            async for frag in http_stream(base_url, headers, sanitized):
-                yield frag
-        finally:
-            await anyio.to_thread.run_sync(lambda: pool.putconn(conn))
+            base_url, secret = await _lookup_route(pool, kms, scope_id, provider, model)
+        except EgressDenied:
+            raise
+        except QuotaExceeded as exc:  # a quota refusal must fail closed, not leak (FR-039)
+            raise EgressDenied(f"{provider}: quota refused") from exc
+        except Exception as exc:  # crypto-erased / state failure
+            raise EgressDenied(f"{provider}: egress unavailable") from exc
+        headers = {"Authorization": f"Bearer {secret}"}  # central credential, never the client's
+        async for frag in http_stream(base_url, headers, sanitized):
+            yield frag
 
     return egress_stream

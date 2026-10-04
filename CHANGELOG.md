@@ -5,6 +5,14 @@ All notable changes to Erebus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Gateway: requests that a client cut off, such as a cancelled stream, could keep their
+  database connection, so after enough of them the gateway stopped answering. A stream
+  no longer holds a connection while it runs, and every request gives its connection
+  back however it ends.
+
 ## [1.2.0-beta.1] - 2026-10-03
 
 ### Added

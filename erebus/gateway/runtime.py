@@ -136,12 +136,18 @@ async def _acquire(deps: GatewayDeps):
     """Check out a connection: a pooled one per request, or the shared conn."""
     if deps.pool is None:
         return deps.conn
-    return await anyio.to_thread.run_sync(deps.pool.getconn)
+    # Shielded: the pool thread finishes even if the request is cancelled meanwhile (a client
+    # hanging up), and without the shield the connection it hands out would never be returned.
+    with anyio.CancelScope(shield=True):
+        return await anyio.to_thread.run_sync(deps.pool.getconn)
 
 
 async def _release(deps: GatewayDeps, conn) -> None:
     if deps.pool is not None:
-        await anyio.to_thread.run_sync(lambda: deps.pool.putconn(conn))
+        # Shielded: this runs in the finally of cancelled requests too, where an unshielded
+        # await is cancelled at once and the connection would be lost to the pool for good.
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(lambda: deps.pool.putconn(conn))
 
 
 async def _db(deps: GatewayDeps, fn: Callable[[Any], Any]):

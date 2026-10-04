@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import anyio
@@ -56,18 +56,16 @@ from .modalities import Decision
 from .observability import Metric, Metrics
 from .overload import Limiter
 from .runtime import (
-    _acquire,
     _admit,
     _audit,
     _auth,
     _db,
     _known_matcher,
     _record,
-    _release,
     _reserve_or_429,
     _slot,
 )
-from .store.known_value_store import open_store
+from .store.known_value_store import KnownValueStore, open_scope_crypto
 from .streaming_restore import StreamRestorer
 from .tenancy import ScopeResolver
 from .tokenizer import Detector
@@ -139,6 +137,45 @@ async def _handle_chat(deps: GatewayDeps, authorization: str | None, payload: di
             return restored
 
 
+def _stream_lookup(deps: GatewayDeps, scope_id: uuid.UUID, crypto) -> Callable[[str], str | None]:
+    """Resolve one stream's tokens, borrowing a pooled connection only per new token."""
+    seen: dict[str, str | None] = {}
+
+    def lookup(token: str) -> str | None:
+        if token not in seen:
+            if deps.pool is None:
+                seen[token] = KnownValueStore(deps.conn, scope_id, crypto).lookup(token)
+            else:
+                with deps.pool.connection() as conn:
+                    seen[token] = KnownValueStore(conn, scope_id, crypto).lookup(token)
+        return seen[token]
+
+    return lookup
+
+
+class _ReleasingStream(StreamingResponse):
+    """A stream that runs ``release`` however it ends.
+
+    A client that hangs up before the body starts means the body generator never runs, so
+    its own finally never runs either; this wrapper's finally still does.
+    """
+
+    def __init__(self, content, release: Callable[[], Awaitable[None]], **kwargs) -> None:
+        super().__init__(content, **kwargs)
+        self._release_hook = release
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                # Close a body the client abandoned so its upstream stream is closed now,
+                # not whenever it is garbage-collected; it is not running at this point.
+                with contextlib.suppress(RuntimeError):
+                    await self.body_iterator.aclose()
+                await self._release_hook()
+
+
 async def _handle_chat_stream(deps: GatewayDeps, authorization: str | None, payload: dict) -> StreamingResponse:
     scope_key, scope_id = await _auth(deps, authorization)
     admission = _admit(deps, scope_key)  # shed 503 before any work if the tenant is saturated
@@ -148,17 +185,22 @@ async def _handle_chat_stream(deps: GatewayDeps, authorization: str | None, payl
         await _reserve_or_429(deps, scope_id, "chat_stream")
         sanitized = await _sanitize_or_fail(deps, scope_id, deps.modes.get(scope_key, "gateway"), payload,
                                             matcher)
-        conn = await _acquire(deps)  # held for the stream: store.lookup runs on it
+        # The stream holds no pooled connection: each token lookup borrows one briefly, so long
+        # or abandoned streams cannot starve the pool that egress and audit also draw from.
+        crypto = await _db(deps, lambda c: open_scope_crypto(c, deps.key_provider, scope_id))
     except BaseException:
         admission.__exit__(None, None, None)
         raise
-    try:
-        store = await anyio.to_thread.run_sync(lambda: open_store(conn, deps.key_provider, scope_id))
-    except BaseException:
-        await _release(deps, conn)
-        admission.__exit__(None, None, None)
-        raise
-    restorer = StreamRestorer(store.lookup)
+    released = False
+
+    async def release() -> None:
+        """Give back the per-tenant admission token exactly once, however the stream ends."""
+        nonlocal released
+        if not released:
+            released = True
+            admission.__exit__(None, None, None)
+
+    restorer = StreamRestorer(_stream_lookup(deps, scope_id, crypto))
     # Scope-aware egress_stream injects the central credential (008); else the 007 seam.
     source = (lambda p: deps.egress_stream(scope_id, p)) if deps.egress_stream is not None else deps.provider_stream
 
@@ -178,10 +220,9 @@ async def _handle_chat_stream(deps: GatewayDeps, authorization: str | None, payl
             await _audit(deps, scope_id, "chat_stream", "fail_closed")
             return
         finally:
-            await _release(deps, conn)
-            admission.__exit__(None, None, None)  # release the per-tenant admission token
+            await release()
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return _ReleasingStream(gen(), release, media_type="text/event-stream")
 
 
 async def _no_provider_call(_payload: dict) -> dict:
