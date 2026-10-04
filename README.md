@@ -464,7 +464,7 @@ Databricks takes the workspace host, accepted only on Databricks' own domains
 government and China clouds), and only a SQL warehouse path. The worker checks every
 address these three connect to against its deny list, and its allow list when one is
 set (see [Sync worker](#sync-worker)); BigQuery with `auth: attached` may also reach the
-GCP metadata server. Collections are `SCHEMA.TABLE`, `dataset.table` and
+metadata server (see below). Collections are `SCHEMA.TABLE`, `dataset.table` and
 `schema.table` (in `catalog`). A `collections` entry also matches as Snowflake and Oracle
 read an unquoted name (`crm.customers` finds `CRM.CUSTOMERS`) and in any case on
 Databricks; BigQuery and MSSQL names match as written. Costs:
@@ -561,8 +561,25 @@ GRANT SELECT ON sales.customers TO [<service-principal-name>];
 BigQuery: give the service account BigQuery Job User on the project and BigQuery Data
 Viewer only on the datasets that hold customer data. Leave `location` unset to read
 datasets in every location (each query runs where its dataset lives); with it set, every
-query runs in that location and datasets elsewhere are skipped. `auth: attached` uses the identity
-attached to the worker (on GCP); workload identity federation is not supported yet.
+query runs in that location and datasets elsewhere are skipped.
+
+`auth: attached` signs in as the worker itself (Application Default Credentials), for
+every source that uses it:
+
+- On GCP, the service account attached to the worker's VM or pod.
+- Elsewhere, workload identity federation: point `GOOGLE_APPLICATION_CREDENTIALS` in the
+  worker's environment at a credential configuration file
+  (`gcloud iam workload-identity-pools create-cred-config`). The first BigQuery call exchanges
+  the worker's token at `sts.googleapis.com`, and at `iamcredentials.googleapis.com` when
+  the configuration impersonates a service account. With an allow list, add those hosts.
+- The worker lets these sources reach the metadata address `169.254.169.254` (and GCP's
+  `fd20:ce::254`) on port 80, where GCP serves the attached identity and AWS and Azure
+  serve the token a federation configuration reads. Any other credential URL must pass
+  the host lists. A configuration that runs a program (an executable source) is outside
+  the worker's checks.
+
+Snowflake signs in with the service user's key pair only; workload identity federation
+is not supported.
 
 Databricks: give the service principal `CAN USE` on the SQL warehouse and create an
 OAuth secret for it (machine-to-machine); personal access tokens are not supported. A

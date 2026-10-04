@@ -3,12 +3,16 @@
 """BigQuery source connector (Erebus Pro, feature ``connectors.bigquery``).
 
 Signs in with a service-account key (``service_account_key``, the JSON key file) or,
-with ``auth: attached``, the identity attached to the worker (ADC, on GCP). The key's
-token endpoint and universe are pinned to Google's, so a key file cannot send the
-worker anywhere else; a workload identity (external account) file is refused. The client
-talks only to Google's BigQuery API: no setting names a host. The worker checks every
+with ``auth: attached``, the worker's Application Default Credentials: its attached
+identity on GCP, or a workload identity federation configuration that
+``GOOGLE_APPLICATION_CREDENTIALS`` names (loaded unscoped, so no token is exchanged
+until the first API call). The key's token endpoint and universe are pinned to Google's,
+so a key file cannot send the worker anywhere else; an external account file given as
+the key is refused. The client
+talks only to Google's APIs (BigQuery; STS for a federation): no setting names a host. The worker checks every
 address it connects to against its deny list, and its allow list when one is set; with
-``auth: attached`` the GCP metadata server is let through (``egress_exceptions``).
+``auth: attached`` the metadata server is let through (``egress_exceptions``): GCP's
+attached identity, and the subject token of a federation on AWS or Azure.
 
 Collections are ``dataset.table``; fields come from each dataset's
 ``INFORMATION_SCHEMA.COLUMNS``. Without ``location`` each query runs where its dataset
@@ -285,8 +289,9 @@ class BigQueryConnector(LicensedConnector):
         )
 
     def egress_exceptions(self, settings: dict[str, Any]) -> tuple[tuple[str, int], ...]:
-        """With ``auth: attached`` the client fetches its token from the GCP metadata server,
-        which the worker's deny list covers; nothing else passes its host lists."""
+        """With ``auth: attached`` the client fetches its token from the metadata server (GCP),
+        or a federation's subject token from it (AWS, Azure), which the worker's deny list
+        covers; nothing else passes its host lists."""
         return _METADATA if settings.get("auth") == "attached" else ()
 
     def connect(self, settings: dict[str, Any], secrets: dict[str, str]) -> RowSource:
