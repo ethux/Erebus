@@ -10,7 +10,9 @@ license feature.
 A backend (see ``connector_backends``) builds the fixture and says what its source can
 show. Optional attributes, with their defaults: ``tier`` ("free"), ``primary_key`` (True:
 the source reports primary keys), ``nullability`` (True), ``integer_classes``
-(("integer",)), ``connector_type()`` (the installed type). Read-only is proven by a
+(("integer",)), ``connector_type()`` (the installed type), ``folds`` (False: True when the
+fixture has a ``folded`` table whose ``name`` column's collation folds case and accents,
+``FOLDED``, so distinct reads must compare byte for byte). Read-only is proven by a
 refused raw write (``write_probe``) or, where a fake cannot refuse one (warehouses: the
 documented role is the guard), by ``statements(source)``: every statement the connector
 sent, which must all be single reads.
@@ -23,7 +25,7 @@ import re
 import traceback
 from collections.abc import Iterator
 
-from connector_backends import FIELDS
+from connector_backends import FIELDS, FOLDED
 
 from erebus.cataloging import connector_types, sources
 from erebus.cataloging.connector_errors import CONNECTOR_TEXT, ConnectorError, LicenseRequired
@@ -124,6 +126,10 @@ def _distinct(b, src):
           sorted(row for i, row in got if i == 0) == sorted(emails)
           and {row for i, row in got if i == 1} == pairs and [row for i, row in got if i == 2] == [("vip",)])
     check(f"{b.name}: distinct groups share one limit", len(list(sources.distinct_groups(src, coll, groups, 4))) == 4)
+    if getattr(b, "folds", False):
+        got = sorted(row for row in sources.distinct_values(src, b.collection("folded"), ["name"], 100))
+        check(f"{b.name}: distinct values keep the case and accent variants a column's collation folds",
+              got == sorted((name,) for name in FOLDED))
 
 
 def _read_only(b, src):
@@ -201,7 +207,7 @@ def _sqlite_policy(b, connector):
     settings = netpolicy.prepare_settings(policy, ctype, {"path": "crm.db"})
     src = connector.connect(settings, {})
     try:
-        check("sqlite: opens a file inside the SQLite directory", len(src.list_collections()) == 2)
+        check("sqlite: opens a file inside the SQLite directory", len(src.list_collections()) == 3)
     finally:
         src.close()
     outside = b.root.parent / f"outside-{os.getpid()}.db"

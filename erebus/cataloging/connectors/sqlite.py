@@ -114,9 +114,10 @@ class SQLiteRowSource:
             yield SourceRecord(f"{collection}:{record_ref}", {field: row[field] for field in selected}, {})
 
     def iter_distinct_values(self, collection: str, fields: list[str], limit: int) -> Iterator[tuple]:
-        """Distinct tuples of ``fields`` (in that order), rows all NULL skipped, at most ``limit``."""
+        """Distinct tuples of ``fields`` (in that order), rows all NULL skipped, at most ``limit``;
+        compared byte for byte (a ``NOCASE`` column would fold case)."""
         self._columns(collection, fields)
-        cols = ", ".join(_quote_identifier(f) for f in fields)
+        cols = ", ".join(f"{_quote_identifier(f)} COLLATE BINARY" for f in fields)
         not_all_null = " OR ".join(f"{_quote_identifier(f)} IS NOT NULL" for f in fields)
         cur = self._query(f"SELECT DISTINCT {cols} FROM {_quote_identifier(collection)} WHERE {not_all_null} "
                           f"LIMIT {int(limit)}")

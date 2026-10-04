@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - During a sync the worker refuses connections outside the addresses its host lists
   approve, also after a server redirect (MSSQL's native drivers aside; see the README).
 
+### Fixed
+- Connectors: a Postgres column with a case- or accent-insensitive (nondeterministic)
+  collation, or a SQLite `NOCASE` column, kept one spelling of values such as "Müller"
+  and "Muller", so the other never became a known value. Syncs now read every spelling.
+
 ## [1.2.0-beta.1] - 2026-10-03
 
 ### Added

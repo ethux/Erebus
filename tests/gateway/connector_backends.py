@@ -24,6 +24,8 @@ ROWS = [
     (5, "Zyx.Qorbel@ACME.example", "Zyx Qorbël", "Zyx", "Qorbël", True, "2026-05-06", None),
 ]
 FIELDS = ["id", "email", "full_name", "first_name", "last_name", "active", "signup", "notes"]
+# The ``name`` values of a backend's ``folded`` table, in a column whose collation folds case or accents.
+FOLDED = ["Müller", "Muller", "MULLER", "Ångström", "Angstrom"]
 _CUSTOMERS = ("CREATE TABLE {t} (id INTEGER PRIMARY KEY, email VARCHAR(200), full_name VARCHAR(200) NOT NULL, "
               "first_name VARCHAR(100), last_name VARCHAR(100), active BOOLEAN, signup DATE, notes TEXT)")
 _ORDERS = "CREATE TABLE {t} (id INTEGER PRIMARY KEY, product_name VARCHAR(100))"
@@ -38,6 +40,7 @@ def _closed_port() -> int:
 class SQLiteBackend:
     name = "sqlite"
     schemas = False
+    folds = True  # NOCASE folds ASCII case
 
     def unavailable(self):
         return None
@@ -50,6 +53,8 @@ class SQLiteBackend:
         db.execute(_ORDERS.format(t="orders"))
         db.executemany("INSERT INTO customers VALUES (?,?,?,?,?,?,?,?)", ROWS)
         db.execute("INSERT INTO orders VALUES (1, 'Widget')")
+        db.execute("CREATE TABLE folded (id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE)")
+        db.executemany("INSERT INTO folded VALUES (?, ?)", list(enumerate(FOLDED)))
         db.commit()
         db.close()
         (self.root / "not-a-db.db").write_text("plain text, not a database")
@@ -91,6 +96,7 @@ class PostgresBackend:
 
     name = "postgres"
     schemas = True
+    folds = True  # a nondeterministic ICU collation that ignores case and accents
 
     def unavailable(self):
         if not os.environ.get("EREBUS_PG_DSN"):
@@ -112,10 +118,13 @@ class PostgresBackend:
         for stmt in ("DROP SCHEMA IF EXISTS crm CASCADE", "DROP SCHEMA IF EXISTS other CASCADE",
                      "CREATE SCHEMA crm", "CREATE SCHEMA other", _CUSTOMERS.format(t="crm.customers"),
                      _ORDERS.format(t="crm.orders"), _ORDERS.format(t="other.orders"),
-                     "INSERT INTO crm.orders VALUES (1, 'Widget')"):
+                     "INSERT INTO crm.orders VALUES (1, 'Widget')",
+                     "CREATE COLLATION crm.folding (provider = icu, locale = 'und-u-ks-level1', deterministic = false)",
+                     "CREATE TABLE crm.folded (id INTEGER PRIMARY KEY, name TEXT COLLATE crm.folding)"):
             self.admin.execute(stmt)
         with self.admin.cursor() as cur:
             cur.executemany("INSERT INTO crm.customers VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", ROWS)
+            cur.executemany("INSERT INTO crm.folded VALUES (%s, %s)", list(enumerate(FOLDED)))
 
     def teardown(self):
         self.admin.execute("DROP SCHEMA crm CASCADE")
@@ -167,6 +176,7 @@ class MySQLBackend:
 
     name = "mysql"
     schemas = True
+    folds = True  # a latin1 column with a case-insensitive collation (the fixture's utf8mb4 one folds accents)
     _DB = "erebus_contract"
     _OTHER = "erebus_contract_other"
 
@@ -189,9 +199,12 @@ class MySQLBackend:
                          f"CREATE DATABASE {self._DB}", f"CREATE DATABASE {self._OTHER}",
                          _CUSTOMERS.format(t=f"{self._DB}.customers"), _ORDERS.format(t=f"{self._DB}.orders"),
                          _ORDERS.format(t=f"{self._OTHER}.orders"),
-                         f"INSERT INTO {self._DB}.orders VALUES (1, 'Widget')"):
+                         f"INSERT INTO {self._DB}.orders VALUES (1, 'Widget')",
+                         f"CREATE TABLE {self._DB}.folded (id INTEGER PRIMARY KEY, "
+                         "name VARCHAR(100) CHARACTER SET latin1 COLLATE latin1_german1_ci)"):
                 cur.execute(stmt)
             cur.executemany(f"INSERT INTO {self._DB}.customers VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", ROWS)
+            cur.executemany(f"INSERT INTO {self._DB}.folded VALUES (%s, %s)", list(enumerate(FOLDED)))
 
     def teardown(self):
         with self.admin.cursor() as cur:
