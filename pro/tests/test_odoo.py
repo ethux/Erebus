@@ -12,7 +12,7 @@ CRM is not installed; any other error while listing is raised, never read as a m
 collection. Records include archived ones and are paged by id. Changes are read from the
 cursor minus an overlap window, paged by id, so a late commit is read again and a
 thousand records written in one transaction (one stored ``write_date``) end the read.
-A malformed cursor is expired. Odoo Online is
+A malformed cursor is expired. ``saas~19`` and later is JSON-2. Odoo Online is
 paced at one call per second; a 429 slows down, then reschedules. A wrong key is an
 ``auth`` failure, a model the user may not read a ``permission`` one, both in fixed
 text. The integration user's key expiry is reported when it has one key. Every request
@@ -252,6 +252,20 @@ def _check_same_transaction(respx_mock, version):
           source.cursor("res.partner") == "wd:" + fake.newest("res.partner"))
 
 
+def _check_detection(respx_mock):
+    cases = [(["saas~19", 1, 0, "final", 0, ""], "_Json2"), (["saas~18", 3, 0, "final", 0, ""], "_XmlRpc"),
+             ([19, 0, 0, "final", 0, ""], "_Json2"), ([20, 0, 0, "final", 0, ""], "_Json2"),
+             ([18, 0, 0, "final", 0, ""], "_XmlRpc"), (["saas~19.2"], "_Json2"), (["garbage"], "_XmlRpc"),
+             ([], "_XmlRpc"), ([True], "_XmlRpc"), ("19", "_XmlRpc")]
+    for i, (info, expected) in enumerate(cases):
+        fake = FakeOdoo(19, base=f"https://v{i}.zq.example")
+        fake.version_info = info
+        respx_mock.route(host=f"v{i}.zq.example").mock(side_effect=fake.handle)
+        source = _connector().connect(_settings(fake), {"api_key": KEY})
+        check(f"version_info {info!r} reads over {'JSON-2' if expected == '_Json2' else 'XML-RPC'}",
+              type(source._rpc).__name__ == expected)  # pylint: disable=protected-access
+
+
 def _check_forced_api(respx_mock):
     fake = FakeOdoo(19, base="https://odoo19.zq.example")
     respx_mock.route(host="odoo19.zq.example").mock(side_effect=fake.handle)
@@ -275,7 +289,7 @@ def main():
     for version in (19, 18):
         checks += [lambda m, v=version: _check_api(m, v), lambda m, v=version: _check_failures(m, v),
                    lambda m, v=version: _check_same_transaction(m, v)]
-    for fn in [*checks, _check_forced_api]:
+    for fn in [*checks, _check_detection, _check_forced_api]:
         with respx.mock(assert_all_called=False) as respx_mock:
             fn(respx_mock)
     print(f"\n{_passed}/{_passed} passed\n")

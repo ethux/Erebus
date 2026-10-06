@@ -331,13 +331,22 @@ class OdooConnector(HttpAppConnector):
         return OdooSource(rpc, http)
 
 
+def _major(value: Any) -> int | None:
+    """The major version in ``version_info[0]``: ``19``, or ``"saas~19"`` on Odoo Online."""
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        return None
+    digits = str(value).rsplit("~", 1)[-1].split(".", 1)[0]
+    return int(digits) if digits.isdigit() else None
+
+
 def _detect(http: AppHttp) -> str:
-    """``json2`` when ``/web/version`` names Odoo 19 or later, else ``xmlrpc``."""
+    """``json2`` when ``/web/version`` names Odoo 19 or later (``saas~19`` too), else ``xmlrpc``."""
     response = http.request("GET", "/web/version", accept=frozenset({404}))
     if response.status_code == 404:
         return "xmlrpc"
     try:
-        major = response.json()["version_info"][0]
+        info = response.json()["version_info"]
+        major = _major(info[0]) if isinstance(info, list) else None
     except (ValueError, KeyError, IndexError, TypeError):
         return "xmlrpc"
-    return "json2" if type(major) is int and major >= 19 else "xmlrpc"
+    return "json2" if major is not None and major >= 19 else "xmlrpc"
