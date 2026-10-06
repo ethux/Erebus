@@ -10,7 +10,9 @@ through the record's links; an archived contact stays matched; a deleted one kee
 values until the next full sync retires them. A run of 429s puts the job back in the
 queue without counting an attempt. The key's expiry reaches the source. When the
 license lapses a sync fails unretried and every value stays. No name or key reaches a
-job row or an audit event. Needs erebus-pro installed (its types come from the entry
+job row or an audit event. A server error while a re-sample (every key rotation runs
+one) or a full sync reads the contacts' fields is retried: it never drops the contact
+fields or retires their values. Needs erebus-pro installed (its types come from the entry
 point) and respx.
 """
 import os
@@ -123,7 +125,8 @@ def _sync(conn, dsn, kms, pool, version):
         fake.write("res.partner", ids["ilsabet"], active=False)
         before = len(fake.requests)
         inc = _run(conn, worker, scope_id, source_id, "incremental")
-        reads = [r for r in fake.requests[before:] if "search_read" in r[2] and "apikeys" not in r[1] + r[2]]
+        reads = [r for r in fake.requests[before:]
+                 if "search_read" in r[2] and any(m in r[1] + r[2] for m in ("res.partner", "crm.lead"))]
         check(f"{tag}: the incremental sync reads one page of changes per collection: the two changed "
               "contacts and, inside the overlap window, the newest record of each",
               len(reads) == 2 and inc.rows_seen == 4)
@@ -170,6 +173,62 @@ def _sync(conn, dsn, kms, pool, version):
           not any(s in audit + errors for s in ("Qorbel", "Vranckx", "Okafor", "acme.example", KEY)))
 
 
+def _transient(conn, dsn, kms, pool, version):
+    import respx
+    from erebus_pro.connectors.odoo import OdooConnector
+    from sync_fakes import config
+
+    from erebus.gateway.connectors import fields, jobs, sources
+    from erebus.gateway.store.known_value_store import open_scope_crypto, provision_scope
+    from erebus.sync.worker import Worker
+
+    fake = FakeOdoo(version, base=f"https://flaky{version}.zq.example")
+    tag = f"Odoo {version}"
+    for name in ("Zyx Qorbel", "Ilsabet Vranckx", "Oswin Tarrq"):
+        fake.add("res.partner", name=name, email=name.split()[0].lower() + "@acme.example")
+    fake.add("crm.lead", name="Website inquiry", contact_name="Mila Brandt-Okafor", email_from="mila@okafor.example")
+    connector = OdooConnector(licensed([_FEATURE]), sleep=lambda _s: None)
+    scope_id = provision_scope(conn, kms, f"tenant-odoo-flaky-{version}")
+    source_id = sources.create_source(conn, open_scope_crypto(conn, kms, scope_id), scope_id, name="odoo",
+                                      connector_type="odoo", settings={"url": fake.base, "database": DB,
+                                                                       "login": LOGIN}, secrets={"api_key": KEY})
+    conn.commit()
+    worker = Worker(config(dsn), pool=pool, provider=kms, connectors=lambda t: connector if t == "odoo" else None)
+
+    def contact_fields():
+        return {f.field for f in fields.accepted_fields(conn, scope_id, source_id) if f.collection == "res.partner"}
+
+    def again(job):
+        with conn.transaction():
+            conn.execute("UPDATE sync_jobs SET not_before = now() WHERE id = %s", (job.id,))
+        worker.run_once()
+        return jobs.get_job(conn, scope_id, job.id)
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.route(host=fake.base.split("//")[1]).mock(side_effect=fake.handle)
+        _run(conn, worker, scope_id, source_id, "sample")
+        worker.run_once()
+        before, accepted = _values(conn, kms, scope_id), contact_fields()
+        fake.fail[("res.partner", "fields_get")] = 1
+        resample = _run(conn, worker, scope_id, source_id, "sample")
+        check(f"{tag}: a server error while a re-sample reads the contact fields retries the sample",
+              resample.status == "queued" and resample.attempts == 1 and resample.error == "query failed"
+              and sources.get_source(conn, scope_id, source_id).status == "active")
+        check(f"{tag}: ... keeping the contact fields and every value", contact_fields() == accepted
+              and _values(conn, kms, scope_id) == before)
+        check(f"{tag}: the retried sample succeeds and its full sync retires nothing",
+              again(resample).status == "done" and worker.run_once() is not None
+              and jobs.list_jobs(conn, scope_id, source_id=source_id)[0].values_retired == 0
+              and _values(conn, kms, scope_id) == before)
+        fake.fail[("res.partner", "fields_get")] = 1
+        full = _run(conn, worker, scope_id, source_id, "full")
+        check(f"{tag}: a server error while a full sync lists the contacts is retried, not incomplete",
+              full.status == "queued" and full.error == "query failed"
+              and sources.get_source(conn, scope_id, source_id).status == "active")
+        check(f"{tag}: ... and the retry completes with every value kept",
+              again(full).status == "done" and _values(conn, kms, scope_id) == before)
+
+
 def main():
     print("\n=== Odoo source through the sync worker ===\n")
     reason = None
@@ -199,6 +258,7 @@ def main():
         pool = ConnectionPool(dsn, min_size=1, max_size=3, open=True)
         try:
             for version in (19, 18):
+                _transient(conn, dsn, LocalKms(), pool, version)
                 _sync(conn, dsn, LocalKms(), pool, version)
         finally:
             pool.close()

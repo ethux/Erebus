@@ -372,7 +372,10 @@ A sample job maps a source's fields; a full sync stores the distinct values of t
 accepted fields. Values retire only after a full sync reads everything: a sync that
 fails, stops early or hits a cap keeps every value. An app source (Odoo) also has
 incremental syncs, which read only the records changed since the last sync; a changed
-record's old values retire once the sync completes. An unreachable source is retried
+record's old values retire once the sync completes. A sample that no longer finds a
+collection holding accepted fields fails and keeps those fields, so their values do not
+retire unnoticed; to drop a collection on purpose, leave it out of `collections`. An
+unreachable source is retried
 (1, 5 and 15 minutes by default); wrong credentials, a refused host or a cap fail the
 job at once and mark the source for attention. Job rows and logs hold fixed error
 text only, never a credential or value.
@@ -609,10 +612,12 @@ and companies (`res.partner`) and leads (`crm.lead`).
   XML-RPC with `database`, `login` and the key. Odoo removes XML-RPC in Odoo 22 (Odoo
   Online 21.1).
 - **Integration user.** Create a dedicated internal user with read access to contacts
-  and, for leads, Sales "All Documents". Leave its password empty so only the API key
-  signs in. Odoo has no read-only role: the connector only calls `fields_get` and
-  `search_read` (and `authenticate` on XML-RPC), but the user's access rights are the
-  real guard.
+  and, for leads, Sales "All Documents" (without it, set `collections` to
+  `["res.partner"]`: a collection the user cannot read fails the sample). The connector
+  also reads `ir.model` to see whether CRM is installed. Leave the user's password empty
+  so only the API key signs in. Odoo has no read-only role: the connector only calls
+  `fields_get` and `search_read` (and `authenticate` on XML-RPC), but the user's access
+  rights are the real guard.
 - **API key.** As that user: Preferences, Account Security, New API Key. Odoo keys of
   non-admin users last at most three months: rotate before then by sending the new key
   with `PATCH /sources/{id}`. The worker reads the key's expiry from Odoo when the user

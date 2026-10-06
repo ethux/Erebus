@@ -10,7 +10,10 @@ credentials decrypted (tenant key, AAD = source id).
   write; the transaction marking the job done queues the full sync if a field is
   accepted. A ``collections`` entry names a listed collection as written or as the
   source reads an unquoted name (``ConnectorType.identifiers``); one that names none
-  fails the sample as ``settings``.
+  fails the sample as ``settings``. Without a ``collections`` setting, a collection
+  holding accepted fields that the source no longer lists fails the sample as
+  ``incomplete``: its field rules stay, so no full sync retires its values unnoticed
+  (drop a collection on purpose through ``collections``).
 * **full**: distinct values of every accepted field (a name tuple as one distinct tuple,
   stored as the full name), batch-upserted and linked under the job id. Only when every
   field was read, within ``max_values`` and the tenant cap, does one transaction retire
@@ -184,6 +187,8 @@ def _sample(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source
     names = [c.name for c in rows_source.list_collections()]
     if wanted:
         names = selected(ctype, names, [str(w) for w in wanted])
+    elif {f.collection for f in fields.accepted_fields(ctx.conn, job.scope_id, job.source_id)} - set(names):
+        raise JobFailed("incomplete")  # a listing that lost a collection must not drop its rules
     family = ctype.family
     samples: list[fields.FieldSample] = []
     rows_seen = 0

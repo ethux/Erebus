@@ -8,7 +8,10 @@ integration user with an API key. Odoo 19 and later answer the JSON-2 API
 a database is set); older versions XML-RPC ``execute_kw`` with database, login and key
 (deprecated, removed in Odoo 22). ``api`` picks one, else ``GET /web/version`` decides.
 Only ``fields_get`` and ``search_read`` are ever called (plus ``authenticate`` on
-XML-RPC): nothing is written.
+XML-RPC): nothing is written. Contacts are always listed and leads unless ``ir.model``
+says CRM is not installed; any other error while listing or reading fields is raised,
+so a failing call never passes as a missing collection (whose values a sync would then
+retire).
 
 Fields come from ``fields_get``: the known contact fields of each model (with a hint for
 the field rules) and custom ``x_`` text fields, whichever exist for the user. On
@@ -144,16 +147,22 @@ class OdooSource:
         self._positions: dict[str, str] = {}
 
     def list_collections(self) -> list[CollectionInfo]:
-        out = []
-        for model, (label, _hints) in OBJECTS.items():
-            try:
-                self.list_fields(model)
-            except ConnectorError as exc:
-                if exc.kind not in ("query", "permission"):
-                    raise
-                continue  # not installed (crm), or not readable by the integration user
-            out.append(CollectionInfo(model, label))
-        return out
+        """Contacts always; leads unless ir.model says CRM is not installed."""
+        return [CollectionInfo(model, label) for model, (label, _hints) in OBJECTS.items()
+                if model == "res.partner" or self._installed(model)]
+
+    def _installed(self, model: str) -> bool:
+        """Whether ir.model lists ``model``; a user who may not read ir.model gets ``True``
+        (the model's own read then decides). Any other error is raised."""
+        try:
+            rows = self._rpc.call("ir.model", "search_read", domain=[("model", "=", model)], fields=["model"])
+        except ConnectorError as exc:
+            if exc.kind == "permission":
+                return True
+            raise
+        if not isinstance(rows, list):
+            raise ConnectorError("query") from None
+        return any(isinstance(r, dict) and r.get("model") == model for r in rows)
 
     def list_fields(self, collection: str) -> list[FieldInfo]:
         if collection not in OBJECTS:

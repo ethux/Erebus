@@ -7,7 +7,9 @@ Pure. ``odoo_fake.FakeOdoo`` stands in for Odoo 19 (JSON-2: bearer API key,
 Without ``connectors.odoo`` nothing is sent. The API is detected from ``/web/version``
 unless the ``api`` setting names it. Collections are ``res.partner`` and ``crm.lead``
 with their fields from ``fields_get``: a company's name is the ``company`` field
-(ORGANIZATION), a person's the ``name`` field. Records include archived ones and are
+(ORGANIZATION), a person's the ``name`` field. Leads are listed unless ``ir.model`` says
+CRM is not installed; any other error while listing is raised, never read as a missing
+collection. Records include archived ones and are
 paged by id; changes are read by ``write_date, id`` from the cursor minus an overlap
 window, so a late commit is read again. A malformed cursor is expired. Odoo Online is
 paced at one call per second; a 429 slows down, then reschedules. A wrong key is an
@@ -198,12 +200,30 @@ def _check_failures(respx_mock, version):
           err is not None and err.kind == "auth" and "wrong" not in str(err))
     source = _connector(clock).connect(_settings(fake, api="json2" if version >= 19 else "xmlrpc"), {"api_key": KEY})
     check(f"Odoo {version}: a self-hosted Odoo is not paced", clock.slept == [])
+    fake.fail = {("ir.model", "search_read"): 1, ("res.partner", "fields_get"): 1}
+    fresh = _connector(clock).connect(_settings(fake, api="json2" if version >= 19 else "xmlrpc"), {"api_key": KEY})
+    err = _error(lambda: fresh.list_collections() and fresh.list_fields("res.partner"))
+    check(f"Odoo {version}: a server error while listing is raised, never read as a missing collection",
+          err is not None and err.kind == "query")
+    fake.fail = {("res.partner", "fields_get"): 1}
+    err = _error(lambda: fresh.list_fields("res.partner"))
+    check(f"Odoo {version}: ... and so is one reading a model's fields", err is not None and err.kind == "query"
+          and [c.name for c in fresh.list_collections()] == ["res.partner", "crm.lead"])
     fake.denied_models.add("crm.lead")
-    check(f"Odoo {version}: a collection the user may not read is not listed",
-          [c.name for c in source.list_collections()] == ["res.partner"])
+    check(f"Odoo {version}: a collection the user may not read is still listed",
+          [c.name for c in source.list_collections()] == ["res.partner", "crm.lead"])
     err = _error(lambda: list(source.iter_records("crm.lead")))
     check(f"Odoo {version}: reading it fails as permission, in fixed text",
           err.kind == "permission" and "Qorbel" not in str(err))
+    fake.denied_models = set()
+    fake.installed.discard("crm.lead")
+    check(f"Odoo {version}: leads are not listed when ir.model says CRM is not installed",
+          [c.name for c in source.list_collections()] == ["res.partner"])
+    fake.installed.add("crm.lead")
+    fake.denied_models.add("ir.model")
+    check(f"Odoo {version}: without access to ir.model leads are listed (their read decides)",
+          [c.name for c in source.list_collections()] == ["res.partner", "crm.lead"])
+    fake.denied_models = set()
     fake.queue = [httpx.Response(429)]
     check(f"Odoo {version}: a 429 slows down, then the read goes on",
           len(list(source.iter_records("res.partner"))) == 4 and clock.slept[-1] == 5.0)
