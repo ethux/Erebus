@@ -6,12 +6,19 @@
 up; 404 before), ``POST /xmlrpc/2/common`` (``authenticate``), ``POST /xmlrpc/2/object``
 (``execute_kw``) and ``POST /json/2/<model>/<method>`` (19 and up). It evaluates the
 domains the connector builds (``|``, ``&``, ``!`` and leaves with ``=``, ``!=``, ``<``,
-``<=``, ``>``, ``>=``), hides archived records unless ``active_test`` is false, and
-keeps every request so a test can check the connector only reads. ``queue`` holds
-responses (a 429, say) to send before the next real answer. Made-up data only.
+``<=``, ``>``, ``>=``, ``in``), hides archived records unless ``active_test`` is false,
+and keeps every request so a test can check the connector only reads.
+
+``write_date`` behaves as in Odoo: stored with microseconds, the timestamp of the
+transaction that wrote the record (every write in ``with fake.transaction():`` shares
+one), returned cut to whole seconds, compared as a datetime, NULL for some base records
+(first in a descending order). ``queue`` holds responses (a 429, say) to send before the
+next real answer; ``fail[(model, method)] = n`` makes the next ``n`` such calls fail as
+an internal server error. Made-up data only.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import xmlrpc.client
@@ -24,8 +31,8 @@ DB = "acme-zq"
 LOGIN = "erebus-sync"
 KEY = "zq" * 20  # a made-up key
 UID = 7
-_OPS = {"=": lambda a, b: a == b, "!=": lambda a, b: a != b, "<": lambda a, b: a < b, "<=": lambda a, b: a <= b,
-        ">": lambda a, b: a > b, ">=": lambda a, b: a >= b}
+STAMP = "%Y-%m-%d %H:%M:%S"
+_ORDERED = {"<": lambda a, b: a < b, "<=": lambda a, b: a <= b, ">": lambda a, b: a > b, ">=": lambda a, b: a >= b}
 
 
 def partner_fields(version: int) -> dict:
@@ -46,6 +53,21 @@ def lead_fields(version: int) -> dict:
     return {k: {"type": v, "string": k.replace("_", " ").title(), "store": True} for k, v in fields.items()}
 
 
+def _leaf(record: dict, field: str, op: str, value) -> bool:
+    actual = record.get(field)
+    if field == "write_date" and isinstance(value, str):
+        value = datetime.strptime(value, STAMP)  # Odoo compares the stored datetime
+    if value is False and field == "write_date":
+        value = None
+    if op == "in":
+        return actual in value
+    if op in ("=", "!="):
+        return (actual == value) == (op == "=")
+    if actual is None or value is None:
+        return False  # SQL: a comparison with NULL is not true
+    return _ORDERED[op](actual, value)
+
+
 def _match(domain: list, record: dict) -> bool:
     def walk(i: int) -> tuple[bool, int]:
         term = domain[i]
@@ -56,8 +78,7 @@ def _match(domain: list, record: dict) -> bool:
         if term == "!":
             value, j = walk(i + 1)
             return not value, j
-        field, op, value = term
-        return _OPS[op](record.get(field), value), i + 1
+        return _leaf(record, *term), i + 1
 
     ok, i = True, 0
     while i < len(domain):
@@ -66,27 +87,53 @@ def _match(domain: list, record: dict) -> bool:
     return ok
 
 
+def _out(field: str, value):
+    if field == "write_date":
+        return value.strftime(STAMP) if value is not None else False
+    return value
+
+
 class FakeOdoo:
     def __init__(self, version: int = 19, *, base: str = BASE) -> None:
         self.version = version
+        self.version_info: list | None = None  # what /web/version reports, when set
         self.base = base
         self.models = {"res.partner": partner_fields(version), "crm.lead": lead_fields(version)}
+        self.installed = {"res.partner", "crm.lead", "res.users.apikeys", "ir.model"}
         self.records: dict[str, dict[int, dict]] = {"res.partner": {}, "crm.lead": {}}
         self.next_id = 100
-        self.clock = 0
+        self.now = datetime(2026, 10, 4, 8, 0, 0, 123456)
+        self._tx: datetime | None = None
         self.requests: list[tuple[str, str, str]] = []  # (method, path, rpc method or "")
         self.queue: list[httpx.Response] = []
+        self.fail: dict[tuple[str, str], int] = {}
         self.key_expiry: list[str | bool] = ["2026-12-31 00:00:00"]
         self.denied_models: set[str] = set()
 
     # -- data ------------------------------------------------------------------------
-    def stamp(self) -> str:
-        """The next write_date: one second after the last, unless ``advance`` moved the clock."""
-        self.clock += 1
-        return (datetime(2026, 10, 4, 8) + timedelta(seconds=self.clock)).strftime("%Y-%m-%d %H:%M:%S")
+    def stamp(self) -> datetime:
+        """The write_date of the next write: the open transaction's timestamp, or a new
+        transaction 0.35 s after the last (so several share one second)."""
+        if self._tx is not None:
+            return self._tx
+        self.now += timedelta(microseconds=350_000)
+        return self.now
 
-    def advance(self, seconds: int) -> None:
-        self.clock += seconds
+    @contextlib.contextmanager
+    def transaction(self):
+        """Writes inside share one write_date, as one Odoo transaction (an import) does."""
+        self._tx = self.stamp()
+        try:
+            yield
+        finally:
+            self._tx = None
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+    def newest(self, model: str) -> str:
+        """The newest write_date of ``model`` as the API returns it."""
+        return max(r["write_date"] for r in self.records[model].values() if r["write_date"]).strftime(STAMP)
 
     def add(self, model: str, **values) -> int:
         self.next_id += 1
@@ -108,18 +155,25 @@ class FakeOdoo:
             rows = [r for r in rows if r.get("active", True)]
         keys = [(p.split()[0], p.split()[-1].lower() == "desc") for p in (order or "id").split(",")]
         for field, desc in reversed(keys):
-            rows.sort(key=lambda r, f=field: r[f], reverse=desc)
+            # Postgres: NULLs last ascending, first descending.
+            rows.sort(key=lambda r, f=field: (r[f] is None, r[f] if r[f] is not None else 0), reverse=desc)
         rows = rows[offset:offset + limit if limit else None]
         wanted = fields or list(self.models[model])
-        return [{"id": r["id"], **{f: r.get(f, False) for f in wanted if f != "id"}} for r in rows]
+        return [{"id": r["id"], **{f: _out(f, r.get(f, False)) for f in wanted if f != "id"}} for r in rows]
 
     def _call(self, model: str, method: str, kwargs: dict):
-        if model == "res.users.apikeys" and method == "search_read":
-            return [{"id": i + 1, "expiration_date": e} for i, e in enumerate(self.key_expiry)]
-        if model not in self.models:
-            raise LookupError(model)
+        if self.fail.get((model, method)):
+            self.fail[(model, method)] -= 1
+            raise RuntimeError("internal server error")
         if model in self.denied_models:
             raise PermissionError(model)
+        if model == "res.users.apikeys" and method == "search_read":
+            return [{"id": i + 1, "expiration_date": e} for i, e in enumerate(self.key_expiry)]
+        if model == "ir.model" and method == "search_read":
+            rows = [{"id": i + 1, "model": m} for i, m in enumerate(sorted(self.installed))]
+            return [r for r in rows if _match(list(kwargs.get("domain") or []), r)]
+        if model not in self.models or model not in self.installed:
+            raise LookupError(model)
         if method == "fields_get":
             attrs = kwargs.get("attributes") or ["type", "string", "store"]
             return {f: {a: d[a] for a in attrs if a in d} for f, d in self.models[model].items()}
@@ -135,6 +189,8 @@ class FakeOdoo:
             return self.queue.pop(0)
         if request.method == "GET" and path == "/web/version":
             self.requests.append(("GET", path, ""))
+            if self.version_info is not None:
+                return httpx.Response(200, json={"version_info": self.version_info, "version": "x"})
             if self.version < 19:
                 return httpx.Response(404, text="<html>not found</html>")
             return httpx.Response(200, json={"version_info": [self.version, 0, 0, "final", 0, ""],
@@ -159,6 +215,8 @@ class FakeOdoo:
             return httpx.Response(404, json={"name": "werkzeug.exceptions.NotFound", "message": "no model"})
         except PermissionError:
             return httpx.Response(403, json={"name": "odoo.exceptions.AccessError", "message": "Zyx Qorbel"})
+        except RuntimeError:
+            return httpx.Response(500, json={"name": "psycopg2.OperationalError", "message": "Zyx Qorbel"})
 
     def _xmlrpc(self, request, path):
         params, method = xmlrpc.client.loads(request.content)
@@ -185,12 +243,14 @@ class FakeOdoo:
             return fault(1, "Object no.such doesn't exist")
         except PermissionError:
             return fault(4, "odoo.exceptions.AccessError: Zyx Qorbel")
+        except RuntimeError:
+            return fault(1, "psycopg2.OperationalError: Zyx Qorbel")
         return httpx.Response(200, content=xmlrpc.client.dumps((result,), methodresponse=True, allow_none=True))
 
 
 def read_only(requests: list[tuple[str, str, str]]) -> bool:
     """Whether every request is one the connector may send (method and path, RPC method)."""
-    models = r"(res\.partner|crm\.lead|res\.users\.apikeys)"
+    models = r"(res\.partner|crm\.lead|res\.users\.apikeys|ir\.model)"
     allowed_json2 = re.compile(rf"/json/2/{models}/(fields_get|search_read)")
     allowed_xmlrpc = re.compile(rf"execute_kw:(fields_get|search_read):{models}")
     for method, path, rpc in requests:

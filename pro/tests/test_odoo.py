@@ -158,7 +158,7 @@ def _check_api(respx_mock, version):
     check(f"Odoo {version}: records are paged by id", len(reads) >= 3)
     cursor = source.cursor("res.partner")
     check(f"Odoo {version}: the cursor is the newest write_date when the read started",
-          cursor == "wd:" + max(r["write_date"] for r in fake.records["res.partner"].values()))
+          cursor == "wd:" + fake.newest("res.partner"))
     sample = list(source.iter_records("crm.lead", limit=1000))
     check(f"Odoo {version}: a lead reads its contact and company", sample[0].values["contact_name"]
           == "Mila Brandt-Okafor" and sample[0].values["partner_name"] == "Okafor Logistics")
