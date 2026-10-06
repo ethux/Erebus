@@ -14,9 +14,11 @@ company and a lead. Then, as that user through the worker (the worker's allow li
 names the server's address): sample, map, full sync; the known values exist (the
 company as ORGANIZATION). A renamed contact is picked up by an incremental sync, which
 retires the old name; an archived contact stays matched; a deleted one is retired by
-the next full sync. Odoo 19 is read over JSON-2 and Odoo 18 over XML-RPC. The key's
-expiry reaches the source; under the default deny list the loopback server is refused;
-a wrong key fails as ``auth``. The test's records and user are removed afterwards.
+the next full sync; 600 contacts created in one call (one transaction, so one stored
+``write_date``, more than a page) are all read by the next incremental sync. Odoo 19
+is read over JSON-2 and Odoo 18 over XML-RPC. The key's expiry reaches the source;
+under the default deny list the loopback server is refused; a wrong key fails as
+``auth``. The test's records and user are removed afterwards.
 """
 import os
 import sys
@@ -187,7 +189,6 @@ def _live(conn, dsn, pool, admin):
         check(f"{tag}: the key's expiry reaches the source",
               stored.credentials_expire_at == datetime(expiry.year, expiry.month, expiry.day, tzinfo=UTC))
 
-        time.sleep(1.1)  # write_date has one-second resolution
         admin("res.partner", "write", [ids["zyx"]], {"name": "Zyx Qorbel-Vranckx"})
         admin("res.partner", "write", [ids["ilsabet"]], {"active": False})
         inc = _run(conn, worker, scope_id, source_id, "incremental")
@@ -203,6 +204,13 @@ def _live(conn, dsn, pool, admin):
         again = _run(conn, worker, scope_id, source_id, "full")
         check(f"{tag}: ... which retires it", again.status == "done" and "Oswin Tarrq" not in
               _values(conn, kms, scope_id))
+
+        bulk = admin("res.partner", "create", [{"name": f"Zyq Bulkara{i:04d}", "ref": _MARK} for i in range(600)])
+        inc = _run(conn, worker, scope_id, source_id, "incremental")
+        values = _values(conn, kms, scope_id)
+        check(f"{tag}: 600 contacts created in one call (one write_date) are all read by the next incremental sync",
+              len(bulk) == 600 and inc.status == "done" and inc.rows_seen >= 600
+              and sum(1 for v in values if v.startswith("Zyq Bulkara")) == 600)
 
         strict = Worker(config(dsn, EREBUS_SYNC_DENIED_HOSTS=""), pool=pool, provider=kms,
                         connectors=lambda t: connector if t == "odoo" else None)

@@ -28,7 +28,8 @@ credentials decrypted (tenant key, AAD = source id).
   record it read (a deleted record's are dropped) and stores the new cursors. Entries
   left with no link retire, in the transaction that marks the job done; a failure
   retires nothing and keeps the old cursors. With no cursor, or one the source calls
-  expired, the job reads everything instead. ``max_values`` counts values read.
+  expired, the job reads everything instead. ``max_values`` counts records read, values
+  or not, and the lease is checked every ``LEASE_CHECK_EVERY`` records.
 
 The worker contract with connectors, beyond ``erebus.sources``: a database connector
 may offer ``iter_distinct_values(collection, fields, limit)`` yielding tuples in
@@ -70,6 +71,7 @@ log = logging.getLogger("erebus.sync")
 
 SAMPLE_ROWS = 1000
 UPSERT_BATCH = 2000
+LEASE_CHECK_EVERY = 500  # records: a long read without values still stops once the lease is lost
 ACTOR = "sync-worker"
 
 
@@ -311,7 +313,7 @@ def _read_records(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_
                   by_collection: dict[str, list[fields.SourceField]], since: dict[str, str] | None) -> dict:
     """Read an app source (every record, or with ``since`` the changes) and commit the result."""
     present = {c.name for c in rows_source.list_collections()} if by_collection else set()
-    seen = values = added = 0
+    seen = added = 0
     batch: list[tuple[str, str, str, str]] = []
     touched: set[tuple[str, str]] = set()
     cursors: dict[str, str] = {}
@@ -332,16 +334,16 @@ def _read_records(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_
                 else rows_source.iter_changes(collection, wanted, since[collection])
             for record in records:
                 seen += 1
+                if seen > source.max_values:
+                    raise JobFailed("incomplete")  # every record counts, so an endless read stops
+                if seen % LEASE_CHECK_EVERY == 0:
+                    ctx.lease.check()
                 record_id = str(record.record_ref)
                 touched.add((collection, record_id))
                 if record.metadata.get("deleted"):
                     continue
-                items = [(collection, record_id, value, f.label) for f in accepted
-                         if (value := _record_value(f, record.values)) is not None]
-                values += len(items)
-                if values > source.max_values:
-                    raise JobFailed("incomplete")
-                batch += items
+                batch += [(collection, record_id, value, f.label) for f in accepted
+                          if (value := _record_value(f, record.values)) is not None]
                 if len(batch) >= UPSERT_BATCH:
                     flush()
             position = rows_source.cursor(collection) if hasattr(rows_source, "cursor") else None

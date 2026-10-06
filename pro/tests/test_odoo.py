@@ -9,14 +9,16 @@ unless the ``api`` setting names it. Collections are ``res.partner`` and ``crm.l
 with their fields from ``fields_get``: a company's name is the ``company`` field
 (ORGANIZATION), a person's the ``name`` field. Leads are listed unless ``ir.model`` says
 CRM is not installed; any other error while listing is raised, never read as a missing
-collection. Records include archived ones and are
-paged by id; changes are read by ``write_date, id`` from the cursor minus an overlap
-window, so a late commit is read again. A malformed cursor is expired. Odoo Online is
+collection. Records include archived ones and are paged by id. Changes are read from the
+cursor minus an overlap window, paged by id, so a late commit is read again and a
+thousand records written in one transaction (one stored ``write_date``) end the read.
+A malformed cursor is expired. Odoo Online is
 paced at one call per second; a 429 slows down, then reschedules. A wrong key is an
 ``auth`` failure, a model the user may not read a ``permission`` one, both in fixed
 text. The integration user's key expiry is reported when it has one key. Every request
 is a read.
 """
+import itertools
 import os
 import sys
 import time
@@ -234,6 +236,22 @@ def _check_failures(respx_mock, version):
     check(f"Odoo {version}: every request was a read", read_only(fake.requests))
 
 
+def _check_same_transaction(respx_mock, version):
+    fake = FakeOdoo(version, base="https://bulk.zq.example")
+    respx_mock.route(host="bulk.zq.example").mock(side_effect=fake.handle)
+    with fake.transaction():  # an import: every record gets the same stored write_date
+        ids = {str(fake.add("res.partner", name=f"Zyq Bulkara{i:04d}")) for i in range(1200)}
+    source = _connector().connect(_settings(fake), {"api_key": KEY})
+    before = len(fake.requests)
+    got = list(itertools.islice(source.iter_changes("res.partner", ["name"], "wd:2026-10-04 07:00:00"), 5000))
+    reads = [r for r in fake.requests[before:] if "search_read" in r[2]]
+    check(f"Odoo {version}: 1,200 records written in one transaction are read once each, and the read ends",
+          len(got) == 1200 and {r.record_ref for r in got} == ids)
+    check(f"Odoo {version}: ... in three pages plus the head read", len(reads) <= 5)
+    check(f"Odoo {version}: ... and the cursor moves to that transaction",
+          source.cursor("res.partner") == "wd:" + fake.newest("res.partner"))
+
+
 def _check_forced_api(respx_mock):
     fake = FakeOdoo(19, base="https://odoo19.zq.example")
     respx_mock.route(host="odoo19.zq.example").mock(side_effect=fake.handle)
@@ -255,7 +273,8 @@ def main():
         return
     checks = [_check_license_and_settings]
     for version in (19, 18):
-        checks += [lambda m, v=version: _check_api(m, v), lambda m, v=version: _check_failures(m, v)]
+        checks += [lambda m, v=version: _check_api(m, v), lambda m, v=version: _check_failures(m, v),
+                   lambda m, v=version: _check_same_transaction(m, v)]
     for fn in [*checks, _check_forced_api]:
         with respx.mock(assert_all_called=False) as respx_mock:
             fn(respx_mock)

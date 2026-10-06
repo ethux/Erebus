@@ -127,9 +127,9 @@ def _sync(conn, dsn, kms, pool, version):
         inc = _run(conn, worker, scope_id, source_id, "incremental")
         reads = [r for r in fake.requests[before:]
                  if "search_read" in r[2] and any(m in r[1] + r[2] for m in ("res.partner", "crm.lead"))]
-        check(f"{tag}: the incremental sync reads one page of changes per collection: the two changed "
-              "contacts and, inside the overlap window, the newest record of each",
-              len(reads) == 2 and inc.rows_seen == 4)
+        check(f"{tag}: the incremental sync reads the head and one page of changes per collection: the two "
+              "changed contacts and, inside the overlap window, the newest record of each",
+              len(reads) == 4 and inc.rows_seen == 4)
         values = _values(conn, kms, scope_id)
         check(f"{tag}: an incremental sync picks up the new name", inc.status == "done"
               and "Zyx Qorbel-Vranckx" in values)

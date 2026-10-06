@@ -8,7 +8,10 @@ retires) and stores the new cursor after it commits; a deletion feed retires a d
 record's values; without one a deleted record keeps its values until the next full
 sync. An expired cursor, or none, makes the job a full sync. A failed incremental
 retires nothing and keeps the old cursor. The credential expiry a connector reports is
-stored on the source. Nothing a record holds reaches a job row or an audit event.
+stored on the source. Every record read counts toward ``max_values``, values or not, and
+a long read of records without values still checks the job's lease, so a source that
+keeps returning records cannot run forever. Nothing a record holds reaches a job row or
+an audit event.
 """
 import os
 import sys
@@ -27,6 +30,7 @@ from erebus.gateway.connectors import fields, jobs, sources
 from erebus.gateway.crypto.keyprovider import LocalKms
 from erebus.gateway.store.known_value_store import open_scope_crypto, provision_scope
 from erebus.gateway.store.scope_context import scoped
+from erebus.sync import runner
 from erebus.sync.worker import Worker
 
 _DSN = os.environ.get("EREBUS_PG_DSN", "postgresql:///erebus_gw_sync_records")
@@ -196,6 +200,63 @@ def _check_cap(conn, kms, pool):
           jobs.get_job(conn, scope_id, full.id).error == "sync incomplete")
 
 
+def _accept_name(conn, scope_id, source_id):
+    with scoped(conn, scope_id):
+        conn.execute("INSERT INTO source_fields (scope_id, source_id, collection, field, db_type, label, decision) "
+                     "VALUES (%s, %s, 'contacts', 'name', 'char', 'PERSON', 'confirmed')", (scope_id, source_id))
+    conn.commit()
+
+
+class _CountingLease:
+    """A lease that is lost at its ``limit``-th check."""
+
+    def __init__(self, limit):
+        self.limit = limit
+        self.calls = 0
+
+    def check(self):
+        self.calls += 1
+        if self.calls >= self.limit:
+            raise runner.LeaseLost()
+
+
+def _empty(count):
+    return {"contacts": {str(i): {"id": i, "name": None, "email": None, "company": None}
+                         for i in range(1, count + 1)}}
+
+
+def _check_progress(conn, kms, pool):
+    rows = _empty(10)
+    rows["contacts"]["11"] = {"id": 11, "name": "Zyx Qorbel", "email": None, "company": None}
+    app = FakeApp(rows)
+    scope_id, source_id, worker = _setup(conn, kms, pool, app, "tenant-app-progress")
+    _accept_name(conn, scope_id, source_id)
+    sources.update_source(conn, None, scope_id, source_id, max_values=5)
+    conn.commit()
+    job = _run(conn, worker, scope_id, source_id, "full")
+    check("records without values count toward max_values (an endless read stops)",
+          job.status == "failed" and job.error == "sync incomplete")
+
+    app = FakeApp(_empty(5000))
+    scope_id, source_id, _worker = _setup(conn, kms, pool, app, "tenant-app-lease")
+    _accept_name(conn, scope_id, source_id)
+    queued, _ = jobs.enqueue(conn, scope_id, source_id, "full")
+    conn.commit()
+    cfg = config(_DSN)
+    with pool.connection() as job_conn:
+        job_conn.autocommit = True
+        job = jobs.claim(job_conn, timings=cfg.timings)
+        lease = _CountingLease(4)
+        ctx = runner.Context(job_conn, kms, cfg, lambda t: app if t == APP_TYPE.id else None, lease)
+        try:
+            runner.execute(ctx, job)
+            lost = False
+        except runner.LeaseLost:
+            lost = True
+    check("a long read of records without values still checks the lease",
+          job.id == queued.id and lost and lease.calls == 4)
+
+
 def main():
     print("\n=== Record syncs of app sources ===\n")
     install_app_type()
@@ -211,6 +272,7 @@ def main():
         _check_failure(conn, kms, worker, scope_id, source_id, app)
         _check_expiry_and_audit(conn, kms, worker, scope_id, source_id, app)
         _check_cap(conn, kms, pool)
+        _check_progress(conn, kms, pool)
     finally:
         pool.close()
         conn.close()

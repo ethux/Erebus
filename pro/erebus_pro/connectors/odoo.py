@@ -17,10 +17,12 @@ Fields come from ``fields_get``: the known contact fields of each model (with a 
 the field rules) and custom ``x_`` text fields, whichever exist for the user. On
 ``res.partner`` a company's name is read as the ``company`` field (ORGANIZATION) and a
 person's as ``name``. Archived records are read too (``active_test`` off): an archived
-contact still holds a real name. A full read pages by id; the cursor is the newest
-``write_date`` when it started. A change read starts ``OVERLAP`` before the cursor and
-pages by ``write_date, id``, so a transaction that committed late is read again. Odoo
-reports no deletions: a full sync retires a deleted record's values.
+contact still holds a real name. Every read pages by id, and the cursor is the newest
+``write_date`` when the read started. A change read takes every record written since
+``OVERLAP`` before the cursor, so a transaction that committed late is read again.
+Odoo stores ``write_date`` with microseconds (one timestamp per transaction, shared by a
+whole import) but returns it cut to seconds, so it cannot page; ids can. Odoo reports
+no deletions: a full sync retires a deleted record's values.
 
 Odoo Online (``*.odoo.com``) allows about one call per second and no parallel calls,
 so calls there are paced; a 429 slows down, then reschedules the job. The integration
@@ -250,30 +252,22 @@ class OdooSource:
             yield self._record(collection, row, wanted)
 
     def iter_changes(self, collection: str, fields: list[str], cursor: str) -> Iterator[SourceRecord]:
-        """Records written since ``cursor`` minus ``OVERLAP``, by ``write_date, id``."""
+        """Records written since ``cursor`` minus ``OVERLAP``, paged by id; the new cursor
+        is the newest write_date when the read started."""
         match = _CURSOR.fullmatch(cursor) if isinstance(cursor, str) else None
         if match is None:
             raise CursorExpired()
-        since = match.group(1)
-        start = overlap_since(_parse_stamp(since), OVERLAP).strftime(_STAMP)
+        start = overlap_since(_parse_stamp(match.group(1)), OVERLAP).strftime(_STAMP)
         wanted, asked = self._odoo_fields(collection, fields)
-        asked = sorted(set(asked) | {"write_date"})
-        newest = since
+        head = self._head(collection)
 
-        def fetch(after: tuple[str, int] | None, count: int) -> list[dict]:
-            domain: list = [("write_date", ">=", start)]
-            if after is not None:
-                domain = ["|", ("write_date", ">", after[0]), "&", ("write_date", "=", after[0]),
-                          ("id", ">", after[1])]
-            return self._search(collection, domain, asked, count, "write_date asc, id asc")
+        def fetch(after: int | None, count: int) -> list[dict]:
+            domain: list = [("write_date", ">=", start)] + ([] if after is None else [("id", ">", after)])
+            return self._search(collection, domain, asked, count, "id asc")
 
-        for row in keyset_pages(fetch, lambda r: (r.get("write_date"), r["id"]), PAGE):
-            stamp = row.get("write_date")
-            if not isinstance(stamp, str) or not _CURSOR.fullmatch("wd:" + stamp):
-                raise ConnectorError("query") from None
-            newest = max(newest, stamp)
+        for row in keyset_pages(fetch, lambda r: r["id"], PAGE):
             yield self._record(collection, row, wanted)
-        self._positions[collection] = "wd:" + newest
+        self._positions[collection] = max(head, cursor)
 
     def cursor(self, collection: str) -> str | None:
         return self._positions.get(collection)
