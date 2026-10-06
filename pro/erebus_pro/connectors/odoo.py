@@ -226,8 +226,9 @@ class OdooSource:
         return rows
 
     def _head(self, collection: str) -> str:
-        """The cursor for "now": the newest write_date of the collection."""
-        rows = self._search(collection, [], ["write_date"], 1, "write_date desc, id desc")
+        """The cursor for "now": the newest write_date of the collection. Records without
+        one (some of Odoo's own) are left out: a descending order puts them first."""
+        rows = self._search(collection, [("write_date", "!=", False)], ["write_date"], 1, "write_date desc, id desc")
         stamp = rows[0].get("write_date") if rows else None
         return "wd:" + (stamp if isinstance(stamp, str) and _CURSOR.fullmatch("wd:" + stamp) else _EPOCH)
 

@@ -9,7 +9,8 @@ unless the ``api`` setting names it. Collections are ``res.partner`` and ``crm.l
 with their fields from ``fields_get``: a company's name is the ``company`` field
 (ORGANIZATION), a person's the ``name`` field. Leads are listed unless ``ir.model`` says
 CRM is not installed; any other error while listing is raised, never read as a missing
-collection. Records include archived ones and are paged by id. Changes are read from the
+collection. Records include archived ones and are paged by id. The cursor is the newest
+``write_date`` (records without one ignored) when a read starts. Changes are read from the
 cursor minus an overlap window, paged by id, so a late commit is read again and a
 thousand records written in one transaction (one stored ``write_date``) end the read.
 A malformed cursor is expired. ``saas~19`` and later is JSON-2. Odoo Online is
@@ -128,6 +129,8 @@ def _check_api(respx_mock, version):
     fake = FakeOdoo(version)
     respx_mock.route(host="acme-zq.odoo.com").mock(side_effect=fake.handle)
     ids = _seed(fake)
+    ids["base"] = fake.add("res.partner", name="YourCompany Zq", is_company=True)
+    fake.records["res.partner"][ids["base"]]["write_date"] = None  # as Odoo's own first partner
     clock = _Clock()
     source = _connector(clock).connect(_settings(fake), {"api_key": KEY})
     api = "JSON-2" if version >= 19 else "XML-RPC"
@@ -161,8 +164,8 @@ def _check_api(respx_mock, version):
     reads = [r for r in fake.requests if "search_read" in r[2] and "apikeys" not in r[1] + r[2]]
     check(f"Odoo {version}: records are paged by id", len(reads) >= 3)
     cursor = source.cursor("res.partner")
-    check(f"Odoo {version}: the cursor is the newest write_date when the read started",
-          cursor == "wd:" + fake.newest("res.partner"))
+    check(f"Odoo {version}: the cursor is the newest write_date when the read started, a record without one "
+          "ignored", cursor == "wd:" + fake.newest("res.partner"))
     sample = list(source.iter_records("crm.lead", limit=1000))
     check(f"Odoo {version}: a lead reads its contact and company", sample[0].values["contact_name"]
           == "Mila Brandt-Okafor" and sample[0].values["partner_name"] == "Okafor Logistics")
