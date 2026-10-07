@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""The BigQuery connector at the client boundary (spec 015 "Warehouse connectors", D9, D10).
+"""The BigQuery connector at the client boundary.
 
 On the goccy BigQuery emulator (``EREBUS_TEST_BIGQUERY_EMULATOR``; skipped without it
 unless ``EREBUS_REQUIRE_BIGQUERY=1``). Every query bills at least 10 MB, so the distinct
@@ -303,7 +303,7 @@ def _check_workload_identity():
 
 
 def main():
-    print("\n=== BigQuery connector (spec 015) ===\n")
+    print("\n=== BigQuery connector ===\n")
     _check_egress_exceptions()
     _check_byte_cap()
     _check_quota()

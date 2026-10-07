@@ -1,4 +1,4 @@
-"""The shared source connector contract suite (spec 015 SC-6, SC-9); not a test module itself.
+"""The shared source connector contract suite; not a test module itself.
 
 ``run(backend_cls)`` puts one connector through the same checks, whatever its family:
 it lists collections (user schemas only) and fields (db type, nullable, primary key),

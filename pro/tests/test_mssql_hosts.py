@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""MSSQL hosts and the address pymssql dials (spec 015 "Security": network).
+"""MSSQL hosts and the address pymssql dials.
 
 FreeTDS takes the address to dial and the TLS settings from the connector's private
 configuration section for ``host``; a host FreeTDS could not match to that section would
@@ -219,7 +219,7 @@ def _check_azure_zones(ca):
 
 
 def main():
-    print("\n=== MSSQL hosts and the address pymssql dials (spec 015) ===\n")
+    print("\n=== MSSQL hosts and the address pymssql dials ===\n")
     try:
         import pymssql  # noqa: F401
     except ImportError:

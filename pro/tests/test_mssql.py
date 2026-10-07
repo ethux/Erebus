@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""The MSSQL / Azure SQL connector at the driver boundary and on a live server (spec 015
-"Warehouse connectors", "Security").
+"""The MSSQL / Azure SQL connector at the driver boundary and on a live server.
 
 Two drivers, chosen by ``auth``. SQL logins (the default) go through pymssql (FreeTDS),
 which ships in the image. Entra service principals go through Microsoft's mssql-python,
@@ -535,7 +534,7 @@ def _check_live(b):
 
 
 def main():
-    print("\n=== MSSQL / Azure SQL connector (spec 015) ===\n")
+    print("\n=== MSSQL / Azure SQL connector ===\n")
     try:
         import pymssql  # noqa: F401
     except ImportError:

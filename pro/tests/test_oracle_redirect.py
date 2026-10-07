@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""An Oracle listener's redirect against the sync worker (spec 015 "Security": network; SC-9).
+"""An Oracle listener's redirect against the sync worker.
 
 python-oracledb in thin mode follows a listener's REDIRECT before it signs in: it dials
 whatever address the listener sends (a RAC SCAN listener does so by design). A fake
@@ -199,7 +199,7 @@ def _check_guard():
 
 
 def main():
-    print("\n=== Oracle listener redirects against the sync worker (spec 015) ===\n")
+    print("\n=== Oracle listener redirects against the sync worker ===\n")
     try:
         import oracledb  # noqa: F401
     except ImportError:

@@ -1,4 +1,4 @@
-"""The sync worker's connect guard (spec 015 "Security": network; SC-9).
+"""The sync worker's connect guard.
 
 Pure: local listeners only. The worker installs an audit hook that sees every Python
 socket connect. While a job's connector runs (``Guard.call``), a type that dials a host
@@ -401,7 +401,7 @@ def _check_guarded_source():
 
 
 def main():
-    print("\n=== Sync worker connect guard (spec 015) ===\n")
+    print("\n=== Sync worker connect guard ===\n")
     _check_outside_jobs()
     _check_host_types()
     _check_vendor_types()

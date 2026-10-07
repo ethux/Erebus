@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""The license gate every Pro connector passes first (spec D6, D7).
+"""The license gate every Pro connector passes first.
 
 Core never checks a license: a Pro connector raises ``LicenseRequired`` itself when the
 license lacks ``connectors.<type>`` (no key, another feature, expired past grace). The

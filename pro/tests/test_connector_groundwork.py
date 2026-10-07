@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""How Pro connector types and connectors plug into core (spec 015 D6, D7, "Architecture").
+"""How Pro connector types and connectors plug into core.
 
 Pure. erebus-pro declares its types (Snowflake, BigQuery: Pro warehouses that take an
 account or project id, never a host or DSN; Databricks: a workspace host the connector
@@ -140,7 +140,7 @@ def _check_gate():
               exc is not None and str(exc) == f"requires Erebus Pro (feature {feature})")
         check(f"{case}: before reading a credential", not probe.touched)
     check("a licensed connector connects", Dummy(licensed([feature])).connect({}, {}) == "connected")
-    check("a license in its grace period still syncs (D7: license problems never weaken filtering)",
+    check("a license in its grace period still syncs (license problems never weaken filtering)",
           Dummy(licensed([feature], expires_in=-60)).connect({}, {}) == "connected")
     check("the connector id is its type", Dummy().connector_id() == "snowflake")
 
@@ -160,7 +160,7 @@ def _check_gate():
 
 
 def main():
-    print("\n=== Pro connector groundwork (spec 015 D6) ===\n")
+    print("\n=== Pro connector groundwork ===\n")
     _check_types()
     _check_data_only()
     _check_gate()

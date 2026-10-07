@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""The Oracle connector at the driver boundary and on a live database (spec 015
-"Warehouse connectors", "Security").
+"""The Oracle connector at the driver boundary and on a live database.
 
 python-oracledb in thin mode. The connector dials the address the sync worker checked
 (``hostaddr``) and checks TLS against ``host``: by default TCPS with the certificate
@@ -441,7 +440,7 @@ def _check_live(b):
 
 
 def main():
-    print("\n=== Oracle connector (spec 015) ===\n")
+    print("\n=== Oracle connector ===\n")
     try:
         import oracledb  # noqa: F401
     except ImportError:

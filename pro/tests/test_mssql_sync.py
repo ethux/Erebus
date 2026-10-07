@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""An MSSQL source through the real sync worker and its network policy (spec 015
-"Security": network; SC-9).
+"""An MSSQL source through the real sync worker and its network policy.
 
 SQL Server is a self-hosted database, so the worker treats it like Postgres and MySQL: it
 resolves the source's host once, refuses an address on its deny list (by default
@@ -129,7 +128,7 @@ def _run(dsn, b):
 
 
 def main():
-    print("\n=== MSSQL source through the sync worker and its network policy (spec 015) ===\n")
+    print("\n=== MSSQL source through the sync worker and its network policy ===\n")
     b = MssqlBackend()
     reason = b.unavailable()
     if reason is None and connector_types.get("mssql") is None:

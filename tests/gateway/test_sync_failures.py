@@ -1,4 +1,4 @@
-"""Sync worker failures on Postgres (spec 015 "Sync behaviour": failure; SC-3, SC-4, SC-9).
+"""Sync worker failures on Postgres.
 
 Live Postgres on its own database; in-memory connectors stand in for sources. A full
 sync that fails midway, passes max_values or the tenant cap, misses an accepted column,
@@ -111,7 +111,7 @@ def _check_no_retire(env):
     check("a source failing midway re-queues the job", job.status == "queued" and job.attempts == 1)
     check("the retry waits for the first backoff step",
           job.not_before > datetime.now(UTC) + timedelta(seconds=30) and job.error == "source unreachable")
-    check("a failed sync retires nothing (SC-3)", "Zyx Qorbel" in env.values())
+    check("a failed sync retires nothing", "Zyx Qorbel" in env.values())
     env.settle(job.id)
     del env.pg.fail[("distinct", "leads")]
 
@@ -121,7 +121,7 @@ def _check_no_retire(env):
     job = env.run()
     check("passing max_values fails the sync as incomplete", job.status == "failed" and job.error == "sync incomplete")
     check("an incomplete sync flags the source", env.status() == "needs_attention")
-    check("a capped sync retires nothing (SC-3)", "Zyx Qorbel" in env.values())
+    check("a capped sync retires nothing", "Zyx Qorbel" in env.values())
     with scoped(env.conn, env.scope):
         env.conn.execute("UPDATE sources SET max_values = 1000000 WHERE id = %s", (env.source,))
     env.conn.commit()
@@ -164,7 +164,7 @@ def _check_no_retire(env):
 
 
 def _check_bump(env):
-    """Values an attempt committed reach the replicas even when that attempt failed (SC-1)."""
+    """Values an attempt committed reach the replicas even when that attempt failed."""
     batch = runner.UPSERT_BATCH
     runner.UPSERT_BATCH = 1  # commit each value as its own batch
     rows = env.pg.tables["customers"].rows
@@ -205,7 +205,7 @@ def _check_bump(env):
 
 
 def _check_capped_tuples(env):
-    """A name tuple the query returned but that gives no value still counts toward max_values (SC-3)."""
+    """A name tuple the query returned but that gives no value still counts toward max_values."""
     saved = env.pg.tables
     fields = [Field("id", "integer", True), Field("first_name"), Field("last_name")]
     people = [{"id": i, "first_name": f, "last_name": last}
@@ -281,7 +281,7 @@ def _check_retries(env):
     check("any other error is an internal error, retried", job.status == "queued" and job.error == "internal error")
     log = stream.getvalue()
     check("the worker logged the failure", "internal" in log)
-    check("the log holds no value, password or DSN (SC-4)",
+    check("the log holds no value, password or DSN",
           "Qorbel" not in log and "Pw-Zq-77" not in log and "postgresql://" not in log)
     env.settle(job.id)
     del env.pg.fail[("connect", "*")]
@@ -291,7 +291,7 @@ def _check_policy(env):
     worker = env.worker(EREBUS_SYNC_DENIED_HOSTS="")  # the defaults: loopback and the DB host
     before = len(env.pg.connects)
     job = env.run(worker=worker)
-    check("the worker refuses a loopback source by default (SC-9)",
+    check("the worker refuses a loopback source by default",
           job.status == "failed" and job.error == "source address is not allowed")
     check("no connector ran for a denied host", len(env.pg.connects) == before)
     check("a denied host flags the source", env.status() == "needs_attention")
@@ -318,7 +318,7 @@ def _check_policy(env):
 
     with scoped(env.conn, env.scope):
         rows = env.conn.execute("SELECT error FROM sync_jobs WHERE scope_id = %s", (env.scope,)).fetchall()
-    check("no job row holds a value or credential (SC-4)",
+    check("no job row holds a value or credential",
           all(r[0] is None or ("Qorbel" not in r[0] and "Pw-Zq" not in r[0]) for r in rows))
 
 
@@ -424,7 +424,7 @@ def _check_connect_guard(env):
                   job.status == "done" and len(accepted) == 1)
             check("model review reaches the GLiNER daemon's Unix socket during a sample job", bool(asked))
             job = run(_Dialing({"notes": notes}, ("127.0.0.1", other)), "full")
-            check("a connector dialling another address (a redirect) fails the job as denied (SC-9)",
+            check("a connector dialling another address (a redirect) fails the job as denied",
                   job.status == "failed" and job.attempts == 1 and job.error == "source address is not allowed")
             check("... the redirect target is never reached", not redirected)
             check("... and the source is flagged", env.status(src) == "needs_attention")
@@ -433,7 +433,7 @@ def _check_connect_guard(env):
 
 
 def main():
-    print("\n=== Sync worker failures (spec 015) ===\n")
+    print("\n=== Sync worker failures ===\n")
     conn = fresh_db("erebus_gw_sync_failures")
     pool = ConnectionPool(_DSN, min_size=1, max_size=4, open=True)
     try:

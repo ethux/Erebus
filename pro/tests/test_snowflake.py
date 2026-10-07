@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""The Snowflake connector at the driver boundary (spec 015 "Warehouse connectors", D10).
+"""The Snowflake connector at the driver boundary.
 
 On fakesnow. A service user signs in with its key pair (JWT): the connector hands the
 driver the account id, user and the key as DER bytes, never a password or host; an
@@ -124,7 +124,7 @@ def _check_settings(b):
 
 
 def main():
-    print("\n=== Snowflake connector (spec 015) ===\n")
+    print("\n=== Snowflake connector ===\n")
     b = SnowflakeBackend()
     reason = b.unavailable()
     if reason:

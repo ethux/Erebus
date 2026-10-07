@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""A Pro warehouse source through the real sync worker (spec 015 D6, D7, D9).
+"""A Pro warehouse source through the real sync worker.
 
 Live Postgres on a throwaway database; the Snowflake connector on fakesnow. Licensed,
 the sample maps the warehouse columns (email and full name auto-accepted, the name parts
@@ -126,14 +126,14 @@ def _run(dsn, b):
               and failed.error == f"requires Erebus Pro (feature {_FEATURE})")
         check("... and flags the source for an admin",
               sources.get_source(conn, scope_id, source_id).status == "needs_attention")
-        check("every value already synced keeps matching (D7)", _values(conn, kms, scope_id) == before)
+        check("every value already synced keeps matching", _values(conn, kms, scope_id) == before)
     finally:
         pool.close()
         conn.close()
 
 
 def main():
-    print("\n=== Pro warehouse source through the sync worker (spec 015 D7) ===\n")
+    print("\n=== Pro warehouse source through the sync worker ===\n")
     b = SnowflakeBackend()
     reason = b.unavailable()
     if reason is None and connector_types.get("snowflake") is None:

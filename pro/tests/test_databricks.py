@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""The Databricks connector at the driver boundary (spec 015 "Warehouse connectors", D10).
+"""The Databricks connector at the driver boundary.
 
 No emulator exists, so a fake ``databricks.sql.connect`` and token endpoint record what
 the connector sends (see ``databricks_backend``). A service principal signs in by OAuth
@@ -223,7 +223,7 @@ def _check_license(b):
 
 
 def main():
-    print("\n=== Databricks connector (spec 015) ===\n")
+    print("\n=== Databricks connector ===\n")
     b = DatabricksBackend()
     reason = b.unavailable()
     if reason:

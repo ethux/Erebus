@@ -1,5 +1,4 @@
-"""What a sync job's connector may connect to, checked at every connect (spec 015
-"Security": network; SC-9).
+"""What a sync job's connector may connect to, checked at every connect.
 
 ``netpolicy`` checks a source's host before its connector runs, but a driver can be sent
 elsewhere afterwards: an Oracle listener redirects the client before sign-in (RAC SCAN

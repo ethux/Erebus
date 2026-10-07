@@ -1,8 +1,8 @@
-"""Pure rules for sync jobs and known values (spec 015 "Sync behaviour", "Failure").
+"""Pure rules for sync jobs and known values.
 
 No database, config or connector import: the job store and the worker apply these, and
 the pure tests check them directly. Every error a job row can carry is a fixed text
-from ``ERROR_TEXT`` (SC-4); only a well-formed LicenseRequired or DriverMissing message
+from ``ERROR_TEXT``; only a well-formed LicenseRequired or DriverMissing message
 is kept as is.
 """
 from __future__ import annotations
@@ -38,7 +38,7 @@ _SKIPPED = frozenset({"paused"})
 _DETAIL_TEXT = {"license": re.compile(r"requires Erebus Pro \(feature [a-z0-9_.-]{1,64}\)"),
                 "driver": re.compile(r"requires the [a-z0-9_.-]{1,64}\[[a-z0-9_-]{1,32}\] extra")}
 
-# The value rules applied at upsert live with the field rules (spec 015 D2).
+# The value rules applied at upsert live with the field rules.
 MIN_VALUE_CHARS = field_rules.MIN_VALUE_CHARS
 clean_value = field_rules.clean_value
 reject_reason = field_rules.reject_value

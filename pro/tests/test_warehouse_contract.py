@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Elastic-2.0
 # Copyright (c) 2026 ETHUX
-"""The Pro warehouse and database connectors through the shared contract suite (spec 015
-SC-6, SC-9, D6, D9).
+"""The Pro warehouse and database connectors through the shared contract suite.
 
 The same checks as the free connectors (``tests/gateway/connector_contract.py``): each
 lists collections and fields from the catalog, streams records and distinct values
@@ -55,7 +54,7 @@ def _registration():
 
 
 def main():
-    print("\n=== Pro connector contract (spec 015 SC-6) ===\n")
+    print("\n=== Pro connector contract ===\n")
     _registration()
     for backend in (SnowflakeBackend, BigQueryBackend, OracleBackend, DatabricksBackend, MssqlBackend):
         connector_contract.run(backend)
