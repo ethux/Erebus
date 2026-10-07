@@ -5,7 +5,7 @@ All notable changes to Erebus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0-beta.1] - 2026-10-07
 
 ### Added
 - Erebus Pro: Snowflake, BigQuery, Databricks, Oracle and MSSQL / Azure SQL connectors
@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their syncs stop and values already synced keep matching.
 - Erebus Pro: Odoo connector (feature `connectors.odoo`). Reads contacts, companies and
   leads as an integration user with an API key: over JSON-2 on Odoo 19 and later, over
-  XML-RPC on Odoo 17 and 18. Companies sync as organizations and archived contacts keep
+  XML-RPC on earlier versions. Companies sync as organizations and archived contacts keep
   matching. With `sync.schedule`, an hourly incremental sync reads only changed records,
   so a renamed contact's old name stops matching then; a deleted contact's values retire
   at the next full sync. On Odoo Online the worker makes at most one call per second and
@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case) made the sample finish with no fields and no error. It now fails with `source
   settings are not valid`; Postgres entries match as Postgres reads an unquoted name
   (lower case) and SQLite entries in any case.
+- Connectors: when a re-sample no longer found a table that held accepted fields (a
+  revoked permission or a renamed table), its field rules were dropped and the next
+  full sync retired its values, so they stopped matching. The sample now fails and the
+  source needs attention. To drop a table on purpose, leave it out of `collections`.
 
 ## [1.2.0-beta.2] - 2026-10-04
 

@@ -8,7 +8,7 @@ Privacy-first PII filter for AI code editors. Tokenizes sensitive data before it
 
 ## Project status
 
-The current release is v1.2.0-beta.2 (see the [CHANGELOG](CHANGELOG.md)). Erebus is still young software. Expect possible
+The current release is v1.3.0-beta.1 (see the [CHANGELOG](CHANGELOG.md)). Erebus is still young software. Expect possible
 bugs, editor-specific edge cases, and cases where unusual payloads need another
 pass. Keep a human review loop around sensitive workflows and please open an
 issue if something looks off.
