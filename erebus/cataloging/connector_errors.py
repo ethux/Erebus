@@ -2,8 +2,10 @@
 
 A connector wraps every driver or HTTP failure in ``ConnectorError(kind)``, raised
 ``from None``: its message is the class's fixed text, never a host, DSN, credential or
-value. ``LicenseRequired`` is raised by Pro connectors without their license feature.
-Pure: no store, config or gateway import.
+value. ``LicenseRequired`` is raised by Pro connectors without their license feature,
+``DriverMissing`` by one whose optional driver extra is not installed.
+``CursorExpired`` tells the worker an incremental cursor can no longer be used, so it
+reads everything instead. Pure: no store, config or gateway import.
 """
 from __future__ import annotations
 
@@ -16,8 +18,13 @@ CONNECTOR_TEXT = {
     "query": "query failed",
     "limit": "source rate limit reached",
     "incomplete": "sync incomplete",
+    # A setting only the connector can check (a malformed warehouse account id, say).
+    "settings": "source settings are not valid",
+    # The worker's host lists refuse the address (or no worker check is installed).
+    "denied": "source address is not allowed",
 }
 _FEATURE = re.compile(r"[a-z0-9_.-]{1,64}")
+_REQUIREMENT = re.compile(r"[a-z0-9_.-]{1,64}\[[a-z0-9_-]{1,32}\]")
 
 
 class ConnectorError(Exception):
@@ -25,7 +32,8 @@ class ConnectorError(Exception):
 
     ``reset_at`` (``limit`` only) is when the source's limit resets, if it said so: a
     ``datetime`` or an ISO-8601 string. Use ``incomplete`` when a query was capped or
-    values were skipped, so the sync retires nothing.
+    values were skipped, so the sync retires nothing, and ``settings`` for a setting
+    value the connector refuses (fatal: an admin must fix it).
     """
 
     def __init__(self, kind: str, *, reset_at=None) -> None:
@@ -44,3 +52,22 @@ class LicenseRequired(PermissionError):
             raise ValueError("malformed license feature")
         super().__init__(f"requires Erebus Pro (feature {feature})")
         self.feature = feature
+
+
+class DriverMissing(RuntimeError):
+    """The driver a source needs comes from an optional extra (``package[extra]``) that is
+    not installed; the message, naming it, is stored as is."""
+
+    def __init__(self, requirement: str) -> None:
+        if not _REQUIREMENT.fullmatch(requirement):
+            raise ValueError("malformed requirement")
+        super().__init__(f"requires the {requirement} extra")
+        self.requirement = requirement
+
+
+class CursorExpired(Exception):
+    """An app source cannot read changes since the cursor it was given (expired, from an
+    older connector version, or malformed); the worker runs a full sync instead."""
+
+    def __init__(self) -> None:
+        super().__init__("sync cursor expired")

@@ -248,7 +248,7 @@ def fail(
     *,
     timings: policy.JobTimings,
     reset_at: datetime | None = None,
-    license_message: str | None = None,
+    detail: str | None = None,
 ) -> policy.Outcome | None:
     """Record a failed attempt per ``policy.failure_outcome``; ``None`` if the lease was lost.
 
@@ -262,7 +262,7 @@ def fail(
         if row is None:
             return None
         out = policy.failure_outcome(error_class, attempts=row[0], limited_since=row[1], now=row[2],
-                                     timings=timings, reset_at=reset_at, license_message=license_message)
+                                     timings=timings, reset_at=reset_at, detail=detail)
         _end(conn, job.id, job.scope_id, job.source_id, out)
     return out
 

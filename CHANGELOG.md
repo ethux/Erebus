@@ -5,6 +5,48 @@ All notable changes to Erebus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0-beta.1] - 2026-10-07
+
+### Added
+- Erebus Pro: Snowflake, BigQuery, Databricks, Oracle and MSSQL / Azure SQL connectors
+  (features `connectors.snowflake`, `connectors.bigquery`, `connectors.databricks`,
+  `connectors.oracle` and `connectors.mssql`). Snowflake signs in with a service user's
+  key pair; BigQuery with a service-account key or the worker's attached identity, reads
+  each table in one query and honours `max_bytes_billed`; Databricks with a service
+  principal (OAuth machine-to-machine) and reads each table in one query; Oracle with a
+  password or an mTLS wallet, needs no Oracle Client and dials the address the sync
+  worker checked, like Postgres; MSSQL with a SQL login, or with an Entra service
+  principal after `pip install 'erebus-pro[mssql-entra]'` (Microsoft's ODBC driver, under
+  Microsoft's license terms), dials the checked address and reads each table in one
+  query. The drivers ship in the image, except the Entra one. When the license lapses
+  their syncs stop and values already synced keep matching.
+- Erebus Pro: Odoo connector (feature `connectors.odoo`). Reads contacts, companies and
+  leads as an integration user with an API key: over JSON-2 on Odoo 19 and later, over
+  XML-RPC on earlier versions. Companies sync as organizations and archived contacts keep
+  matching. With `sync.schedule`, an hourly incremental sync reads only changed records,
+  so a renamed contact's old name stops matching then; a deleted contact's values retire
+  at the next full sync. On Odoo Online the worker makes at most one call per second and
+  waits out rate limits. The API key's expiry shows as `credentials_expire_at`.
+
+### Changed
+- During a sync the worker refuses connections outside the addresses its host lists
+  approve, also after a server redirect (MSSQL's native drivers aside; see the README).
+- Connectors: array, map and struct columns (a Postgres `text[]`, say) are ignored as
+  non-text instead of waiting for review: they never hold one value to match.
+
+### Fixed
+- Connectors: a Postgres column with a case- or accent-insensitive (nondeterministic)
+  collation, or a SQLite `NOCASE` column, kept one spelling of values such as "Müller"
+  and "Muller", so the other never became a known value. Syncs now read every spelling.
+- Connectors: a `collections` entry that named no table (a typo, or a name in the wrong
+  case) made the sample finish with no fields and no error. It now fails with `source
+  settings are not valid`; Postgres entries match as Postgres reads an unquoted name
+  (lower case) and SQLite entries in any case.
+- Connectors: when a re-sample no longer found a table that held accepted fields (a
+  revoked permission or a renamed table), its field rules were dropped and the next
+  full sync retired its values, so they stopped matching. The sample now fails and the
+  source needs attention. To drop a table on purpose, leave it out of `collections`.
+
 ## [1.2.0-beta.2] - 2026-10-04
 
 ### Security

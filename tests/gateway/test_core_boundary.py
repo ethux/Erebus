@@ -5,8 +5,10 @@ Walks the AST of every ``.py`` file under ``erebus/`` and fails on: an import of
 takes), a read of an ``EREBUS_LICENSE_*`` variable (any string constant naming one),
 and any use of the entitlements Pro attaches to the app (``erebus_entitlements``).
 Pro gates itself; core only offers seams. The reverse holds too: ``pro/erebus_pro``
-imports no ``erebus`` module and reaches core only through the facade, the worker hooks
-and the schema entry point. Pure: parses source, imports nothing.
+reaches core only through the facade, the worker hooks, the schema entry point and the
+pure connector contract (``erebus.cataloging.sources``, ``connector_errors``,
+``connector_types``: a Pro connector returns its records and raises its errors in core's
+terms); it imports no other ``erebus`` module. Pure: parses source, imports nothing.
 """
 from __future__ import annotations
 
@@ -62,8 +64,13 @@ def violations(source: str) -> list[str]:
     return found
 
 
+# The connector contract: pure modules (no store, config or gateway import) Pro connectors build on.
+CONTRACT = frozenset({"erebus.cataloging.sources", "erebus.cataloging.connector_errors",
+                      "erebus.cataloging.connector_types"})
+
+
 def _is_core_module(name: str) -> bool:
-    return name == "erebus" or name.startswith("erebus.")
+    return (name == "erebus" or name.startswith("erebus.")) and name not in CONTRACT
 
 
 def core_imports(source: str) -> list[str]:
@@ -81,6 +88,12 @@ def _check_pro_side():
     check("flags `from erebus.gateway import catalog` in Pro", core_imports("from erebus.gateway import catalog\n"))
     check("flags `import erebus.sync.worker` in Pro", core_imports("import erebus.sync.worker\n"))
     check("ignores Pro's own relative imports", not core_imports("from .license import from_env\n"))
+    check("lets Pro build on the connector contract",
+          not core_imports("from erebus.cataloging.connector_errors import LicenseRequired\n"
+                           "from erebus.cataloging.sources import FieldInfo\n"
+                           "from erebus.cataloging.connector_types import ConnectorType\n"))
+    check("... but not on the rest of cataloging", core_imports("from erebus.cataloging import store\n")
+          and core_imports("from erebus.cataloging.connectors import _sql\n"))
     files = sorted(p for p in _PRO.rglob("*.py") if "__pycache__" not in p.parts)
     check("the scan covers the Pro package", len(files) >= 5)
     bad = {str(p.relative_to(_PRO.parent)): core_imports(p.read_text(encoding="utf-8")) for p in files}

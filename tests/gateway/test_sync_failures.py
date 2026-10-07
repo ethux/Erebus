@@ -1,4 +1,4 @@
-"""Sync worker failures on Postgres (spec 015 "Sync behaviour": failure; SC-3, SC-4, SC-9).
+"""Sync worker failures on Postgres.
 
 Live Postgres on its own database; in-memory connectors stand in for sources. A full
 sync that fails midway, passes max_values or the tenant cap, misses an accepted column,
@@ -7,12 +7,20 @@ does. Failures follow the policy: unreachable retries with backoff and fails aft
 last step, auth and license fail unretried and flag the source, a limit waits for its
 reset without counting an attempt, anything else is an internal error. The worker
 refuses a denied host, bad settings and an unknown type before any connector runs, and
-skips a paused source. Job rows and logs carry fixed text only.
+skips a paused source. A ``collections`` entry the source does not list fails the sample
+as bad settings; an entry matches as written or as the source reads an unquoted name. A
+connector that dials anything but the checked address (a redirect, say) fails the job as
+denied; model review and the worker's own database connections are never refused. Job
+rows and logs carry fixed text only.
 """
+import contextlib
 import io
 import logging
 import os
+import socket
 import sys
+import tempfile
+import threading
 from datetime import UTC, datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -22,9 +30,10 @@ from helpers import fresh_db
 from psycopg_pool import ConnectionPool
 from sync_fakes import FakeConnector, Field, Table, config, customers, lookup
 
-from erebus.cataloging.sources import ConnectorError, LicenseRequired
+from erebus.cataloging.connector_types import ConnectorType
+from erebus.cataloging.sources import ConnectorError, DriverMissing, LicenseRequired
 from erebus.gateway import catalog
-from erebus.gateway.connectors import jobs, sources
+from erebus.gateway.connectors import fields, jobs, sources
 from erebus.gateway.crypto.keyprovider import LocalKms
 from erebus.gateway.store import catalog_versions
 from erebus.gateway.store.known_value_store import open_scope_crypto, provision_scope
@@ -102,7 +111,7 @@ def _check_no_retire(env):
     check("a source failing midway re-queues the job", job.status == "queued" and job.attempts == 1)
     check("the retry waits for the first backoff step",
           job.not_before > datetime.now(UTC) + timedelta(seconds=30) and job.error == "source unreachable")
-    check("a failed sync retires nothing (SC-3)", "Zyx Qorbel" in env.values())
+    check("a failed sync retires nothing", "Zyx Qorbel" in env.values())
     env.settle(job.id)
     del env.pg.fail[("distinct", "leads")]
 
@@ -112,7 +121,7 @@ def _check_no_retire(env):
     job = env.run()
     check("passing max_values fails the sync as incomplete", job.status == "failed" and job.error == "sync incomplete")
     check("an incomplete sync flags the source", env.status() == "needs_attention")
-    check("a capped sync retires nothing (SC-3)", "Zyx Qorbel" in env.values())
+    check("a capped sync retires nothing", "Zyx Qorbel" in env.values())
     with scoped(env.conn, env.scope):
         env.conn.execute("UPDATE sources SET max_values = 1000000 WHERE id = %s", (env.source,))
     env.conn.commit()
@@ -155,7 +164,7 @@ def _check_no_retire(env):
 
 
 def _check_bump(env):
-    """Values an attempt committed reach the replicas even when that attempt failed (SC-1)."""
+    """Values an attempt committed reach the replicas even when that attempt failed."""
     batch = runner.UPSERT_BATCH
     runner.UPSERT_BATCH = 1  # commit each value as its own batch
     rows = env.pg.tables["customers"].rows
@@ -196,7 +205,7 @@ def _check_bump(env):
 
 
 def _check_capped_tuples(env):
-    """A name tuple the query returned but that gives no value still counts toward max_values (SC-3)."""
+    """A name tuple the query returned but that gives no value still counts toward max_values."""
     saved = env.pg.tables
     fields = [Field("id", "integer", True), Field("first_name"), Field("last_name")]
     people = [{"id": i, "first_name": f, "last_name": last}
@@ -246,6 +255,13 @@ def _check_retries(env):
           job.status == "failed" and job.error == "requires Erebus Pro (feature connectors.postgres)")
     env.set_status("active")
 
+    env.pg.fail[("connect", "*")] = DriverMissing("erebus-pro[mssql-entra]")
+    job = env.run()
+    check("a missing optional driver is stored by name, unretried, and flags the source",
+          job.status == "failed" and job.attempts == 1 and job.error == "requires the erebus-pro[mssql-entra] extra"
+          and env.status() == "needs_attention")
+    env.set_status("active")
+
     reset = datetime.now(UTC) + timedelta(minutes=20)
     env.pg.fail[("connect", "*")] = ConnectorError("limit", reset_at=reset)
     job = env.run()
@@ -265,7 +281,7 @@ def _check_retries(env):
     check("any other error is an internal error, retried", job.status == "queued" and job.error == "internal error")
     log = stream.getvalue()
     check("the worker logged the failure", "internal" in log)
-    check("the log holds no value, password or DSN (SC-4)",
+    check("the log holds no value, password or DSN",
           "Qorbel" not in log and "Pw-Zq-77" not in log and "postgresql://" not in log)
     env.settle(job.id)
     del env.pg.fail[("connect", "*")]
@@ -275,7 +291,7 @@ def _check_policy(env):
     worker = env.worker(EREBUS_SYNC_DENIED_HOSTS="")  # the defaults: loopback and the DB host
     before = len(env.pg.connects)
     job = env.run(worker=worker)
-    check("the worker refuses a loopback source by default (SC-9)",
+    check("the worker refuses a loopback source by default",
           job.status == "failed" and job.error == "source address is not allowed")
     check("no connector ran for a denied host", len(env.pg.connects) == before)
     check("a denied host flags the source", env.status() == "needs_attention")
@@ -290,7 +306,7 @@ def _check_policy(env):
     job = env.run(source=lite)
     check("SQLite is refused while EREBUS_SYNC_SQLITE_DIR is unset", job.error == "source address is not allowed")
 
-    odd = env.new_source({}, connector_type="snowflake")
+    odd = env.new_source({}, connector_type="no_such_type_zq")
     job = env.run(source=odd)
     check("an unknown connector type fails", job.status == "failed" and job.error == "unknown connector type")
 
@@ -302,12 +318,122 @@ def _check_policy(env):
 
     with scoped(env.conn, env.scope):
         rows = env.conn.execute("SELECT error FROM sync_jobs WHERE scope_id = %s", (env.scope,)).fetchall()
-    check("no job row holds a value or credential (SC-4)",
+    check("no job row holds a value or credential",
           all(r[0] is None or ("Qorbel" not in r[0] and "Pw-Zq" not in r[0]) for r in rows))
 
 
+def _check_collections(env):
+    calls = len(env.pg.calls)
+    src = env.new_source({"host": "127.0.0.1", "dbname": "crm", "collections": ["Customers"]})
+    job = env.run("sample", source=src)
+    read = {c[1] for c in env.pg.calls[calls:] if c[0] == "records"}
+    check("a collections entry matches as Postgres reads an unquoted name (lower case)",
+          job.status == "done" and read == {"customers"})
+    env.settle(jobs.list_jobs(env.conn, env.scope, source_id=src)[0].id)  # the full sync it queued
+
+    bad = env.new_source({"host": "127.0.0.1", "dbname": "crm", "collections": ["customers", "no_such_table_zq"]})
+    job = env.run("sample", source=bad)
+    check("a collections entry the source does not list fails the sample as bad settings, unretried",
+          job.status == "failed" and job.attempts == 1 and job.error == "source settings are not valid")
+    check("... flags the source and maps no field",
+          env.status(bad) == "needs_attention" and fields.list_fields(env.conn, env.scope, bad) == [])
+
+    def pick(rule, listed, wanted):
+        try:
+            return runner.selected(ConnectorType("zq", "warehouse", "pro", frozenset(), identifiers=rule),
+                                   listed, wanted)
+        except runner.JobFailed as exc:
+            return exc.error_class
+    upper = ["CRM.customers", "CRM.CUSTOMERS", "PUBLIC.ORDERS"]
+    check("upper: an entry matches as written, or as Snowflake and Oracle read it unquoted",
+          pick("upper", upper, ["public.orders"]) == ["PUBLIC.ORDERS"]
+          and pick("upper", upper, ["crm.customers"]) == ["CRM.customers", "CRM.CUSTOMERS"])
+    check("... an exact match wins", pick("upper", upper, ["CRM.customers"]) == ["CRM.customers"])
+    check("... an upper-case entry never matches a quoted lower-case name",
+          pick("upper", ["CRM.customers"], ["CRM.CUSTOMERS"]) == "settings")
+    check("insensitive (SQLite): any case matches", pick("insensitive", ["Customers"], ["CUSTOMERS"]) == ["Customers"])
+    check("exact (MySQL, BigQuery, MSSQL): only the name as written",
+          pick("exact", ["crm.customers"], ["crm.Customers"]) == "settings")
+    check("collections keep the source's order", pick("exact", ["a.x", "a.y"], ["a.y", "a.x"]) == ["a.x", "a.y"])
+
+
+@contextlib.contextmanager
+def _listener():
+    """A local TCP listener; yields (port, number of connections accepted so far as a list)."""
+    srv = socket.create_server(("127.0.0.1", 0))
+    accepted = []
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            accepted.append(1)
+            conn.close()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield srv.getsockname()[1], accepted
+    finally:
+        srv.close()
+        thread.join(2)
+
+
+class _Dialing(FakeConnector):
+    """A postgres connector that also dials ``target`` while connecting, as a driver
+    following a server's redirect would."""
+
+    def __init__(self, tables, target):
+        super().__init__("postgres", tables)
+        self.target = target
+
+    def connect(self, settings, secrets):
+        try:
+            socket.create_connection(self.target, timeout=1).close()
+        except OSError:
+            raise ConnectorError("unreachable") from None
+        return super().connect(settings, secrets)
+
+
+def _check_connect_guard(env):
+    notes = Table([Field("id", "integer", True), Field("notes")], [{"id": 1, "notes": "called Zyx about the kit"}])
+    with _listener() as (port, accepted), _listener() as (other, redirected), \
+            tempfile.TemporaryDirectory(dir="/tmp") as root:
+        daemon_path = os.path.join(root, "gliner.sock")
+        daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        daemon.bind(daemon_path)
+        daemon.listen(4)
+        src = env.new_source({"host": "127.0.0.1", "port": port, "dbname": "crm"})
+        asked = []
+
+        def model(text):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.connect(daemon_path)  # the GLiNER daemon's socket, outside connector work
+            asked.append(text)
+            return []
+
+        def run(connector, kind):
+            job, _ = jobs.enqueue(env.conn, env.scope, src, kind)
+            env.conn.commit()
+            Worker(config(_DSN), pool=env.pool, provider=env.kms, connectors=lookup(connector), model=model).run_once()
+            return jobs.get_job(env.conn, env.scope, job.id)
+        try:
+            job = run(_Dialing({"notes": notes}, ("127.0.0.1", port)), "sample")
+            check("a connector dialling the checked address and port works (and the worker's own DB connections)",
+                  job.status == "done" and len(accepted) == 1)
+            check("model review reaches the GLiNER daemon's Unix socket during a sample job", bool(asked))
+            job = run(_Dialing({"notes": notes}, ("127.0.0.1", other)), "full")
+            check("a connector dialling another address (a redirect) fails the job as denied",
+                  job.status == "failed" and job.attempts == 1 and job.error == "source address is not allowed")
+            check("... the redirect target is never reached", not redirected)
+            check("... and the source is flagged", env.status(src) == "needs_attention")
+        finally:
+            daemon.close()
+
+
 def main():
-    print("\n=== Sync worker failures (spec 015) ===\n")
+    print("\n=== Sync worker failures ===\n")
     conn = fresh_db("erebus_gw_sync_failures")
     pool = ConnectionPool(_DSN, min_size=1, max_size=4, open=True)
     try:
@@ -318,6 +444,8 @@ def main():
         _check_capped_tuples(env)
         _check_retries(env)
         _check_policy(env)
+        _check_collections(env)
+        _check_connect_guard(env)
     finally:
         pool.close()
         conn.close()

@@ -4,23 +4,46 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "erebus-pro"
-version = "1.2.0b2"
+version = "1.3.0b1"
 description = "Erebus Pro: licensed extensions for the Erebus gateway"
 license = { text = "Elastic-2.0" }
 requires-python = ">=3.11"
 authors = [{ name = "ETHUX" }]
 # Deliberately no dependency on `erebus`: install from this repo next to it.
 # Declaring it would let pip pull an unrelated PyPI package named `erebus`.
-dependencies = ["cryptography>=43"]
+# Warehouse drivers ship in the image so a customer adds a source without rebuilding.
+dependencies = ["cryptography>=43", "snowflake-connector-python>=3.12", "google-cloud-bigquery>=3.30",
+                "oracledb>=26.0", "databricks-sql-connector>=4.6", "databricks-sdk>=0.146", "pymssql>=2.4"]
+
+[project.optional-dependencies]
+# Test-only fakes; never installed in the image.
+test = ["fakesnow>=0.9", "duckdb>=1.1", "respx>=0.21"]
+# Entra sign-in for MSSQL. Not in the image: mssql-python bundles Microsoft's ODBC driver
+# under Microsoft's license, which whoever installs this extra accepts.
+mssql-entra = ["mssql-python>=1.0"]
+
+[project.entry-points."erebus.sources"]
+snowflake = "erebus_pro.connectors.snowflake:SnowflakeConnector"
+bigquery = "erebus_pro.connectors.bigquery:BigQueryConnector"
+oracle = "erebus_pro.connectors.oracle:OracleConnector"
+databricks = "erebus_pro.connectors.databricks:DatabricksConnector"
+mssql = "erebus_pro.connectors.mssql:MssqlConnector"
+odoo = "erebus_pro.connectors.odoo:OdooConnector"
 
 [project.entry-points."erebus.gateway.extensions"]
 pro = "erebus_pro.gateway:register"
 
 [project.entry-points."erebus.worker.extensions"]
 pro = "erebus_pro.scheduler:register"
+# Removes Oracle wallets a worker killed while connecting left on disk.
+oracle-wallets = "erebus_pro.connectors._wallet:register"
 
 [project.entry-points."erebus.schema"]
 pro = "erebus_pro.schema:SCHEMA_DIR"
+
+# Data only: the gateway loads it to accept the Pro connector types.
+[project.entry-points."erebus.source_types"]
+pro = "erebus_pro.source_types"
 
 [tool.setuptools.packages.find]
 where = ["."]

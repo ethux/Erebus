@@ -2,9 +2,14 @@
 
 Pure. ``FieldInfo`` gains db type, nullable and primary key without breaking positional
 use; ``distinct_values`` uses a source's optional ``iter_distinct_values`` and otherwise
-de-duplicates ``iter_records`` (so SQLite and third-party connectors keep working); the
+de-duplicates ``iter_records`` (so SQLite and third-party connectors keep working);
+``distinct_groups`` reads several field groups of one collection through a source's
+optional ``iter_distinct_groups`` (one query per table) or group by group, within one
+limit; the
 worker loads entry points strictly (a broken plugin raises) while the laptop skips it;
 the built-in SQLite connector lives in ``erebus.cataloging.connectors`` and loads lazily.
+A connector that dials a host itself asks ``checked_address``, which refuses everything
+until the sync worker installs its network check.
 """
 import os
 import subprocess
@@ -54,6 +59,13 @@ class _WithDistinct(_RecordsOnly):
         yield ("from-method",)
 
 
+class _WithGroups(_WithDistinct):
+    def iter_distinct_groups(self, collection, groups, limit):
+        self.asked.append(("groups", collection, tuple(map(tuple, groups)), limit))
+        yield (1, ("B",))
+        yield (0, ("a@x.example",))
+
+
 class _EP:
     def __init__(self, name, target):
         self.name = name
@@ -96,6 +108,26 @@ def test_distinct_values():
     check("a source's own iter_distinct_values is used",
           list(sources.distinct_values(method, "people", ["email"], 5)) == [("from-method",)])
     check("it gets the collection, fields and limit", method.asked == [("distinct", "people", ("email",), 5)])
+
+
+def test_distinct_groups():
+    rows = [{"email": "a@x.example", "name": "A"}, {"email": "a@x.example", "name": "A"},
+            {"email": "b@x.example", "name": "B"}]
+    plain = _RecordsOnly(rows)
+    got = list(sources.distinct_groups(plain, "people", [["email"], ["name"]], 10))
+    check("without iter_distinct_groups each group is read in turn, tagged by its index",
+          got == [(0, ("a@x.example",)), (0, ("b@x.example",)), (1, ("A",)), (1, ("B",))])
+    capped = _WithDistinct(rows)
+    got = list(sources.distinct_groups(capped, "people", [["email"], ["name"], ["email", "name"]], 2))
+    check("the limit is shared: a later group gets what is left", got == [(0, ("from-method",)), (1, ("from-method",))])
+    check("... and a group with nothing left is not read",
+          capped.asked == [("distinct", "people", ("email",), 2), ("distinct", "people", ("name",), 1)])
+    grouped = _WithGroups(rows)
+    got = list(sources.distinct_groups(grouped, "people", [["email"], ["name"]], 5))
+    check("a source's own iter_distinct_groups answers every group at once",
+          got == [(1, ("B",)), (0, ("a@x.example",))])
+    check("it is asked once, with every group and the limit",
+          grouped.asked == [("groups", "people", (("email",), ("name",)), 5)])
 
 
 def test_entry_points():
@@ -170,13 +202,33 @@ def test_sqlite_lazy():
     check("sources.SQLiteConnector still names it", out.split()[3] == "True")
 
 
+def test_checked_address():
+    from erebus.cataloging.connector_errors import CONNECTOR_TEXT, ConnectorError
+    try:
+        sources.checked_address("crm.zq.example", 443)
+        err = None
+    except ConnectorError as exc:
+        err = exc
+    check("without the sync worker's network check no address is handed out",
+          err is not None and err.kind == "denied" and str(err) == CONNECTOR_TEXT["denied"])
+    asked = []
+    sources.set_address_check(lambda host, port: asked.append((host, port)) or "192.0.2.7")
+    try:
+        check("with it, the check decides the address", sources.checked_address("crm.zq.example", 443)
+              == "192.0.2.7" and asked == [("crm.zq.example", 443)])
+    finally:
+        sources.set_address_check(None)
+
+
 def main():
     print("source contract")
     test_field_info()
     test_distinct_values()
+    test_distinct_groups()
     test_entry_points()
     test_worker_loads_strictly()
     test_sqlite_lazy()
+    test_checked_address()
     print(f"  {_passed} checks passed")
 
 

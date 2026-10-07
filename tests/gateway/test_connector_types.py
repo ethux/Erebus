@@ -8,11 +8,12 @@ PermissionError naming the feature.
 """
 import os
 import sys
+from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 from erebus.cataloging import connector_types
-from erebus.cataloging.connector_errors import CONNECTOR_TEXT, ConnectorError, LicenseRequired
+from erebus.cataloging.connector_errors import CONNECTOR_TEXT, ConnectorError, DriverMissing, LicenseRequired
 from erebus.cataloging.connector_types import ConnectorType
 from erebus.gateway.connectors import policy
 
@@ -58,7 +59,15 @@ def _check_types():
     check("mysql is a free database type", connector_types.get("mysql").family == "database")
     sqlite = connector_types.get("sqlite")
     check("sqlite is a free file type with a path", sqlite.family == "file" and "path" in sqlite.setting_keys)
-    check("an unknown type is None", connector_types.get("oracle") is None)
+    check("collections match as each source reads a name: postgres folds to lower case, mysql exact, "
+          "sqlite ignores case", (pg.identifiers, connector_types.get("mysql").identifiers, sqlite.identifiers)
+          == ("lower", "exact", "insensitive"))
+    check("an unknown type is None", connector_types.get("no_such_type_zq") is None)
+    installed = connector_types.installed()
+    check("installed() lists every installed type once, by id",
+          [t.id for t in installed] == sorted({t.id for t in installed})
+          and {"sqlite", "postgres", "mysql"} <= {t.id for t in installed}
+          and all(connector_types.get(t.id) is t for t in installed))
     banned = {"dsn", "passfile", "service", "sslkey", "sslrootcert", "sslcert", "hostaddr", "options",
               "local_infile", "init_command", "password"}
     check("no type allows a raw DSN, libpq file key or secret",
@@ -75,6 +84,10 @@ def _check_entry_points():
         ValueError,
         lambda: connector_types.load_types(eps=[_EP("x", type("M", (), {"TYPES": (ConnectorType(
             "postgres", "database", "pro", frozenset()),)}))])))
+    check("a type with an unknown identifier rule is refused", _raises(
+        ValueError,
+        lambda: connector_types.load_types(eps=[_EP("x", type("M", (), {"TYPES": (ConnectorType(
+            "zq", "warehouse", "pro", frozenset(), identifiers="mixed"),)}))])))
     check("a broken types module fails closed",
           _raises(RuntimeError, lambda: connector_types.load_types(eps=[_EP("bad", _Broken())])))
 
@@ -90,6 +103,10 @@ def _check_errors():
     check("a connector error carries its class", err.kind == "auth")
     check("its text is the fixed text", str(err) == CONNECTOR_TEXT["auth"] == "authentication failed")
     check("an unknown class is refused", _raises(ValueError, lambda: ConnectorError("oops")))
+    check("a connector may refuse its own settings with the worker's fixed text",
+          str(ConnectorError("settings")) == policy.ERROR_TEXT["settings"] == "source settings are not valid"
+          and policy.failure_outcome("settings", attempts=0, limited_since=None, now=datetime.now(UTC),
+                                     timings=policy.JobTimings()).needs_attention)
     limited = ConnectorError("limit", reset_at="2026-10-01T00:00:00Z")
     check("a limit error may carry its reset time", limited.reset_at == "2026-10-01T00:00:00Z")
     check("the connector texts are the job texts",
@@ -98,9 +115,14 @@ def _check_errors():
     check("LicenseRequired is a PermissionError", isinstance(lic, PermissionError))
     check("LicenseRequired names the feature", str(lic) == "requires Erebus Pro (feature connectors.snowflake)")
     check("a malformed feature is refused", _raises(ValueError, lambda: LicenseRequired("a b")))
+    missing = DriverMissing("erebus-pro[mssql-entra]")
+    check("DriverMissing names the extra to install", str(missing) == "requires the erebus-pro[mssql-entra] extra"
+          and missing.requirement == "erebus-pro[mssql-entra]")
+    check("DriverMissing takes only a package[extra] name",
+          all(_raises(ValueError, lambda r=r: DriverMissing(r)) for r in ("erebus-pro", "a b[c]", "x[y] pw=1", "")))
     from erebus.cataloging import sources
-    check("the contract re-exports both", sources.ConnectorError is ConnectorError
-          and sources.LicenseRequired is LicenseRequired)
+    check("the contract re-exports all three", sources.ConnectorError is ConnectorError
+          and sources.LicenseRequired is LicenseRequired and sources.DriverMissing is DriverMissing)
 
 
 def main():

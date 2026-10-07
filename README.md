@@ -8,7 +8,7 @@ Privacy-first PII filter for AI code editors. Tokenizes sensitive data before it
 
 ## Project status
 
-The current release is v1.2.0-beta.2 (see the [CHANGELOG](CHANGELOG.md)). Erebus is still young software. Expect possible
+The current release is v1.3.0-beta.1 (see the [CHANGELOG](CHANGELOG.md)). Erebus is still young software. Expect possible
 bugs, editor-specific edge cases, and cases where unusual payloads need another
 pass. Keep a human review loop around sensitive workflows and please open an
 issue if something looks off.
@@ -339,19 +339,19 @@ token minted by one replica restores on another. Operational telemetry is masked
 
 ### Connectors
 
-Connect the databases that hold a tenant's customer data, and the names, emails, phone
-numbers and addresses in them become **known values**: the gateway always replaces them
+Connect the databases and apps that hold a tenant's customer data, and the names, emails,
+phone numbers and addresses in them become **known values**: the gateway always replaces them
 with a token, also when detection would miss them. A connector only reads.
 
 | | Free | Erebus Pro |
 |---|---|---|
-| Sources | SQLite, Postgres, MySQL | same |
-| Syncs | a sample when a source is added or changed, then a full sync of the accepted fields; "sync now" | also scheduled syncs (feature `sync.schedule`) |
+| Sources | SQLite, Postgres, MySQL | also Snowflake, BigQuery, Databricks, Oracle, MSSQL / Azure SQL and Odoo (features `connectors.snowflake`, `connectors.bigquery`, `connectors.databricks`, `connectors.oracle`, `connectors.mssql`, `connectors.odoo`) |
+| Syncs | a sample when a source is added or changed, then a full sync of the accepted fields; "sync now" | also scheduled syncs, incremental for apps (feature `sync.schedule`) |
 
 Everything is managed through the admin API below, which only an operator credential
 can use; a tenant credential gets 403 on every source route. When a Pro license lapses,
-values already synced keep matching and "sync now" keeps working; only scheduled syncs
-stop.
+values already synced keep matching and "sync now" keeps working for free sources; only
+scheduled syncs and syncs of Pro sources stop.
 
 Sizing: each gateway replica holds every tenant's known values in memory, about 90 MB per
 100,000 values summed over all tenants, plus the same again for a tenant being reloaded.
@@ -360,7 +360,8 @@ your health check window (about 80 seconds in the compose file).
 
 ### Sync worker
 
-`erebus-sync` reads the systems a tenant connects (SQLite, Postgres, MySQL) and keeps
+`erebus-sync` reads the systems a tenant connects (SQLite, Postgres, MySQL; with Pro also
+Snowflake, BigQuery, Databricks, Oracle, MSSQL / Azure SQL and Odoo) and keeps
 that tenant's known values in step with them. It is the only process that contacts
 those systems. It runs from the same image (the `sync-worker` service in the compose
 file) and needs `EREBUS_PG_DSN` and `EREBUS_GATEWAY_MASTER_KEY`, not the provider
@@ -369,14 +370,42 @@ store and host hardening as the gateway.
 
 A sample job maps a source's fields; a full sync stores the distinct values of the
 accepted fields. Values retire only after a full sync reads everything: a sync that
-fails, stops early or hits a cap keeps every value. An unreachable source is retried
+fails, stops early or hits a cap keeps every value. An app source (Odoo) also has
+incremental syncs, which read only the records changed since the last sync; a changed
+record's old values retire once the sync completes. A sample that no longer finds a
+collection holding accepted fields fails and keeps those fields, so their values do not
+retire unnoticed; to drop a collection on purpose, leave it out of `collections`. An
+unreachable source is retried
 (1, 5 and 15 minutes by default); wrong credentials, a refused host or a cap fail the
 job at once and mark the source for attention. Job rows and logs hold fixed error
 text only, never a credential or value.
 
 Before connecting, the worker resolves the source host once and refuses it when any
 address is on the deny list (by default the gateway's own database host, loopback,
-link-local and cloud metadata addresses) or off the allow list when one is set.
+link-local and cloud metadata addresses) or off the allow list when one is set. While
+the connector runs, the worker also checks every connection it opens:
+
+- Postgres, MySQL, Oracle and MSSQL may connect only to the address and port the worker
+  checked. A server that sends the driver elsewhere (an Oracle listener's redirect)
+  fails the sync as denied.
+- Snowflake, BigQuery and Databricks connect to their vendor's hosts, which no setting
+  names: every address must be off the deny list and, when an allow list is set, on it.
+  With an allow list, add the vendor's hosts (exact names, no wildcards) or networks:
+  for Snowflake what `SELECT SYSTEM$ALLOWLIST()` returns, for BigQuery
+  `bigquery.googleapis.com` and `oauth2.googleapis.com`, for Databricks the workspace
+  host. Through an HTTP proxy the worker connects to the proxy, so the proxy's address
+  must pass the lists instead.
+- Odoo connects over HTTPS to its `url` host only: the worker resolves it once, checks
+  every address against the lists and connects to that address, checking the
+  certificate against the name. Redirects are not followed and proxy settings in the
+  environment are ignored.
+- SQLite may connect nowhere.
+
+Native drivers are outside this check. libpq (Postgres) dials only the checked address
+and follows no redirect, but the MSSQL drivers (FreeTDS and Microsoft's ODBC driver)
+follow a server's routing redirect unchecked, such as Azure SQL's Redirect connection
+policy. The host lists are a second line: egress firewall rules on the worker are the
+real guard.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -386,8 +415,8 @@ link-local and cloud metadata addresses) or off the allow list when one is set.
 | `EREBUS_SYNC_BACKOFF_S` | `60,300,900` | Retry waits for an unreachable source or failed query |
 | `EREBUS_SYNC_LIMIT_WAIT_S` | `172800` | How long a job may wait on a source's rate limit |
 | `EREBUS_SYNC_TENANT_MAX_VALUES` | `1000000` | Most active known values per tenant |
-| `EREBUS_SYNC_DENIED_HOSTS` | see above | Hosts, addresses and networks never contacted; setting it replaces the default |
-| `EREBUS_SYNC_ALLOWED_HOSTS` | unset | When set, the only hosts, addresses and networks contacted |
+| `EREBUS_SYNC_DENIED_HOSTS` | see above | Hosts, addresses and networks a sync may not connect to (checked as above); setting it replaces the default |
+| `EREBUS_SYNC_ALLOWED_HOSTS` | unset | When set, the only hosts, addresses and networks a sync may connect to (checked as above); include your warehouse vendors' and apps' hosts |
 | `EREBUS_SYNC_SQLITE_DIR` | unset (SQLite off) | Directory SQLite sources must resolve inside |
 
 Several workers can run against one database; each job runs on one of them.
@@ -401,7 +430,10 @@ Several workers can run against one database; each job runs on one of them.
 
 `sslmode` is `disable`, `prefer`, `require`, `verify-ca` or `verify-full` (the default,
 checked against the system CAs). Collections are named `schema.table`; without
-`schemas` the worker reads every user schema. A raw DSN, file paths and driver options
+`schemas` the worker reads every user schema. A `collections` entry matches as written or
+as the database reads an unquoted name (Postgres: lower case; MySQL: as written; SQLite:
+any case); an entry the source does not have fails the sample with `source settings are
+not valid`. A raw DSN, file paths and driver options
 are refused. The worker opens every session read-only with a 10-minute statement
 limit, but the read-only account below is the real guard. Grant only the tables that
 hold customer data:
@@ -419,6 +451,195 @@ CREATE USER 'erebus_sync'@'%' IDENTIFIED BY '<password>' REQUIRE SSL;
 GRANT SELECT ON crm.customers TO 'erebus_sync'@'%';
 GRANT SELECT ON crm.contacts TO 'erebus_sync'@'%';
 ```
+
+### Connecting a warehouse, Oracle or MSSQL (Pro)
+
+Needs erebus-pro (in the published image) and a license with `connectors.<type>`
+(`snowflake`, `bigquery`, `databricks`, `oracle` or `mssql`) in the sync worker's environment.
+Without the feature the source's syncs fail with
+`requires Erebus Pro (feature connectors.<type>)`; its values keep matching.
+
+| Type | Settings | Credentials |
+|------|----------|-------------|
+| `snowflake` | `account` (`orgname-account`), `user`, `database`, `warehouse` (required), `role`, `schemas`, `collections` | `private_key` (PEM), `private_key_passphrase` if it is encrypted |
+| `bigquery` | `project`, `location`, `max_bytes_billed`, `auth` (`key` or `attached`), `schemas` (datasets), `collections` | `service_account_key` (the JSON key file); none with `auth: attached` |
+| `databricks` | `server_hostname` (the workspace host), `http_path` (the SQL warehouse's, `/sql/1.0/warehouses/<id>`), `catalog`, `client_id` (the service principal's application id), `schemas`, `collections` | `client_secret` (an OAuth secret of the service principal) |
+| `oracle` | `host`, `port` (`1521`), `service_name`, `user`, `sslmode`, `auth` (`password` or `wallet`), `schemas`, `collections` | `password`; for mutual TLS also `wallet_pem` (the wallet's `ewallet.pem`) and `wallet_password`; only `wallet_pem` with `auth: wallet` |
+| `mssql` | `host`, `port` (`1433`), `database`, `sslmode`, `auth` (`sql` or `entra`), `user` (SQL login), `client_id` (Entra: the service principal's application id), `schemas`, `collections` | `password` (SQL login) or `client_secret` (Entra) |
+
+Snowflake and BigQuery take no host: the driver derives it from the account or project.
+Databricks takes the workspace host, accepted only on Databricks' own domains
+(`cloud.databricks.com`, `azuredatabricks.net`, `gcp.databricks.com` and their
+government and China clouds), and only a SQL warehouse path. The worker checks every
+address these three connect to against its deny list, and its allow list when one is
+set (see [Sync worker](#sync-worker)); BigQuery with `auth: attached` may also reach the
+metadata server (see below). Collections are `SCHEMA.TABLE`, `dataset.table` and
+`schema.table` (in `catalog`). A `collections` entry also matches as Snowflake and Oracle
+read an unquoted name (`crm.customers` finds `CRM.CUSTOMERS`) and in any case on
+Databricks; BigQuery and MSSQL names match as written. Costs:
+
+- Snowflake: a sync resumes the warehouse, billed at least 60 seconds per resume.
+- BigQuery: each table is read in one query, billed at least 10 MB. `max_bytes_billed`
+  caps every query on on-demand pricing (slot pricing ignores it); a capped query fails
+  the sync and keeps every value. It must be at least 10485760 (10 MiB), or every query
+  would be capped. Sample rows come from the free table-read API. A sync stopped by a
+  daily quota waits for its reset at midnight Pacific time.
+- Databricks: a sync wakes the SQL warehouse; Pro and classic warehouses bill at least
+  10 minutes per start. Each table is read in one query.
+
+Oracle is a database the worker dials like Postgres: its host lists apply, and `sslmode`
+works the same (the default `verify-full` checks the certificate against the system CAs,
+or the wallet's, and the name against `host`), except that there is no `prefer`: Oracle
+serves TLS on its own port. With `disable` only the password exchange is protected. The
+driver runs in thin mode, so no Oracle Client is needed; it needs Oracle Database 12.1
+or later and does not support native network encryption or Kerberos. A listener that
+redirects to another address fails the sync as denied, so point `host` at a listener
+that serves the database itself (on RAC, a node's VIP rather than the SCAN name). Fields
+come from `ALL_TAB_COLUMNS` without Oracle-maintained schemas; collections are
+`OWNER.TABLE`. Every read runs in a read-only transaction; CLOB values over 1,000
+characters are skipped.
+
+MSSQL (SQL Server and Azure SQL) is a database the worker dials like Postgres: its host
+lists apply and `sslmode` works the same, except that there is no `prefer`. `host` is a
+DNS name or an IPv4 address; reach an IPv6-only server through its DNS name. The default
+`verify-full` checks the certificate against the system CAs and the name against `host`
+before the password is sent. For a private CA, point `SSL_CERT_FILE` on the worker at a
+bundle holding the system CAs plus that CA: it replaces the system bundle rather than
+adding to it. Or use `require` for a server with a self-signed certificate (SQL Server's
+default). On Azure SQL `verify-full` accepts the zone's wildcard certificate
+(`*.database.windows.net`, or its US Government or China cloud counterpart); elsewhere a
+SQL login needs a certificate that names the host, as wildcard certificates fail the
+check. With `disable` only the login packet is encrypted, and only if the server
+supports it.
+
+- SQL logins (`auth: sql`, the default) work out of the box: the driver, pymssql, ships
+  in the image.
+- Entra sign-in (`auth: entra`, a service principal with a client secret) needs
+  `pip install 'erebus-pro[mssql-entra]'` in the worker's image. That installs
+  Microsoft's mssql-python, which bundles the Microsoft ODBC Driver 18 under Microsoft's
+  license terms; whoever installs it accepts them. Without it the source's syncs fail
+  with `requires the erebus-pro[mssql-entra] extra`. Entra takes `sslmode` `verify-full`
+  or `require` only. The connection names `host` as the server and dials the address
+  the worker checked through the ODBC driver's `Addr` keyword.
+
+Fields come from `INFORMATION_SCHEMA.COLUMNS` of `database` without system schemas;
+collections are `schema.table`. Each table is read in one query. SQL Server has no
+read-only session: the connector sends only reads and asks for read-only intent, so the
+read-only login is the guard. `text`, `ntext` and `(n)varchar(max)` values over 4,000
+characters are skipped. On Azure SQL, set the server's connection policy to Proxy so the
+session stays on the address the worker checked: with Redirect (what the Default policy
+uses for clients inside Azure), Azure hands the client another node's address after
+sign-in, and both drivers follow it without the worker's check (they are native code).
+Egress firewall rules on the worker are what keeps them on approved networks.
+
+Grant only the tables that hold customer data. On a warehouse the read-only role is the
+only guard:
+
+```sql
+-- Snowflake: a service user with a key pair (openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt)
+CREATE ROLE erebus_reader;
+GRANT USAGE ON WAREHOUSE sync_wh TO ROLE erebus_reader;
+GRANT USAGE ON DATABASE crm TO ROLE erebus_reader;
+GRANT USAGE ON SCHEMA crm.public TO ROLE erebus_reader;
+GRANT SELECT ON TABLE crm.public.customers TO ROLE erebus_reader;
+CREATE USER erebus_sync TYPE = SERVICE DEFAULT_ROLE = erebus_reader DEFAULT_WAREHOUSE = sync_wh
+  RSA_PUBLIC_KEY = '<public key>';  -- and set warehouse: sync_wh on the source
+GRANT ROLE erebus_reader TO USER erebus_sync;
+
+-- Databricks (Unity Catalog), for the service principal's application id
+GRANT USE CATALOG ON CATALOG crm TO `<application-id>`;
+GRANT USE SCHEMA ON SCHEMA crm.sales TO `<application-id>`;
+GRANT SELECT ON TABLE crm.sales.customers TO `<application-id>`;
+
+-- Oracle
+CREATE USER erebus_sync IDENTIFIED BY "<password>";
+GRANT CREATE SESSION TO erebus_sync;
+GRANT SELECT ON crm.customers TO erebus_sync;
+
+-- MSSQL: a SQL login (on Azure SQL, a contained user: CREATE USER ... WITH PASSWORD)
+CREATE LOGIN erebus_sync WITH PASSWORD = '<password>';
+USE crm;
+CREATE USER erebus_sync FOR LOGIN erebus_sync;
+GRANT SELECT ON sales.customers TO erebus_sync;
+
+-- MSSQL: an Entra service principal, in the database
+CREATE USER [<service-principal-name>] FROM EXTERNAL PROVIDER;
+GRANT SELECT ON sales.customers TO [<service-principal-name>];
+```
+
+BigQuery: give the service account BigQuery Job User on the project and BigQuery Data
+Viewer only on the datasets that hold customer data. Leave `location` unset to read
+datasets in every location (each query runs where its dataset lives); with it set, every
+query runs in that location and datasets elsewhere are skipped.
+
+`auth: attached` signs in as the worker itself (Application Default Credentials), for
+every source that uses it:
+
+- On GCP, the service account attached to the worker's VM or pod.
+- Elsewhere, workload identity federation: point `GOOGLE_APPLICATION_CREDENTIALS` in the
+  worker's environment at a credential configuration file
+  (`gcloud iam workload-identity-pools create-cred-config`). The first BigQuery call exchanges
+  the worker's token at `sts.googleapis.com`, and at `iamcredentials.googleapis.com` when
+  the configuration impersonates a service account. With an allow list, add those hosts.
+- The worker lets these sources reach the metadata address `169.254.169.254` (and GCP's
+  `fd20:ce::254`) on port 80, where GCP serves the attached identity and AWS and Azure
+  serve the token a federation configuration reads. Any other credential URL must pass
+  the host lists. A configuration that runs a program (an executable source) is outside
+  the worker's checks.
+
+Snowflake signs in with the service user's key pair only; workload identity federation
+is not supported.
+
+Databricks: give the service principal `CAN USE` on the SQL warehouse and create an
+OAuth secret for it (machine-to-machine); personal access tokens are not supported. A
+catalog it cannot use fails the sync as `permission denied`. Real-Time SQL warehouses are
+not supported: the driver opens their sessions on a backend that refuses the connector's
+sign-in, and the sync fails with `source settings are not valid`.
+
+### Connecting Odoo (Pro)
+
+Needs a license with `connectors.odoo` in the sync worker's environment. Reads contacts
+and companies (`res.partner`) and leads (`crm.lead`).
+
+| Type | Settings | Credentials |
+|------|----------|-------------|
+| `odoo` | `url` (`https://<name>.odoo.com` or your server, no path), `database`, `login` (the integration user's), `api` (`json2` or `xmlrpc`; asked from the server when unset), `collections` (`res.partner`, `crm.lead`; default both) | `api_key` |
+
+- **Plan.** Odoo's external API needs the Custom plan; One App Free and Standard do not
+  include it. Self-hosted Odoo Community has no such restriction.
+- **API.** Odoo 19 and later: JSON-2, the key as a bearer token; `database` is sent as
+  `X-Odoo-Database` (needed when one server hosts several databases). Odoo 17 and 18:
+  XML-RPC with `database`, `login` and the key. Odoo removes XML-RPC in Odoo 22 (Odoo
+  Online 21.1).
+- **Integration user.** Create a dedicated internal user with read access to contacts
+  and, for leads, Sales "All Documents" (without it, set `collections` to
+  `["res.partner"]`: a collection the user cannot read fails the sample). The connector
+  also reads `ir.model` to see whether CRM is installed. Leave the user's password empty
+  so only the API key signs in. Odoo has no read-only role: the connector only calls
+  `fields_get` and `search_read` (and `authenticate` on XML-RPC), but the user's access
+  rights are the real guard.
+- **API key.** As that user: Preferences, Account Security, New API Key. Odoo keys of
+  non-admin users last at most three months: rotate before then by sending the new key
+  with `PATCH /sources/{id}`. The worker reads the key's expiry from Odoo when the user
+  has exactly one key, and `GET /sources` shows it as `credentials_expire_at`.
+- **Odoo Online.** Odoo allows about one call per second and no parallel calls. On
+  `*.odoo.com` the worker makes one call at a time, at most one a second. A 429 waits
+  and backs off; when Odoo keeps refusing, the job is rescheduled (for up to
+  `EREBUS_SYNC_LIMIT_WAIT_S`). A full sync reads 500 records per call: 100,000 contacts
+  take about 200 calls.
+- **Fields** come from `fields_get`: names, email, phone (and mobile before Odoo 19),
+  street, company names, the lead's contact and company, plus custom `x_` text fields.
+  VAT, references and custom fields wait for review. A company's name syncs as an
+  organization (the `company` field), a person's as `name`. Archived records are read
+  too and keep matching.
+- **Syncs.** With `sync.schedule`, Odoo sources get an incremental sync every hour and a
+  full sync every day. An incremental sync reads the records whose `write_date` changed
+  since the last sync (re-reading a 10-minute overlap), so a renamed contact's old name
+  stops matching then. Odoo reports no deletions: a deleted contact's values retire at
+  the next full sync.
+- **Network.** `url` must be HTTPS (plain HTTP only to a loopback address). With an
+  allow list, add the Odoo host. For a server with a private CA, point `SSL_CERT_FILE`
+  on the worker at a bundle holding the public CAs plus yours: it replaces them.
 
 ### Managing sources
 
@@ -456,7 +677,8 @@ needs is kept as the source's `pending_job` and queued when that job ends or the
 ### Scheduled syncs (Pro)
 
 With a license carrying `sync.schedule` in the environment of both the gateway and the
-sync worker, the worker gives every source a daily full sync. Change or turn it off per source:
+sync worker, the worker gives every source a daily full sync, and app sources (Odoo) an
+hourly incremental sync too. Change or turn them off per source:
 
 ```bash
 curl -sX PUT localhost:8080/v1/admin/scopes/<scope_id>/sources/<source_id>/schedule \
@@ -466,8 +688,8 @@ curl -sX PUT localhost:8080/v1/admin/scopes/<scope_id>/sources/<source_id>/sched
 ```
 
 `full_minutes` is 60 to 43200; `null` turns scheduled syncs off and an empty body
-restores the default. Database sources have no incremental syncs, so
-`incremental_minutes` must stay unset. The first run is one interval after the change. A
+restores the default. `incremental_minutes` (15 to 1440) applies to app sources only;
+database and warehouse sources have no incremental syncs, so it must stay unset for them. The first run is one interval after the change. A
 source that is busy waits for the next check (every minute); a paused one is skipped.
 Without the feature the route returns 403 `requires Erebus Pro (feature sync.schedule)`.
 
@@ -491,6 +713,15 @@ fail-closed behavior. A second one runs `erebus-gateway` and `erebus-sync` as re
 processes: a synced Postgres value is tokenized in a chat, and no log, job row, audit
 event or admin response holds a synced value or a source password. Both bind
 localhost, so run them where localhost binds are permitted.
+
+The Odoo connector also runs against real Odoo 18 and 19 in Docker (skipped otherwise):
+
+```bash
+bash pro/tests/odoo_live_stack.sh up /tmp/erebus-odoo   # writes odoo-live.env (mode 600)
+set -a; . /tmp/erebus-odoo/odoo-live.env; set +a
+EREBUS_PG_DSN=postgresql:///postgres python pro/tests/test_odoo_live.py
+bash pro/tests/odoo_live_stack.sh down
+```
 
 ---
 

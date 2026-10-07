@@ -53,7 +53,7 @@ def _check_create():
         "a list body": ([], "request body must be a JSON object"),
         "no name": ({**_valid(), "name": ""}, "name must be a non-empty string"),
         "a long name": ({**_valid(), "name": "x" * 201}, "name must be a non-empty string"),
-        "an unknown type": ({**_valid(), "type": "oracle"}, "unknown connector type"),
+        "an unknown type": ({**_valid(), "type": "no_such_type_zq"}, "unknown connector type"),
         "a non-string type": ({**_valid(), "type": 5}, "unknown connector type"),
         "settings not an object": ({**_valid(), "settings": "host=db"}, "settings must be an object"),
         "a raw DSN key": ({**_valid(), "settings": {"dsn": f"postgresql://u:{_SECRET}@h/db"}},

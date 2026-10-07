@@ -24,7 +24,7 @@ import psycopg
 from ..cataloging import sources as contract
 from ..gateway.connectors import jobs
 from ..gateway.crypto.keyprovider import KeyProvider
-from . import runner
+from . import egress, runner
 from .config import SyncConfig
 from .extensions import WorkerHooks
 
@@ -101,6 +101,7 @@ class Worker:
         self.model = model
         self.resolve = resolve
         self._periodic: list[list] = []  # [fn, seconds, next due (monotonic)]
+        egress.install()  # process-wide, once: the connect guard of every job
 
     def add_periodic(self, fn: Callable[[], Any], seconds: float) -> None:
         """Call ``fn()`` every ``seconds`` from the loop (worker extensions)."""
@@ -160,7 +161,7 @@ class Worker:
             log.warning("job %s: %s failed: %s", job.id, job.kind, failure.error_class)
         try:
             outcome = jobs.fail(conn, job, failure.error_class, timings=self.config.timings,
-                                reset_at=failure.reset_at, license_message=failure.license_message)
+                                reset_at=failure.reset_at, detail=failure.detail)
             if outcome is None:
                 log.warning("job %s: lease lost before the failure was recorded", job.id)
                 return

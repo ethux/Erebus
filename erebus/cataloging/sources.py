@@ -6,21 +6,37 @@ records. Erebus owns scanning and catalog decisions after that normalization.
 A database or warehouse source may also offer ``iter_distinct_values(collection,
 fields, limit)``: distinct tuples of ``fields`` in that order, rows that are all NULL
 skipped, at most ``limit`` (spec 015 D9). Callers use ``distinct_values``, which falls
-back to de-duplicating ``iter_records`` for a source without it. Connectors raise
-``ConnectorError`` (fixed text) for driver failures. Free connectors live in
-``erebus.cataloging.connectors`` and register through the ``erebus.sources`` group;
-the built-in SQLite one is loaded only when first asked for.
+back to de-duplicating ``iter_records`` for a source without it.
+
+An app source (family ``app``) is read record by record through ``iter_records``; each
+``SourceRecord.record_ref`` is the record's stable id within its collection, so the
+worker can link a value to the record it came from. It may also offer
+``iter_changes(collection, fields, cursor)``: the records changed since ``cursor`` (an
+opaque string it produced earlier) plus, from a deletion feed, records gone since then
+as ``SourceRecord(record_id, {}, {"deleted": True})``; it raises ``CursorExpired`` when
+the cursor is unusable. ``cursor(collection)`` returns the position the last read of
+``collection`` reached (``None``: unknown), which the worker stores once the sync
+commits; ``credentials_expire_at()`` returns when the credentials stop working (an
+aware ``datetime``), or ``None`` when the source cannot tell.
+
+A connector that dials a host itself (an app's HTTP transport) asks
+``checked_address(host, port)`` for the one address to connect to; the sync worker
+installs that check (its host lists), and without it every address is ``denied``.
+
+Connectors raise ``ConnectorError`` (fixed text) for driver failures. Free connectors
+live in ``erebus.cataloging.connectors`` and register through the ``erebus.sources``
+group; the built-in SQLite one is loaded only when first asked for.
 """
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from importlib import metadata
 from typing import Any, Protocol
 
 # Part of the contract: connectors raise these (re-exported for them).
-from .connector_errors import ConnectorError, LicenseRequired  # noqa: F401
+from .connector_errors import ConnectorError, CursorExpired, DriverMissing, LicenseRequired  # noqa: F401
 
 
 @dataclass
@@ -99,6 +115,20 @@ class SourceConnector(Protocol):
 _CONNECTORS: dict[str, SourceConnector] = {}
 _ENTRYPOINTS_LOADED = False
 GROUP = "erebus.sources"
+_ADDRESS_CHECK: list[Callable[[str, int], str]] = []
+
+
+def set_address_check(check: Callable[[str, int], str] | None) -> None:
+    """Install the sync worker's network check (``None`` removes it)."""
+    _ADDRESS_CHECK[:] = [check] if check is not None else []
+
+
+def checked_address(host: str, port: int) -> str:
+    """The address a connector may connect to for ``host``; raises when the worker's
+    host lists refuse it, and ``ConnectorError("denied")`` outside the sync worker."""
+    if not _ADDRESS_CHECK:
+        raise ConnectorError("denied")
+    return _ADDRESS_CHECK[0](host, port)
 
 
 def distinct_values(row_source: Any, collection: str, fields: list[str], limit: int) -> Iterator[tuple]:
@@ -119,6 +149,27 @@ def distinct_values(row_source: Any, collection: str, fields: list[str], limit: 
             yield key
             if len(seen) >= limit:
                 return
+
+
+def distinct_groups(row_source: Any, collection: str, groups: list[list[str]], limit: int
+                    ) -> Iterator[tuple[int, tuple]]:
+    """``(index into groups, distinct tuple)`` for each field group of ``collection``, at
+    most ``limit`` in total.
+
+    Uses the source's ``iter_distinct_groups`` (one query per table) when it has one;
+    otherwise reads each group through ``distinct_values`` with what is left of ``limit``.
+    """
+    method = getattr(row_source, "iter_distinct_groups", None)
+    if method is not None:
+        yield from method(collection, groups, limit)
+        return
+    left = limit
+    for index, group in enumerate(groups):
+        if left <= 0:
+            return
+        for row in distinct_values(row_source, collection, group, left):
+            left -= 1
+            yield index, row
 
 
 def register_connector(connector: SourceConnector, replace: bool = True) -> None:

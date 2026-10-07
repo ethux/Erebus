@@ -80,7 +80,10 @@ def _check_types():
     for db_type in ("text", "character varying(255)", "varchar", "NVARCHAR(MAX)", "ntext", "CLOB", "NCLOB",
                     "VARCHAR2(100)", "STRING", "citext", "bpchar", ""):
         check(f"{db_type!r} is text", t(db_type) == "text")
-    for db_type in ("xml", "ARRAY", "USER-DEFINED", "text[]", "enum('a','b')", "ARRAY<STRING>", "geometry"):
+    for db_type in ("ARRAY", "text[]", "ARRAY<STRING>", "array<string>", "map<string,int>", "MAP",
+                    "STRUCT<a INT64, b STRING>", "struct<a:int>", "RECORD"):
+        check(f"{db_type!r} is complex (an array, map or struct)", t(db_type) == "complex")
+    for db_type in ("xml", "USER-DEFINED", "enum('a','b')", "geometry"):
         check(f"{db_type!r} is not a type the rules know", t(db_type) == "unknown")
 
 
@@ -92,6 +95,10 @@ def _check_type_guards():
         r = _one("customers", "email", db_type, values)
         check(f"a {db_type} field is ignored even when named email",
               (r.decision, r.reason, r.confirmable) == ("ignored", "non-text type", True))
+    for db_type in ("map<string,string>", "text[]", "STRUCT<email STRING>"):
+        r = _one("customers", "email", db_type, [None])
+        check(f"a {db_type} field is ignored as non-text even when named email",
+              (r.decision, r.reason) == ("ignored", "non-text type"))
     r = _one("customers", "photo", "bytea", [b"\x00"])
     check("a binary field is ignored and never confirmable",
           (r.decision, r.reason, r.confirmable) == ("ignored", "binary type", False))

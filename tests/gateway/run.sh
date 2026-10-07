@@ -31,6 +31,7 @@ PURE_TESTS=(
   redact
   connector_types
   sync_policy
+  sync_egress
   worker_extensions
   source_contract
   sources_body

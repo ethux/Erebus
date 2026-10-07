@@ -8,20 +8,38 @@ credentials decrypted (tenant key, AAD = source id).
 * **sample**: up to ``SAMPLE_ROWS`` rows per collection (``settings.collections``, or
   every collection the connector lists), the gateway field rules, one ``source_fields``
   write; the transaction marking the job done queues the full sync if a field is
-  accepted.
+  accepted. A ``collections`` entry names a listed collection as written or as the
+  source reads an unquoted name (``ConnectorType.identifiers``); one that names none
+  fails the sample as ``settings``. Without a ``collections`` setting, a collection
+  holding accepted fields that the source no longer lists fails the sample as
+  ``incomplete``: its field rules stay, so no full sync retires its values unnoticed
+  (drop a collection on purpose through ``collections``).
 * **full**: distinct values of every accepted field (a name tuple as one distinct tuple,
   stored as the full name), batch-upserted and linked under the job id. Only when every
   field was read, within ``max_values`` and the tenant cap, does one transaction retire
   the links this sync did not see, bump the catalog version and mark the job done.
   Anything short of that fails the job and retires nothing, but bumps the version when
   it committed values; ``max_values`` counts every distinct row read, value or not.
+  Databases and warehouses keep no cursor: an incremental job of theirs is a full sync.
+* **app sources** (family ``app``) are read record by record and every value is linked
+  to its record (``catalog_entry_records``). A full sync reads every record, then drops
+  the links it did not renew and stores each collection's cursor. An incremental sync
+  reads the records changed since the stored cursors, then replaces the links of every
+  record it read (a deleted record's are dropped) and stores the new cursors. Entries
+  left with no link retire, in the transaction that marks the job done; a failure
+  retires nothing and keeps the old cursors. With no cursor, or one the source calls
+  expired, the job reads everything instead. ``max_values`` counts records read, values
+  or not, and the lease is checked every ``LEASE_CHECK_EVERY`` records.
 
 The worker contract with connectors, beyond ``erebus.sources``: a database connector
 may offer ``iter_distinct_values(collection, fields, limit)`` yielding tuples in
-``fields`` order (without it the worker de-duplicates ``iter_records``), connects to the
+``fields`` order (without it the worker de-duplicates ``iter_records``) and a warehouse
+``iter_distinct_groups`` (all accepted fields of a table in one query), connects to the
 ``hostaddr`` it is handed, and raises ``ConnectorError`` (``incomplete`` for a capped
-query or skipped values). Every write is fenced by the job's lease: a worker that lost
-it writes nothing.
+query or skipped values). ``egress_exceptions(settings)`` may name ``(address, port)``
+pairs a source must reach past the host lists. Every connector call runs under the
+job's connect guard (``egress``). Every write is fenced by the job's lease: a worker
+that lost it writes nothing.
 """
 from __future__ import annotations
 
@@ -36,7 +54,7 @@ import psycopg
 
 from ..cataloging import connector_types, field_rules
 from ..cataloging import sources as contract
-from ..cataloging.connector_errors import ConnectorError, LicenseRequired
+from ..cataloging.connector_errors import ConnectorError, CursorExpired, DriverMissing, LicenseRequired
 from ..gateway import catalog
 from ..gateway.connectors import fields, jobs, sources
 from ..gateway.crypto.keyprovider import CryptoErased, KeyProvider
@@ -45,6 +63,7 @@ from ..gateway.governance import audit
 from ..gateway.store import catalog_versions
 from ..gateway.store.known_value_store import open_scope_crypto
 from ..gateway.store.scope_context import scoped
+from . import egress
 from .config import SyncConfig
 from .netpolicy import PolicyError, prepare_settings
 
@@ -52,6 +71,7 @@ log = logging.getLogger("erebus.sync")
 
 SAMPLE_ROWS = 1000
 UPSERT_BATCH = 2000
+LEASE_CHECK_EVERY = 500  # records: a long read without values still stops once the lease is lost
 ACTOR = "sync-worker"
 
 
@@ -62,11 +82,11 @@ class LeaseLost(Exception):
 class JobFailed(Exception):
     """A job failure of ``error_class`` (a ``policy.ERROR_TEXT`` key)."""
 
-    def __init__(self, error_class: str, *, reset_at: datetime | None = None, license_message: str | None = None):
+    def __init__(self, error_class: str, *, reset_at: datetime | None = None, detail: str | None = None):
         super().__init__(error_class)
         self.error_class = error_class
         self.reset_at = reset_at
-        self.license_message = license_message
+        self.detail = detail
 
 
 @dataclass
@@ -100,7 +120,9 @@ def classify(exc: BaseException) -> JobFailed:
     if isinstance(exc, ConnectorError):
         return JobFailed(exc.kind, reset_at=_reset_at(exc.reset_at))
     if isinstance(exc, LicenseRequired):
-        return JobFailed("license", license_message=str(exc))
+        return JobFailed("license", detail=str(exc))
+    if isinstance(exc, DriverMissing):
+        return JobFailed("driver", detail=str(exc))
     if isinstance(exc, PolicyError):
         return JobFailed(exc.kind)
     if isinstance(exc, CryptoErased):
@@ -123,7 +145,10 @@ def _open(ctx: Context, job: jobs.Job, source: sources.SourceInfo, crypto) -> tu
     if connector is None:
         raise JobFailed("unknown_type")
     secrets = sources.read_secrets(ctx.conn, crypto, job.scope_id, job.source_id)
-    return connector.connect(settings, secrets), ctype
+    declared = getattr(connector, "egress_exceptions", None)
+    guard = egress.Guard.for_source(ctx.config.policy, ctype, settings, resolve=ctx.resolve,
+                                    exceptions=declared(settings) if declared is not None else ())
+    return egress.GuardedSource(guard.call(connector.connect, settings, secrets), guard), ctype
 
 
 def _field_spec(info: Any, family: str) -> field_rules.FieldSpec:
@@ -135,11 +160,38 @@ def _field_spec(info: Any, family: str) -> field_rules.FieldSpec:
     )
 
 
-def _sample(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any, family: str) -> dict:
+def _reads_as(rule: str, name: str, entry: str) -> bool:
+    """Whether the source reads ``entry``, given unquoted, as the listed ``name``."""
+    if rule == "insensitive":
+        return name.casefold() == entry.casefold()
+    fold = {"upper": str.upper, "lower": str.lower}.get(rule)
+    parts, asked = name.split("."), entry.split(".")
+    return fold is not None and len(parts) == len(asked) and all(
+        part in (word, fold(word)) for part, word in zip(parts, asked, strict=True))
+
+
+def selected(ctype: connector_types.ConnectorType, listed: list[str], wanted: list[str]) -> list[str]:
+    """The ``listed`` collections the ``collections`` setting names, in listed order. An
+    exact match wins over one by the source's reading of an unquoted name; an entry that
+    names nothing fails the job as ``settings``, so a typo never passes as an empty source."""
+    chosen: set[str] = set()
+    for entry in wanted:
+        hits = [n for n in listed if n == entry] or [n for n in listed if _reads_as(ctype.identifiers, n, entry)]
+        if not hits:
+            raise JobFailed("settings")
+        chosen.update(hits)
+    return [n for n in listed if n in chosen]
+
+
+def _sample(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any,
+            ctype: connector_types.ConnectorType) -> dict:
     wanted = source.settings.get("collections")
     names = [c.name for c in rows_source.list_collections()]
     if wanted:
-        names = [n for n in names if n in wanted]
+        names = selected(ctype, names, [str(w) for w in wanted])
+    elif {f.collection for f in fields.accepted_fields(ctx.conn, job.scope_id, job.source_id)} - set(names):
+        raise JobFailed("incomplete")  # a listing that lost a collection must not drop its rules
+    family = ctype.family
     samples: list[fields.FieldSample] = []
     rows_seen = 0
     for collection in names:
@@ -159,15 +211,11 @@ def _sample(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source
     return counts
 
 
-def _field_values(rows_source: Any, collection: str, field: fields.SourceField, limit: int
-                  ) -> Iterator[str | None]:
-    """One item per distinct row returned: its value, or ``None`` for a row that gives none."""
-    parts = field.field.split("+")
-    for row in contract.distinct_values(rows_source, collection, parts, limit):
-        if len(parts) > 1:
-            yield field_rules.join_name(row[0], row[1:-1], row[-1])
-        else:
-            yield None if row[0] is None else str(row[0])
+def _value(field: fields.SourceField, row: tuple) -> str | None:
+    """A distinct row of ``field`` as one value (a name tuple joined), or ``None``."""
+    if "+" in field.field:
+        return field_rules.join_name(row[0], row[1:-1], row[-1])
+    return None if row[0] is None else str(row[0])
 
 
 def _bump_after_failure(ctx: Context, job: jobs.Job) -> None:
@@ -181,7 +229,8 @@ def _bump_after_failure(ctx: Context, job: jobs.Job) -> None:
 def _accepted_rows(ctx: Context, rows_source: Any, by_collection: dict[str, list[fields.SourceField]],
                    max_values: int) -> Iterator[tuple[str | None, str]]:
     """``(value or None, label)`` per distinct row of every accepted field; ``incomplete``
-    on a missing collection or column, or past ``max_values`` rows."""
+    on a missing collection or column, or past ``max_values`` rows. All accepted fields
+    of a collection are asked for at once (one query per table where the source can)."""
     present = {c.name for c in rows_source.list_collections()} if by_collection else set()
     rows = 0
     for collection, accepted in by_collection.items():
@@ -192,11 +241,12 @@ def _accepted_rows(ctx: Context, rows_source: Any, by_collection: dict[str, list
         for f in accepted:
             if not set(f.field.split("+")) <= columns or f.label is None:
                 raise JobFailed("incomplete")  # a skipped column: the sync is not complete
-            for value in _field_values(rows_source, collection, f, max_values - rows + 1):
-                rows += 1  # every row returned counts, or a capped query would pass as complete
-                if rows > max_values:
-                    raise JobFailed("incomplete")
-                yield value, f.label
+        groups = [f.field.split("+") for f in accepted]
+        for index, row in contract.distinct_groups(rows_source, collection, groups, max_values - rows + 1):
+            rows += 1  # every row returned counts, or a capped query would pass as complete
+            if rows > max_values:
+                raise JobFailed("incomplete")
+            yield _value(accepted[index], row), accepted[index].label
 
 
 def _full(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any, crypto) -> dict:
@@ -238,6 +288,112 @@ def _full(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: 
     return counts
 
 
+def _record_value(field: fields.SourceField, values: dict) -> str | None:
+    """One accepted field of a record as a value (a name tuple joined), or ``None``."""
+    if "+" in field.field:
+        first, *middles, last = (values.get(p) for p in field.field.split("+"))
+        return field_rules.join_name(first, middles, last)
+    value = values.get(field.field)
+    return str(value) if isinstance(value, str | int | float) and not isinstance(value, bool) else None
+
+
+def _check_columns(rows_source: Any, collection: str, accepted: list[fields.SourceField], present: set[str]
+                   ) -> list[str]:
+    """The record fields to read for ``accepted``; ``incomplete`` when one is gone."""
+    if collection not in present:
+        raise JobFailed("incomplete")
+    columns = {f.name for f in rows_source.list_fields(collection)}
+    for f in accepted:
+        if not set(f.field.split("+")) <= columns or f.label is None:
+            raise JobFailed("incomplete")
+    return sorted({part for f in accepted for part in f.field.split("+")})
+
+
+def _read_records(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any, crypto,
+                  by_collection: dict[str, list[fields.SourceField]], since: dict[str, str] | None) -> dict:
+    """Read an app source (every record, or with ``since`` the changes) and commit the result."""
+    present = {c.name for c in rows_source.list_collections()} if by_collection else set()
+    seen = added = 0
+    batch: list[tuple[str, str, str, str]] = []
+    touched: set[tuple[str, str]] = set()
+    cursors: dict[str, str] = {}
+
+    def flush() -> None:
+        nonlocal added
+        ctx.lease.check()
+        if batch:
+            added += catalog.upsert_record_values(ctx.conn, crypto, job.scope_id, job.source_id, job.id, batch,
+                                                  tenant_max=ctx.config.tenant_max_values).added
+            batch.clear()
+
+    try:
+        for collection, accepted in by_collection.items():
+            ctx.lease.check()
+            wanted = _check_columns(rows_source, collection, accepted, present)
+            records = rows_source.iter_records(collection, fields=wanted) if since is None \
+                else rows_source.iter_changes(collection, wanted, since[collection])
+            for record in records:
+                seen += 1
+                if seen > source.max_values:
+                    raise JobFailed("incomplete")  # every record counts, so an endless read stops
+                if seen % LEASE_CHECK_EVERY == 0:
+                    ctx.lease.check()
+                record_id = str(record.record_ref)
+                touched.add((collection, record_id))
+                if record.metadata.get("deleted"):
+                    continue
+                batch += [(collection, record_id, value, f.label) for f in accepted
+                          if (value := _record_value(f, record.values)) is not None]
+                if len(batch) >= UPSERT_BATCH:
+                    flush()
+            position = rows_source.cursor(collection) if hasattr(rows_source, "cursor") else None
+            if position is not None:
+                cursors[collection] = str(position)
+        flush()
+    except BaseException:
+        if added:
+            _bump_after_failure(ctx, job)
+        raise
+    with ctx.conn.transaction():
+        if not jobs.hold_lease(ctx.conn, job):
+            raise LeaseLost()
+        if since is None:
+            retired = catalog.retire_unseen_records(ctx.conn, job.scope_id, job.source_id, job.id)
+        else:
+            retired = catalog.relink_records(ctx.conn, job.scope_id, job.source_id, job.id, touched)
+            cursors = {c: cursors.get(c, since[c]) for c in by_collection}
+        sources.set_cursor(ctx.conn, job.scope_id, job.source_id, cursors)
+        if added or retired or job.attempts:
+            catalog_versions.bump(ctx.conn, job.scope_id)
+        counts = {"rows_seen": seen, "values_added": added, "values_retired": retired,
+                  "read": "all" if since is None else "changes"}
+        _succeed(ctx, job, counts)
+    return counts
+
+
+def _records(ctx: Context, job: jobs.Job, source: sources.SourceInfo, rows_source: Any, crypto) -> dict:
+    """A full or incremental sync of an app source; see the module docstring."""
+    by_collection: dict[str, list[fields.SourceField]] = {}
+    for f in fields.accepted_fields(ctx.conn, job.scope_id, job.source_id):
+        by_collection.setdefault(f.collection, []).append(f)
+    stored = {c: v for c, v in source.cursor.items() if isinstance(v, str)}
+    if job.kind == "incremental" and hasattr(rows_source, "iter_changes") and set(by_collection) <= set(stored):
+        try:
+            return _read_records(ctx, job, source, rows_source, crypto, by_collection, stored)
+        except CursorExpired:
+            log.info("job %s: the source's cursor expired, reading every record", job.id)
+    return _read_records(ctx, job, source, rows_source, crypto, by_collection, None)
+
+
+def _note_expiry(ctx: Context, job: jobs.Job, rows_source: Any) -> None:
+    """Store when the credentials expire, if the source can tell."""
+    method = getattr(rows_source, "credentials_expire_at", None)
+    when = method() if method is not None else None
+    if isinstance(when, datetime) and when.tzinfo is not None:
+        ctx.lease.check()
+        sources.set_credentials_expiry(ctx.conn, job.scope_id, job.source_id, when)
+
+
 def _succeed(ctx: Context, job: jobs.Job, counts: dict, *, then: str | None = None) -> None:
     """Inside the result transaction: clear needs_attention, audit, mark the job done."""
     with scoped(ctx.conn, job.scope_id):
@@ -277,9 +433,11 @@ def execute(ctx: Context, job: jobs.Job) -> dict:
     crypto = open_scope_crypto(ctx.conn, ctx.provider, job.scope_id)
     rows_source, ctype = _open(ctx, job, source, crypto)
     try:
+        _note_expiry(ctx, job, rows_source)
         if job.kind == "sample":
-            return _sample(ctx, job, source, rows_source, ctype.family)
-        # Phase 1 connectors keep no cursor: an incremental job reads everything.
+            return _sample(ctx, job, source, rows_source, ctype)
+        if ctype.family == "app":
+            return _records(ctx, job, source, rows_source, crypto)
         return _full(ctx, job, source, rows_source, crypto)
     finally:
         try:

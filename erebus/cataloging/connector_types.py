@@ -20,23 +20,29 @@ from typing import Any
 GROUP = "erebus.source_types"
 FAMILIES = ("file", "database", "warehouse", "app")
 TIERS = ("free", "pro")
+# How the source reads a collection name it was given unquoted: as written, folded to upper
+# or lower case, or ignoring case.
+IDENTIFIER_RULES = ("exact", "upper", "lower", "insensitive")
 
 
 @dataclass(frozen=True)
 class ConnectorType:
-    """One connector type. ``default_port`` is set for types that dial a host."""
+    """One connector type. ``default_port`` is set for types that dial a host;
+    ``identifiers`` is how the source reads a name (an ``IDENTIFIER_RULES`` entry)."""
 
     id: str
     family: str
     tier: str
     setting_keys: frozenset[str]
     default_port: int | None = None
+    identifiers: str = "exact"
 
 
 _DB_KEYS = frozenset({"host", "port", "dbname", "user", "sslmode", "schemas", "collections"})
 _BUILTIN = (
-    ConnectorType("sqlite", "file", "free", frozenset({"path", "collections"})),
-    ConnectorType("postgres", "database", "free", _DB_KEYS, 5432),
+    ConnectorType("sqlite", "file", "free", frozenset({"path", "collections"}), identifiers="insensitive"),
+    ConnectorType("postgres", "database", "free", _DB_KEYS, 5432, identifiers="lower"),
+    # Table names follow lower_case_table_names, which the worker cannot see: as written.
     ConnectorType("mysql", "database", "free", _DB_KEYS, 3306),
 )
 
@@ -55,7 +61,8 @@ def load_types(eps: Iterable[Any] | None = None) -> dict[str, ConnectorType]:
     entries = metadata.entry_points(group=GROUP) if eps is None else eps
     for ep in entries:
         for t in ep.load().TYPES:
-            if not isinstance(t, ConnectorType) or t.family not in FAMILIES or t.tier not in TIERS:
+            if not isinstance(t, ConnectorType) or t.family not in FAMILIES or t.tier not in TIERS \
+                    or t.identifiers not in IDENTIFIER_RULES:
                 raise ValueError("malformed connector type")
             if t.id in types:
                 raise ValueError("connector type declared twice")
@@ -66,6 +73,11 @@ def load_types(eps: Iterable[Any] | None = None) -> dict[str, ConnectorType]:
 @cache
 def _installed() -> Mapping[str, ConnectorType]:
     return load_types()
+
+
+def installed() -> list[ConnectorType]:
+    """Every installed type (built-in and Pro), sorted by id."""
+    return sorted(_installed().values(), key=lambda t: t.id)
 
 
 def get(type_id: str) -> ConnectorType | None:

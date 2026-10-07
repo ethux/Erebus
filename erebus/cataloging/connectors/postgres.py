@@ -148,11 +148,12 @@ class PostgresRowSource:
             yield SourceRecord(f"{collection}:{ref}", {f: values[f] for f in selected}, {})
 
     def iter_distinct_values(self, collection: str, fields: list[str], limit: int) -> Iterator[tuple]:
-        """``SELECT DISTINCT`` of ``fields`` as text, all-NULL rows skipped, at most ``limit``."""
+        """``SELECT DISTINCT`` of ``fields`` as text compared byte for byte (a nondeterministic
+        collation would fold case and accents), all-NULL rows skipped, at most ``limit``."""
         from psycopg import sql
 
         table, selected, _pk = self._table(collection, fields)
-        cols = [sql.SQL("{}::text").format(sql.Identifier(f)) for f in selected]
+        cols = [sql.SQL('({}::text) COLLATE "C"').format(sql.Identifier(f)) for f in selected]
         some = sql.SQL(" OR ").join(sql.SQL("{} IS NOT NULL").format(sql.Identifier(f)) for f in selected)
         query = sql.SQL("SELECT DISTINCT {} FROM {} WHERE {} LIMIT {}").format(
             sql.SQL(", ").join(cols), table, some, sql.Literal(max(0, int(limit))))

@@ -90,11 +90,48 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 30
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart
+        env:
+          ORACLE_PASSWORD: oracle-ci-Zq7x
+        ports:
+          - "15210:1521"
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+      # Throwaway SQL Server (Developer edition, amd64 only) for the MSSQL connector's live tests.
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Mssql-ci-Zq7x
+        ports:
+          - "14330:1433"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Mssql-ci-Zq7x -Q 'SELECT 1' -b"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
     env:
       EREBUS_PG_DSN: postgresql://postgres:pg-ci-Zq9x@localhost:5432/postgres
       # The connector contract suite (SC-6) runs against this MySQL and fails without it.
       EREBUS_TEST_MYSQL_DSN: mysql://root:mysql-ci-root@127.0.0.1:13306
       EREBUS_REQUIRE_MYSQL: "1"
+      # The Pro warehouse connectors run on fakesnow and the BigQuery emulator, and fail without them.
+      EREBUS_TEST_BIGQUERY_EMULATOR: http://127.0.0.1:9050
+      EREBUS_REQUIRE_BIGQUERY: "1"
+      EREBUS_REQUIRE_SNOWFLAKE: "1"
+      # Oracle runs on this throwaway database; Databricks at the driver boundary (no emulator exists).
+      EREBUS_TEST_ORACLE_DSN: oracle://system:oracle-ci-Zq7x@127.0.0.1:15210/FREEPDB1
+      EREBUS_REQUIRE_ORACLE: "1"
+      EREBUS_REQUIRE_DATABRICKS: "1"
+      # MSSQL runs on this throwaway server; its Entra driver (an optional extra) only at the driver boundary.
+      EREBUS_TEST_MSSQL_DSN: mssql://sa:Mssql-ci-Zq7x@127.0.0.1:14330
+      EREBUS_REQUIRE_MSSQL: "1"
+      # The app connectors run on respx fixtures (the pro test extra) and fail without them.
+      EREBUS_REQUIRE_RESPX: "1"
 
     steps:
       - name: Check out repository
@@ -110,7 +147,14 @@ jobs:
         run: |
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
           python -m pip install -e '.[gateway]'
-          python -m pip install -e ./pro
+          python -m pip install -e './pro[test]'
+
+      # A service container cannot take the emulator's --project argument.
+      - name: Start the BigQuery emulator
+        run: |
+          docker run -d --name bigquery-emulator -p 127.0.0.1:9050:9050 \
+            ghcr.io/goccy/bigquery-emulator:0.8.1 --project=erebus-test
+          for _ in $(seq 30); do curl -sf http://127.0.0.1:9050/bigquery/v2/projects/erebus-test/datasets && break; sleep 2; done
 
       - name: Core pattern tests
         run: python tests/test_core_patterns.py
