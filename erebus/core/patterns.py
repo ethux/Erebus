@@ -28,30 +28,15 @@ def _overlaps_token_region(start: int, end: int,
                for token_start, token_end in regions)
 
 
-def _replace_outside_tokens(text: str, value: str, token: str) -> str:
-    """Replace ``value`` with ``token`` everywhere it appears EXCEPT inside an
-    existing token region, so already-minted tokens are never rewritten."""
-    if value not in text:
-        return text
-    chunks = []
-    cursor = 0
-    for match in TOKEN_RE.finditer(text):
-        chunks.append(text[cursor:match.start()].replace(value, token))
-        chunks.append(match.group(0))
-        cursor = match.end()
-    chunks.append(text[cursor:].replace(value, token))
-    return "".join(chunks)
-
-
 def _replace_outside_tokens_word(text: str, value: str, token: str) -> str:
-    """Like ``_replace_outside_tokens`` but only replaces whole-word matches.
-
-    Used for short known values (balanced-mode surnames, acronyms) where the
-    bare substring replace would rewrite the inside of unrelated words — a
-    stored 'Li' must tokenize "ask Li" but never mangle "Lithium"."""
+    """Replace ``value`` with ``token`` outside existing token regions, never
+    inside a word: a stored 'Li' tokenizes "ask Li" but not "Lithium", and a
+    stored 'agent' leaves "agents" alone. Letters and digits are word
+    characters, so hex ids and base64 stay intact; an underscore is a break,
+    so a stored name still tokenizes in "jansen_cv.pdf"."""
     if value not in text:
         return text
-    pattern = re.compile(rf"(?<!\w){re.escape(value)}(?!\w)")
+    pattern = re.compile(rf"(?<![^\W_]){re.escape(value)}(?![^\W_])")
     chunks = []
     cursor = 0
     for match in TOKEN_RE.finditer(text):
