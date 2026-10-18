@@ -81,6 +81,12 @@ class Boundary:
     # (generation, recheck_after, excluded_values) — see _allowance_exclusions.
     _allowance_cache: tuple = field(default=(-1, None, frozenset()), repr=False)
     _last_allowance_sweep: float = field(default=0.0, repr=False)
+    # Tokens this boundary has seen in the Known-Value store. One that is gone
+    # from it now was erased, so persist_mirror must not write it back.
+    # shortcut: a pair erased between shim start and this boundary's first sync
+    # is written back from the mirror seeded at import; fine until the
+    # TOKEN_MAP compat mirror goes.
+    _seen_in_store: set = field(default_factory=set, repr=False)
 
     @classmethod
     def from_config(cls, repo_config, project_dir: str, source: str = "") -> Boundary:
@@ -358,6 +364,7 @@ class Boundary:
         """
         view = self._refresh_view().token_view
         persisted = self.load_legacy_export()
+        self._seen_in_store.update(view)
         merged = dict(view)
         merged.update(persisted)
         # Snapshot + update only (no clear): the proxy's event loop reads the
@@ -370,12 +377,21 @@ class Boundary:
     def persist_mirror(self, mirror: dict) -> None:
         """Sync the mirror, ingest pairs the store does not hold (a degraded
         DB only buffers transients), then write-through export the legacy JSON
-        so mirror-only entries survive sessions where ingest cannot land."""
+        so mirror-only entries survive sessions where ingest cannot land.
+
+        Only pairs never seen in the store (minted here, placed in the mirror by
+        a caller, or only in the legacy JSON) are written back: a pair seen in
+        the store and gone now was erased, and the mirror keeps it in memory
+        only so old context still resolves."""
         self.sync_view_into(mirror)
         view = self._view.token_view
-        snapshot = dict(mirror)  # iterate a copy: another thread may add entries meanwhile
-        self._ingest_new_tokens({t: v for t, v in snapshot.items() if view.get(t) != v})
-        self.export_mirror(snapshot)
+        # Read before ingest: the DB's write-through export rewrites the JSON
+        # with DB rows only, dropping JSON-only pairs.
+        on_disk = self.load_legacy_export()
+        # Iterate a copy: another thread may add entries meanwhile.
+        own = {t: v for t, v in dict(mirror).items() if t not in self._seen_in_store}
+        self._ingest_new_tokens(own)
+        self.export_mirror({**view, **on_disk, **own})
 
     def recover_tokens(self, tokens: set) -> dict[str, str]:
         """Resolve unknown tokens via the DB (includes audit-log recovery,

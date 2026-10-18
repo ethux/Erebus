@@ -58,7 +58,7 @@ def _sync_mirror():
         stale = get_boundary().sync_view_into(TOKEN_MAP)
         if stale - before:
             try:  # the store is ahead of its legacy JSON export — re-sync it
-                Boundary.export_mirror(TOKEN_MAP)
+                get_boundary().persist_mirror(TOKEN_MAP)
             except Exception:
                 pass
 
