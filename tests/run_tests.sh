@@ -35,6 +35,7 @@ python tests/test_degraded_backstop.py
 python tests/test_detection_unchanged.py
 python tests/test_core_patterns.py
 python tests/test_shim_retokenize_gate.py
+python tests/test_shim_tool_hooks.py
 python tests/test_unresolved_block.py
 python tests/test_detok_write_scope.py
 python tests/test_batch_tokenize.py

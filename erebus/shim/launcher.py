@@ -8,6 +8,7 @@ the Boundary facade.
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import signal
 import subprocess
@@ -133,6 +134,13 @@ def main():
                                   "repo_config": REPO_CONFIG.__dict__})
     except Exception:
         pass
+
+    # Tool output never crosses the stdio pipe: filter it through hooks on the child.
+    try:
+        from . import hooks
+        claude_args[1:1] = ["--settings", json.dumps(hooks.start())]
+    except Exception as exc:
+        _safe_log_event(SESSION_ID, event_type="hook_error", metadata={"cwd": CWD, "error": str(exc)})
 
     if sys.stdin.isatty():
         _run_interactive(claude_args)

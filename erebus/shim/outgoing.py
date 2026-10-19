@@ -169,7 +169,7 @@ def process_outgoing(line: str) -> str:
 
     # One outgoing user message = one detection turn for the degraded signal;
     # boundary.turn() resets it on enter and warns (debounced) on exit.
-    with _state.get_boundary().turn() as turn_state:
+    with _state._KV_LOCK, _state.get_boundary().turn() as turn_state:
         if isinstance(content, str) and content:
             holder = {"text": content}
             minted, rewrote = _process_text_block(holder)
