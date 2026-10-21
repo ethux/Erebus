@@ -120,6 +120,30 @@ def _should_tokenize_entity(label: str, text: str, mode: str) -> bool:
     return True
 
 
+_DEFAULT_ALLOWED_LOWER = frozenset(name.lower() for name in DEFAULT_ALLOWED)
+
+
+def _replays_known_value(label: str, value: str, mode: str) -> bool:
+    """Whether the known-value pre-scan re-tokenizes a stored value under ``mode``.
+
+    Stored values outlive the mode and the detector run that produced them, so
+    names pass the same lists detection uses. Only _MODE_AFFECTED labels are
+    judged: secrets, structured PII and blacklisted terms always replay. Balanced
+    mode stores just the surname, so a single word still replays there, but an
+    all-lowercase person or org value is almost always a mislabelled word.
+    """
+    if label not in _MODE_AFFECTED:
+        return True
+    text = value.strip()
+    if text.lower() in _FALSE_POSITIVES or text.lower() in _DEFAULT_ALLOWED_LOWER:
+        return False
+    if mode == "relaxed":
+        return False
+    if mode == "balanced" and label in ("PERSON", "ORGANIZATION"):
+        return text != text.lower()
+    return True
+
+
 def _balanced_name_replacement(real_value: str, counters: dict) -> tuple[str, str, str] | None:
     """
     In balanced mode, replace only the last name in a multi-word person name.
