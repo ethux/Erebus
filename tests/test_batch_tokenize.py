@@ -197,7 +197,9 @@ def test_predict_entities_does_not_load_gliner_in_client_process():
     ensure_attr = next(name for name in dir(daemon) if "ensure" in name and "daemon" in name)
     gliner_attr = next(name for name in dir(detect) if "get" in name and "gliner" in name)
 
-    with patch.object(daemon, predict_attr, return_value=None) as predict:
+    # GLiNER on: this tests the daemon path, and other files switch it off at import.
+    with patch.dict(os.environ, {"EREBUS_DISABLE_GLINER": ""}), \
+         patch.object(daemon, predict_attr, return_value=None) as predict:
         with patch.object(daemon, ensure_attr) as ensure:
             with patch.object(detect, gliner_attr, side_effect=AssertionError("local GLiNER should not load")):
                 assert detect._predict_entities("Alice") == []
@@ -222,7 +224,9 @@ def test_predict_entities_many_does_not_load_gliner_in_client_process():
     ensure_attr = next(name for name in dir(daemon) if "ensure" in name and "daemon" in name)
     gliner_attr = next(name for name in dir(detect) if "get" in name and "gliner" in name)
 
-    with patch.object(daemon, batch_attr, return_value=None) as batch:
+    # GLiNER on: this tests the daemon path, and other files switch it off at import.
+    with patch.dict(os.environ, {"EREBUS_DISABLE_GLINER": ""}), \
+         patch.object(daemon, batch_attr, return_value=None) as batch:
         with patch.object(daemon, single_attr, return_value=None) as single:
             with patch.object(daemon, ensure_attr) as ensure:
                 with patch.object(detect, gliner_attr, side_effect=AssertionError("local GLiNER should not load")):

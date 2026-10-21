@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import psycopg
 from fastapi.testclient import TestClient
-from helpers import conn_dsn, fresh_db
+from gateway_helpers import conn_dsn, fresh_db
 from psycopg_pool import ConnectionPool
 
 from erebus.core.patterns import TOKEN_RE

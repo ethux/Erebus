@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from helpers import fresh_db
+from gateway_helpers import fresh_db
 
 from erebus.gateway.connectors import jobs, sources
 from erebus.gateway.crypto.keyprovider import MasterKeyKms

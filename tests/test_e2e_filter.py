@@ -14,8 +14,6 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # Unmocked calls must not reach (or boot) the real GLiNER daemon: regex only.
-os.environ["EREBUS_DISABLE_GLINER"] = "1"
-
 from erebus.filter import (
     MODES,
     detokenize,
@@ -23,6 +21,19 @@ from erebus.filter import (
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+# Regex/blacklist only, scoped to this file: a module-level assignment would
+# leak into every other test under pytest, which imports all test files first.
+_REGEX_ONLY = patch.dict(os.environ, {"EREBUS_DISABLE_GLINER": "1"})
+
+
+def setup_module(_module=None):
+    _REGEX_ONLY.start()
+
+
+def teardown_module(_module=None):
+    _REGEX_ONLY.stop()
+
 
 def _fake_entities(text, entities):
     """Build GLiNER-style entity dicts with correct offsets in the given text."""
@@ -397,6 +408,7 @@ def test_detokenize_empty_map():
 
 
 if __name__ == "__main__":
+    setup_module()
     tests = [
         test_secret_round_trip,
         test_password_round_trip,

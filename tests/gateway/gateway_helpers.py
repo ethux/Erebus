@@ -17,8 +17,8 @@ its own directory on ``sys.path`` before importing it, e.g.::
     import os, sys
     _HERE = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(_HERE, "..", ".."))  # repo root -> erebus.*
-    sys.path.insert(0, _HERE)                              # this dir   -> helpers
-    from helpers import fresh_db, provision, fake_detector, StubProvider
+    sys.path.insert(0, _HERE)                              # this dir   -> gateway_helpers
+    from gateway_helpers import fresh_db, provision, fake_detector, StubProvider
 
 ``fresh_db`` itself performs the repo-root bootstrap defensively so it works even
 if a caller forgets it.

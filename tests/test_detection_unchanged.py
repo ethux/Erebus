@@ -10,10 +10,9 @@ snapshot must stay green across the change.
 
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-os.environ["EREBUS_DISABLE_GLINER"] = "1"  # deterministic: regex/blacklist only
 
 from erebus.filter import detokenize, tokenize
 
@@ -40,6 +39,19 @@ CLEAN = [
 ]
 
 
+# Regex/blacklist only, scoped to this file: a module-level assignment would
+# leak into every other test under pytest, which imports all test files first.
+_REGEX_ONLY = patch.dict(os.environ, {"EREBUS_DISABLE_GLINER": "1"})
+
+
+def setup_module(_module=None):
+    _REGEX_ONLY.start()
+
+
+def teardown_module(_module=None):
+    _REGEX_ONLY.stop()
+
+
 def test_fixed_corpus_detection_and_tokenization_unchanged():
     for text, must_redact, marker, expected_tokens in CORPUS:
         sanitized, tokens = tokenize(text, mode="relaxed")
@@ -62,6 +74,7 @@ def test_clean_corpus_passes_through_untouched():
 
 
 if __name__ == "__main__":
+    setup_module()
     tests = [
         test_fixed_corpus_detection_and_tokenization_unchanged,
         test_clean_corpus_passes_through_untouched,

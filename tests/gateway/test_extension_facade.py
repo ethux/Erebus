@@ -18,7 +18,7 @@ os.environ.setdefault("EREBUS_DISABLE_GLINER", "1")
 
 from fastapi import Header
 from fastapi.testclient import TestClient
-from helpers import fake_detector, fresh_db, operator_bearer
+from gateway_helpers import fake_detector, fresh_db, operator_bearer
 
 from erebus.gateway.app import create_app
 from erebus.gateway.connectors import sources

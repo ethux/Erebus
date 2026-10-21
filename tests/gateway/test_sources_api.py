@@ -20,7 +20,7 @@ os.environ.setdefault("EREBUS_DISABLE_GLINER", "1")
 
 import psycopg
 from fastapi.testclient import TestClient
-from helpers import fake_detector, operator_bearer
+from gateway_helpers import fake_detector, operator_bearer
 
 from erebus.cataloging import connector_types
 from erebus.gateway import catalog
