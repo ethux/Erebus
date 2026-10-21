@@ -254,6 +254,37 @@ def test_prescan_short_value_replaces_word_bounded():
     print("  ✓ short stored values replace word-bounded (protected, no mangling)")
 
 
+def test_prescan_never_rewrites_inside_a_word():
+    """Long stored values replace word-bounded too. Regression 2026-10-16: a
+    false-positive 'agent' (PERSON) turned "agents" into "[TOKEN]s" and 'name'
+    rewrote "username". Digits are word characters too, so hex ids and base64
+    stay intact; underscores are breaks, so a stored name keeps tokenizing
+    inside file names like jansen_cv.pdf."""
+    token = "[PERSON_1_" "def004]"
+    with IsolatedBoundaryHome() as h, fake_clock():
+        boundary = _make_boundary(h)
+        with daemon_stub("down"):
+            boundary.to_model("warm up the store")  # creates the schema
+
+        con = sqlite3.connect(h.global_db_path())
+        try:
+            con.execute(
+                "INSERT INTO known_values (token, value, label, created_at, last_seen_at, source)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (token, "agent", "PERSON", "2026-01-01", "2026-01-01", "test"))
+            con.execute("UPDATE meta SET generation = generation + 1")
+            con.commit()
+        finally:
+            con.close()
+
+        with daemon_stub("down"):
+            out, _ = boundary.to_model("agents and useragent, id 3agent9, ask agent or see agent_cv.pdf")
+
+        assert "agents and useragent, id 3agent9" in out, f"known value rewritten inside a word: {out!r}"
+        assert out.count(token) == 2, f"standalone/underscored known value not retokenized: {out!r}"
+    print("  ✓ known values never rewrite the inside of a word")
+
+
 def test_escape_marker_overrides_prescan():
     """A trailing ``~`` escape must beat the pre-scan for KNOWN values.
 
@@ -307,6 +338,7 @@ if __name__ == "__main__":
         test_prescan_ignores_degenerate_stored_value,
         test_ingest_keeps_degenerate_value_transient_only,
         test_prescan_short_value_replaces_word_bounded,
+        test_prescan_never_rewrites_inside_a_word,
         test_escape_marker_overrides_prescan,
         test_allowed_names_override_prescan,
     ], "Known-value pre-scan (FR-011, SC-008)")

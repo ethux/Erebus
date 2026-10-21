@@ -10,8 +10,8 @@ scans the text once per pair on EVERY call, which does not scale (SC-010b: a
 ``KnownValuePrescan`` amortizes the cost by building the scan index ONCE per
 view generation and reusing it until the store mutates (the view generation
 strictly increases on any committed write, so a generation match means the
-known values are unchanged). The index is ``_pairs`` — (value, token,
-word_bounded) sorted longest-value-first, the exact order
+known values are unchanged). The index is ``_pairs`` — (value, token)
+sorted longest-value-first, the exact order
 ``_retokenize_known_values`` used, so the replacement semantics are identical.
 Each call still skips a pair whose value is not a substring of the text before
 doing the (more expensive) outside-token replacement.
@@ -20,37 +20,27 @@ Replacement rules per stored value:
   * degenerate (stripped length < 2): never scanned — a legacy-imported
     1-char "value" would rewrite that character everywhere in prose. The
     token stays resolvable on the from_model path.
-  * short (below the label's detection minimum, e.g. a balanced-mode 2-char
-    surname): scanned with whole-word boundaries so 'Li' tokenizes "ask Li"
-    but never mangles "Lithium". The pre-scan is the ONLY layer protecting
-    these standalone short values, so they must stay in the index.
-  * everything else: the historical bare-substring replace.
+  * everything else: replaced whole-word only, so 'Li' tokenizes "ask Li"
+    but never mangles "Lithium" or "3Li9", and a stored 'agent' leaves
+    "agents" alone.
 
-The replacement itself reuses ``patterns._replace_outside_tokens`` (and its
-word-bounded sibling), the canonical helpers that skip existing token regions;
-this module never re-implements token-shape handling.
+The replacement itself reuses ``patterns._replace_outside_tokens_word``, the
+canonical helper that skips existing token regions; this module never
+re-implements token-shape handling.
 """
 from __future__ import annotations
 
-import re
 import sys
 from collections import Counter
 
 from .knownvalues import KnownValueView
-from .modes import _MIN_LENGTHS
-from .patterns import _replace_outside_tokens, _replace_outside_tokens_word
+from .patterns import _replace_outside_tokens_word
 
-_TOKEN_LABEL_RE = re.compile(r"^\[([A-Z_]+)_\d+_[0-9a-f]+\]$")
 _GRAM = 3  # gram length of the candidate index (values shorter than this are probed always)
 
 
 def _grams(text: str) -> set[str]:
     return {text[i:i + _GRAM] for i in range(len(text) - _GRAM + 1)}
-
-
-def _label_min(token: str) -> int:
-    match = _TOKEN_LABEL_RE.match(token)
-    return _MIN_LENGTHS.get(match.group(1) if match else "", 2)
 
 
 class KnownValuePrescan:
@@ -66,9 +56,9 @@ class KnownValuePrescan:
 
     def __init__(self) -> None:
         self._generation: int = -1  # -1 != any real generation -> first build
-        # token -> (value, token, word_bounded, seq); seq keeps the historical
+        # token -> (value, token, seq); seq keeps the historical
         # tie order (view order on first build, arrival order after).
-        self._pairs: dict[str, tuple[str, str, bool, int]] = {}
+        self._pairs: dict[str, tuple[str, str, int]] = {}
         self._by_gram: dict[str, set[str]] = {}   # index gram -> tokens keyed under it
         self._key_of: dict[str, str] = {}         # token -> its index gram
         self._gram_freq: Counter[str] = Counter()  # gram -> stored values containing it
@@ -91,7 +81,7 @@ class KnownValuePrescan:
             if len(stripped) < 2:
                 skipped.append(token)
                 continue
-            self._add(token, value, len(stripped) < _label_min(token))
+            self._add(token, value)
         new_skipped = tuple(sorted(skipped))
         if new_skipped and new_skipped != self._skipped:
             # Throttled: only when the degenerate set changes, not per rebuild.
@@ -101,9 +91,9 @@ class KnownValuePrescan:
         self._skipped = new_skipped
         self._generation = view.generation
 
-    def _add(self, token: str, value: str, word_bounded: bool) -> None:
+    def _add(self, token: str, value: str) -> None:
         self._seq += 1
-        self._pairs[token] = (value, token, word_bounded, self._seq)
+        self._pairs[token] = (value, token, self._seq)
         grams = _grams(value)
         if not grams:
             self._short.add(token)
@@ -147,15 +137,13 @@ class KnownValuePrescan:
             self._rebuild(view)
         if not self._pairs:
             return text
-        for value, token, word_bounded, _seq in self._candidates(text):
+        for value, token, _seq in self._candidates(text):
             if excluded and value.lower() in excluded:
                 continue
-            if value in text:
-                replace = _replace_outside_tokens_word if word_bounded else _replace_outside_tokens
-                text = replace(text, value, token)
+            text = _replace_outside_tokens_word(text, value, token)
         return text
 
-    def _candidates(self, text: str) -> list[tuple[str, str, bool, int]]:
+    def _candidates(self, text: str) -> list[tuple[str, str, int]]:
         """The pairs (longest value first) that can occur in ``text``.
 
         A value can only match if its index gram occurs in the text, so one
@@ -167,4 +155,4 @@ class KnownValuePrescan:
         tokens = set(self._short)
         for gram in _grams(text).intersection(self._by_gram):
             tokens.update(self._by_gram[gram])
-        return sorted((self._pairs[token] for token in tokens), key=lambda pair: (-len(pair[0]), pair[3]))
+        return sorted((self._pairs[token] for token in tokens), key=lambda pair: (-len(pair[0]), pair[2]))
