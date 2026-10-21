@@ -21,7 +21,7 @@ os.environ.setdefault("EREBUS_DISABLE_GLINER", "1")
 
 import psycopg
 from fastapi.testclient import TestClient
-from helpers import operator_bearer
+from gateway_helpers import operator_bearer
 
 from erebus.gateway.app import create_app
 from erebus.gateway.crypto.keyprovider import LocalKms

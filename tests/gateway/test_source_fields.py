@@ -12,7 +12,7 @@ import uuid
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from helpers import fresh_db, restricted_role
+from gateway_helpers import fresh_db, restricted_role
 
 from erebus.gateway.connectors import fields, sources
 from erebus.gateway.connectors.fields import FieldSample

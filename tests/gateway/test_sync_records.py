@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app_fakes import APP_TYPE, FakeApp, install_app_type
-from helpers import fresh_db
+from gateway_helpers import fresh_db
 from psycopg_pool import ConnectionPool
 from sync_fakes import config
 

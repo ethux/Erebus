@@ -34,7 +34,7 @@ os.environ.setdefault("EREBUS_DISABLE_GLINER", "1")
 
 import psycopg
 from fastapi.testclient import TestClient
-from helpers import fake_detector
+from gateway_helpers import fake_detector
 
 from erebus.gateway.app import create_app
 from erebus.gateway.crypto.keyprovider import MasterKeyKms
@@ -203,7 +203,7 @@ def _forged(w):
 
 def _operator(w):
     """US2/US4/FR-007: operator credentials work on explicit targets and are audited."""
-    from helpers import operator_bearer
+    from gateway_helpers import operator_bearer
 
     check("the test's home scope key is the gateway's reserved one", _HOME == credentials_directory.OPERATOR_SCOPE_KEY)
     op = operator_bearer(w.conn)

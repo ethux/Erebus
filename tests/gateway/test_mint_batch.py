@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import psycopg
-from helpers import fresh_db
+from gateway_helpers import fresh_db
 
 from erebus.gateway.crypto.keyprovider import LocalKms
 from erebus.gateway.store.known_value_store import KnownValueStore, open_store, provision_scope

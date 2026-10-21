@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import psycopg
-from helpers import restricted_role
+from gateway_helpers import restricted_role
 from psycopg import errors as pg_errors
 
 from erebus.gateway.crypto.keyprovider import LocalKms

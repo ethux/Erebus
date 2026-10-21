@@ -40,6 +40,7 @@ dev = [
     "ruff>=0.15",
     "pylint>=3.3",
     "vulture>=2.14",
+    "pytest>=8",
 ]
 gateway = [
     "fastapi>=0.115",

@@ -1,4 +1,4 @@
-"""Smoke test for the shared gateway test harness (T003, tests/gateway/helpers.py).
+"""Smoke test for the shared gateway test harness (T003, tests/gateway/gateway_helpers.py).
 
 Proves the harness actually works by driving a real ``create_app`` round-trip with
 nothing but the harness primitives: ``fresh_db`` (createdb + all gateway migrations
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", ".."))  # repo root -> erebus.*
 sys.path.insert(0, _HERE)                              # this dir   -> helpers
 
 from fastapi.testclient import TestClient  # noqa: E402
-from helpers import StubProvider, fake_detector, fresh_db, provision  # noqa: E402
+from gateway_helpers import StubProvider, fake_detector, fresh_db, provision  # noqa: E402
 
 from erebus.gateway.app import create_app  # noqa: E402
 from erebus.gateway.crypto.keyprovider import LocalKms  # noqa: E402
