@@ -20,6 +20,9 @@ Replacement rules per stored value:
   * degenerate (stripped length < 2): never scanned — a legacy-imported
     1-char "value" would rewrite that character everywhere in prose. The
     token stays resolvable on the from_model path.
+  * a stored name the filter mode would not tokenize (relaxed mode, the
+    false-positive and default-allowed lists, lowercase names in balanced
+    mode; see modes._replays_known_value): skipped, token stays resolvable.
   * everything else: replaced whole-word only, so 'Li' tokenizes "ask Li"
     but never mangles "Lithium" or "3Li9", and a stored 'agent' leaves
     "agents" alone.
@@ -33,7 +36,8 @@ from __future__ import annotations
 import sys
 from collections import Counter
 
-from .knownvalues import KnownValueView
+from .knownvalues import KnownValueView, _label_of
+from .modes import DEFAULT_MODE, _replays_known_value
 from .patterns import _replace_outside_tokens_word
 
 _GRAM = 3  # gram length of the candidate index (values shorter than this are probed always)
@@ -122,12 +126,13 @@ class KnownValuePrescan:
                 self._gram_freq[gram] -= 1
 
     def apply(self, text: str, view: KnownValueView,
-              excluded: frozenset[str] = frozenset()) -> str:
+              excluded: frozenset[str] = frozenset(), mode: str = DEFAULT_MODE) -> str:
         """Replace every known value in ``text`` with its existing token.
 
         Longest value first, never inside an existing token. Values in
         ``excluded`` (lowercased: ``~`` escapes, active allowances,
-        allowed_names) are skipped — the user opted those out. The index is
+        allowed_names) are skipped — the user opted those out — and so are
+        stored names the filter ``mode`` would not tokenize. The index is
         updated only when ``view.generation`` changed since the last build, so
         steady-state calls pay only for the scan, not for re-sorting the store.
         """
@@ -139,6 +144,8 @@ class KnownValuePrescan:
             return text
         for value, token, _seq in self._candidates(text):
             if excluded and value.lower() in excluded:
+                continue
+            if not _replays_known_value(_label_of(token, ""), value, mode):
                 continue
             text = _replace_outside_tokens_word(text, value, token)
         return text

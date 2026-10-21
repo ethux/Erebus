@@ -108,6 +108,10 @@ Add `.erebus/pii-filter.json` to any repo:
 | **balanced** (default) | First name kept, last name tokenized | Always tokenized |
 | **relaxed** | Names kept | Always tokenized |
 
+Erebus remembers values it tokenized and replaces them again later. Remembered names follow
+the current mode too; in `balanced`, a remembered name written all in lowercase is not
+replaced again, so a word mislabelled once (`agent`, `person`) stays readable.
+
 ### Blacklist
 
 For terms that must never reach the AI, regardless of NER confidence:

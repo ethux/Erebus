@@ -137,7 +137,8 @@ class Boundary:
         impossible to escape, because tokenize() parses ``~`` only later."""
         view = self._refresh_view()
         excluded = escaped | self._allowance_exclusions(view.generation)
-        return self._prescan.apply(text, view, excluded)
+        return self._prescan.apply(text, view, excluded,
+                                   getattr(self.repo_config, "mode", DEFAULT_MODE))
 
     def retokenize_known(self, text: str) -> tuple[str, dict[str, str]]:
         """Re-run the known-value pre-scan over already-sanitized text (a

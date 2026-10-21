@@ -285,6 +285,50 @@ def test_prescan_never_rewrites_inside_a_word():
     print("  ✓ known values never rewrite the inside of a word")
 
 
+def test_prescan_follows_the_filter_mode():
+    """Stored values outlive the mode that produced them, so the pre-scan must
+    apply the current mode. Regression 2026-10-21: false-positive words
+    ('person', 'agent') stored once were re-tokenized in every mode, and
+    relaxed mode still redacted every stored name."""
+    stored = {
+        "[PERSON_1_" "def010]": ("Jansen", "PERSON"),             # a balanced-mode surname
+        "[PERSON_1_" "def011]": ("agent", "PERSON"),              # a mislabelled word
+        "[PERSON_1_" "def012]": ("person", "PERSON"),             # on the false-positive list
+        "[ORGANIZATION_1_" "def013]": ("GitHub", "ORGANIZATION"),  # a default allowed name
+        "[EMAIL_ADDRESS_1_" "def014]": ("jan@voorbeeld.test", "EMAIL_ADDRESS"),
+    }
+    text = "Jansen asked the agent about the person field on GitHub, mail jan@voorbeeld.test"
+    expected = {  # mode -> the stored values that must be replayed
+        "strict": {"Jansen", "agent", "jan@voorbeeld.test"},
+        "balanced": {"Jansen", "jan@voorbeeld.test"},
+        "relaxed": {"jan@voorbeeld.test"},
+    }
+    for mode, replayed in expected.items():
+        with IsolatedBoundaryHome() as h, fake_clock():
+            from erebus.core import Boundary
+            boundary = Boundary.from_config(h.repo_config(mode=mode), str(h.project), source="test")
+            with daemon_stub("down"):
+                boundary.to_model("warm up the store")  # creates the schema
+            con = sqlite3.connect(h.global_db_path())
+            try:
+                for token, (value, label) in stored.items():
+                    con.execute(
+                        "INSERT INTO known_values (token, value, label, created_at, last_seen_at, source)"
+                        " VALUES (?, ?, ?, ?, ?, ?)", (token, value, label, "2026-01-01", "2026-01-01", "test"))
+                con.execute("UPDATE meta SET generation = generation + 1")
+                con.commit()
+            finally:
+                con.close()
+            with daemon_stub("down"):
+                out, _ = boundary.to_model(text)
+        for token, (value, _label) in stored.items():
+            if value in replayed:
+                assert token in out, f"{mode}: stored {value!r} not replayed: {out!r}"
+            else:
+                assert token not in out and value in out, f"{mode}: stored {value!r} replayed: {out!r}"
+    print("  ✓ stored values replay only as the filter mode allows")
+
+
 def test_escape_marker_overrides_prescan():
     """A trailing ``~`` escape must beat the pre-scan for KNOWN values.
 
@@ -339,6 +383,7 @@ if __name__ == "__main__":
         test_ingest_keeps_degenerate_value_transient_only,
         test_prescan_short_value_replaces_word_bounded,
         test_prescan_never_rewrites_inside_a_word,
+        test_prescan_follows_the_filter_mode,
         test_escape_marker_overrides_prescan,
         test_allowed_names_override_prescan,
     ], "Known-value pre-scan (FR-011, SC-008)")
